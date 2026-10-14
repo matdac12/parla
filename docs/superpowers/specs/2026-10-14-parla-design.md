@@ -19,7 +19,7 @@ Streaming, LLM cleanup, per-app context, personal dictionary, voice commands, au
 
 ## Architecture
 
-Tauri v2 app (Rust backend, small TypeScript/HTML settings UI), the same stack Handy uses. Rust owns everything on the hot path so the webview never sits between key release and paste.
+Tauri v2 app (Rust backend, small TypeScript/HTML settings UI), the same stack Handy uses. Confirmed as the lightest and fastest option for this project. Rust owns everything on the hot path so the webview never sits between key release and paste.
 
 Units, each with one purpose:
 
@@ -46,12 +46,11 @@ Units, each with one purpose:
 
 v0 ships with the following. Each one is a small file implementing the trait, so adding another later is cheap.
 
-- **Local: Parakeet V3** (and optionally Whisper via GGML). Handy's author publishes a Rust crate for this (`transcribe-rs`); the implementation plan must confirm it is usable before depending on it.
+- **Local: Parakeet V3** (Whisper GGML as an optional extra) via `transcribe-rs` (MIT, by Handy's author). It wraps Parakeet, Whisper, Moonshine and others behind one `SpeechModel` trait, takes 16 kHz mono 16-bit PCM, and has Vulkan/DirectML/CUDA options on Windows. It is at v0.3 with breaking API changes and no published releases, so pin a git revision.
 - **Cloud: xAI Grok STT** (batch endpoint)
 - **Cloud: OpenAI `gpt-transcribe`**
-- **Cloud: Groq `whisper-large-v3-turbo`**
 
-ElevenLabs Scribe is a candidate for a fast follow-up. It is not in v0 unless the first benchmark makes it look necessary.
+Groq Whisper was considered and dropped from v0. ElevenLabs Scribe is a candidate for a fast follow-up. It is not in v0 unless the first benchmark makes it look necessary.
 
 Prices and latency claims in the research notes came from third-party sources and must be re-checked against provider docs when each provider is implemented.
 
@@ -79,8 +78,15 @@ A "Benchmark" action records a clip, then runs it through every enabled provider
 
 ## Prior art to borrow from
 
-- **Handy** (github.com/cjpais/Handy): Tauri v2, activation modes, shortcuts, local Parakeet/Whisper integration, paste handling. Read it for how it solves hold/toggle shortcuts and the Windows quirks listed in its README.
-- Other open-source dictation projects will be surveyed during planning for hotkey and paste handling.
+Policy: reuse before writing. Parla is a fresh, minimal Tauri app, not a Handy fork, but it copies proven patterns and code (respecting each license and keeping attribution) wherever possible.
+
+- **Handy** (github.com/cjpais/Handy, MIT): hold/toggle shortcuts (`rdev`), paste handling and its Windows quirks, local model management and downloads.
+- **transcribe-rs** (MIT): used as a dependency for all local engines. Its `openai` feature (remote engine) is worth checking before writing our own OpenAI provider.
+- **AudioBud** (jamditis/audiobud): Windows-first Handy fork; check for Windows fixes to shortcuts and paste.
+- **Oto** (0veek/oto-win, Apache-2.0): Tauri 2 + Rust Windows app with local or cloud transcription and an overlay that does not steal focus. Reference for cloud providers and the overlay.
+- **Dictata**, **Holler**: smaller Rust references for push-to-talk and paste.
+
+Licenses and what is actually reusable must be confirmed per repo when each piece is implemented.
 
 ## Definition of done for v0
 
