@@ -63,13 +63,29 @@ fn paste_with_backend(
     // Always attempt restoration, even if input injection failed.
     desktop.wait(restore_delay);
     if let Some(saved) = saved {
-        if desktop.read_text().ok().flatten().as_deref() == Some(text) {
-            if let Err(error) = desktop.write_text(&saved) {
-                eprintln!("Parla clipboard restore failed: {error}");
-            }
+        if let Err(error) = restore_clipboard(desktop, text, &saved) {
+            eprintln!("Parla clipboard restore failed after retries: {error}");
         }
     }
     result
+}
+
+#[cfg(any(windows, test))]
+fn restore_clipboard(desktop: &mut impl Desktop, pasted: &str, saved: &str) -> Result<(), String> {
+    for attempt in 0..5 {
+        // Re-read on EVERY attempt: a user copy may arrive after a failed write.
+        let result = match desktop.read_text() {
+            Ok(current) if current.as_deref() != Some(pasted) => return Ok(()),
+            Ok(_) => desktop.write_text(saved),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 4 => return Err(error),
+            Err(_) => desktop.wait(Duration::from_millis((attempt + 1) * 10)),
+        }
+    }
+    unreachable!("the final restore attempt always returns")
 }
 
 #[cfg(windows)]
@@ -95,29 +111,35 @@ impl Desktop for WindowsDesktop {
     }
 
     fn send_paste(&mut self) -> Result<(), String> {
+        let _synthetic_input = crate::hotkey::synthetic_input_guard();
         use enigo::{Direction, Key, Keyboard};
-        // Space can come up while Ctrl is physically held. Clear both sides of
-        // all shortcut modifiers first, including AltGr's Ctrl+Alt. Do not
-        // restore synthetic key-downs: a physical release racing the paste could
-        // otherwise leave modifiers stuck. The user may need to repress Ctrl
-        // to use it again if they continue physically holding it after paste.
-        for key in [
-            Key::LControl,
-            Key::RControl,
-            Key::LShift,
-            Key::RShift,
-            Key::LMenu,
-            Key::RMenu,
-            Key::LWin,
-            Key::RWin,
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        // Reuse a Ctrl already held by the user instead of synthetically
+        // releasing it. Other modifiers would change Ctrl+V, so clear only
+        // those currently down. The hook ignores all injected cleanup events.
+        // SAFETY: GetAsyncKeyState has no pointer parameters; the sign bit is
+        // the current logical state, sampled outside the keyboard callback.
+        let borrow_control = unsafe { GetAsyncKeyState(0xa2) < 0 || GetAsyncKeyState(0xa3) < 0 };
+        for (vk, key) in [
+            (0xa0, Key::LShift),
+            (0xa1, Key::RShift),
+            (0xa4, Key::LMenu),
+            (0xa5, Key::RMenu),
+            (0x5b, Key::LWin),
+            (0x5c, Key::RWin),
         ] {
+            // SAFETY: vk is a supported Windows virtual-key code.
+            if unsafe { GetAsyncKeyState(vk) } < 0 {
+                self.input
+                    .key(key, Direction::Release)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if !borrow_control {
             self.input
-                .key(key, Direction::Release)
+                .key(Key::Control, Direction::Press)
                 .map_err(|e| e.to_string())?;
         }
-        self.input
-            .key(Key::Control, Direction::Press)
-            .map_err(|e| e.to_string())?;
         // Virtual VK_V, not a layout-dependent Unicode character.
         let paste = self
             .input
@@ -129,10 +151,13 @@ impl Desktop for WindowsDesktop {
             .input
             .key(Key::Other(0x56), Direction::Release)
             .map_err(|e| e.to_string());
-        let release_ctrl = self
-            .input
-            .key(Key::Control, Direction::Release)
-            .map_err(|e| e.to_string());
+        let release_ctrl = if borrow_control {
+            Ok(())
+        } else {
+            self.input
+                .key(Key::Control, Direction::Release)
+                .map_err(|e| e.to_string())
+        };
         paste.and(release_v).and(release_ctrl)
     }
 
@@ -167,6 +192,10 @@ mod tests {
         injection_error: bool,
         user_copy: Option<String>,
         writes: Vec<String>,
+        restoring: bool,
+        read_failures: usize,
+        write_failures: usize,
+        copy_after_failed_write: Option<String>,
     }
 
     impl MemoryDesktop {
@@ -178,20 +207,36 @@ mod tests {
                 injection_error: false,
                 user_copy: None,
                 writes: vec![],
+                restoring: false,
+                read_failures: 0,
+                write_failures: 0,
+                copy_after_failed_write: None,
             }
         }
     }
 
     impl Desktop for MemoryDesktop {
         fn read_text(&mut self) -> Result<Option<String>, String> {
+            if self.restoring && self.read_failures > 0 {
+                self.read_failures -= 1;
+                return Err("clipboard occupied".into());
+            }
             Ok(self.text.clone())
         }
         fn write_text(&mut self, text: &str) -> Result<(), String> {
+            if self.restoring && self.write_failures > 0 {
+                self.write_failures -= 1;
+                if let Some(copy) = self.copy_after_failed_write.take() {
+                    self.text = Some(copy);
+                }
+                return Err("clipboard occupied".into());
+            }
             self.text = Some(text.into());
             self.writes.push(text.into());
             Ok(())
         }
         fn send_paste(&mut self) -> Result<(), String> {
+            self.restoring = true;
             if self.injection_error {
                 return Err("input failed".into());
             }
@@ -208,6 +253,48 @@ mod tests {
         fn wait(&mut self, delay: Duration) {
             self.waits.push(delay);
         }
+    }
+
+    #[test]
+    fn retries_restore_reads_after_transient_clipboard_contention() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        desktop.read_failures = 2;
+        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        assert_eq!(desktop.text.as_deref(), Some("old"));
+        assert_eq!(
+            &desktop.waits[2..],
+            [Duration::from_millis(10), Duration::from_millis(20)]
+        );
+    }
+
+    #[test]
+    fn retries_restore_write_after_comparing_again() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        desktop.write_failures = 1;
+        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        assert_eq!(desktop.text.as_deref(), Some("old"));
+        assert_eq!(desktop.write_failures, 0);
+    }
+
+    #[test]
+    fn retry_does_not_overwrite_a_copy_after_a_failed_write() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        desktop.write_failures = 1;
+        desktop.copy_after_failed_write = Some("user copy".into());
+        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        assert_eq!(desktop.text.as_deref(), Some("user copy"));
+    }
+
+    #[test]
+    fn restore_contention_is_bounded() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        desktop.read_failures = 99;
+        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        assert_eq!(desktop.read_failures, 94);
+        assert_eq!(
+            desktop.waits.iter().skip(2).sum::<Duration>(),
+            Duration::from_millis(100)
+        );
     }
 
     #[test]

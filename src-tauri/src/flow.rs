@@ -10,7 +10,14 @@ use crate::{
 
 pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let (events, receiver) = mpsc::channel();
-    let hotkey = Hotkey::new(app.handle(), events)?;
+    let hotkey = match Hotkey::new(app.handle(), events) {
+        Ok(hotkey) => hotkey,
+        Err(error) => {
+            eprintln!("Parla hotkey disabled: {error}");
+            crate::hotkey::update_tooltip(app.handle(), false);
+            return Ok(());
+        }
+    };
     // One worker preserves event order and keeps clipboard delays off the
     // shortcut dispatch and Tauri event-loop threads.
     std::thread::Builder::new()

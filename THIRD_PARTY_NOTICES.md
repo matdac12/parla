@@ -76,3 +76,37 @@ Dependencies added: `tauri-plugin-global-shortcut` (Apache-2.0 OR MIT), `arboard
 Research: https://github.com/cjpais/Handy/issues/502 (old clipboard pasted), https://github.com/cjpais/Handy/issues/2051 (held modifiers affect Ctrl+V), https://handy.computer/docs/paste-methods (increase delay for stale pastes). The 250 ms post-paste default is Parla's conservative choice, not a guarantee of consumer receipt.
 
 Windows listener dependency: https://github.com/Narsil/rdev (rdev 0.5.3, MIT, Copyright (c) 2020 Nicolas Patry). Used as a library, no rdev source copied. The raw-event hold state and key conversion table are original Parla code.
+
+## PARLA-2 fix round 1: keyboard-only Windows hook
+
+Replaced the rdev runtime dependency with `windows-sys` 0.60.2 (Apache-2.0 OR MIT). The keyboard-only hook and watchdog are original Parla code following Microsoft's API documentation:
+
+- https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
+- https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-kbdllhookstruct
+- https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
+
+The virtual-key mapping table in `src-tauri/src/hotkey.rs` is adapted from rdev 0.5.3 `src/windows/keycodes.rs`, with the missing right Windows key added. Source: https://docs.rs/crate/rdev/0.5.3/source/src/windows/keycodes.rs . Its MIT license is retained below:
+
+```text
+MIT License
+
+Copyright (c) 2020 Nicolas Patry
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
