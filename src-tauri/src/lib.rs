@@ -1,9 +1,10 @@
 mod bench;
+pub mod clip;
 mod flow;
 pub mod hotkey;
 pub mod inserter;
 mod provider;
-mod recorder;
+pub mod recorder;
 mod settings;
 mod timing;
 mod tray;
@@ -12,6 +13,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             tray::setup(app)?;
+            recorder::warm_up();
             flow::setup(app)?;
             Ok(())
         })
