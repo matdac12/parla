@@ -1,0 +1,15 @@
+[package]
+name = "parla"
+version = "0.1.0"
+description = "Fast push-to-talk dictation for Windows"
+edition = "2021"
+
+[lib]
+name = "parla_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
