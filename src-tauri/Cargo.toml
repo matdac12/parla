@@ -13,3 +13,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+
+[target.'cfg(windows)'.dependencies]
+rdev = "0.5.3"
+enigo = "0.6.1"
+arboard = { version = "3", default-features = false }
