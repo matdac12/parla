@@ -3,7 +3,7 @@
 //! https://github.com/cjpais/transcribe-rs#model-downloads
 //! Downloads never become visible to the provider until every file is verified.
 use crate::{provider::parakeet::ParakeetConfig, settings::Settings};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -55,7 +55,7 @@ pub fn setup(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> 
     use tauri::Manager;
     let dir = app
         .path()
-        .app_data_dir()
+        .app_local_data_dir()
         .map_err(|e| e.to_string())?
         .join("models")
         .join(DIRECTORY);
@@ -92,6 +92,57 @@ fn verified_files(dir: &Path, files: &[ModelFile]) -> bool {
         File::open(dir.join(file.name))
             .is_ok_and(|input| copy_verified(input, &mut std::io::sink(), file, |_| {}).is_ok())
     })
+}
+fn needs_download(dir: &Path, files: &[ModelFile], repair: bool) -> bool {
+    let complete = files.iter().all(|file| {
+        fs::metadata(dir.join(file.name)).is_ok_and(|m| m.is_file() && m.len() == file.size)
+    });
+    !complete || (repair && !verified_files(dir, files))
+}
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+fn model_client(stall: Duration) -> Result<Client, String> {
+    // Async reqwest exposes a per-read timeout; the blocking builder does not.
+    // https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html#method.read_timeout
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(stall)
+        .timeout(Duration::from_secs(60 * 60))
+        .user_agent(concat!("parla/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())
+}
+fn transport_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "Model download stalled or timed out; retry the download".into()
+    } else {
+        error.without_url().to_string()
+    }
+}
+
+/// Drives timed async body reads from the existing blocking IO worker. The
+/// bounded pending buffer preserves chunks larger than the caller's read buffer.
+struct ResponseReader {
+    response: reqwest::Response,
+    pending: std::io::Cursor<Vec<u8>>,
+}
+impl Read for ResponseReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied = self.pending.read(output)?;
+            if copied != 0 {
+                return Ok(copied);
+            }
+            let chunk = tauri::async_runtime::block_on(self.response.chunk())
+                .map_err(|e| std::io::Error::other(transport_error(e)))?;
+            match chunk {
+                Some(bytes) => self.pending = std::io::Cursor::new(bytes.to_vec()),
+                None => return Ok(0),
+            }
+        }
+    }
 }
 fn check_id(id: &str) -> Result<(), String> {
     if id == ID {
@@ -134,33 +185,33 @@ pub struct DownloadError {
     pub error: String,
 }
 
-struct DownloadGuard;
-impl DownloadGuard {
-    fn acquire() -> Result<Self, String> {
-        DOWNLOADING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+struct DownloadGuard<'a>(&'a AtomicBool);
+impl<'a> DownloadGuard<'a> {
+    fn acquire(busy: &'a AtomicBool) -> Result<Self, String> {
+        busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "Model download already in progress")?;
-        Ok(Self)
+        Ok(Self(busy))
     }
 }
-impl Drop for DownloadGuard {
+impl Drop for DownloadGuard<'_> {
     fn drop(&mut self) {
-        DOWNLOADING.store(false, Ordering::Release);
+        self.0.store(false, Ordering::Release);
     }
 }
 
 /// Runs on a blocking worker. The invoke resolves only after the done/error event.
-pub fn download(app: &tauri::AppHandle, id: &str, settings: &Settings) -> Result<(), String> {
+pub fn download(
+    app: &tauri::AppHandle,
+    id: &str,
+    settings: &Settings,
+    repair: bool,
+) -> Result<(), String> {
     check_id(id)?;
-    let guard = DownloadGuard::acquire()?;
+    let guard = DownloadGuard::acquire(&DOWNLOADING)?;
     let result: Result<(), String> = (|| {
         let target = model_dir(settings)?;
-        if !available(&target) || !verified_files(&target, FILES) {
-            let client = Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(60 * 60))
-                .build()
-                .map_err(|e| e.to_string())?;
+        if needs_download(&target, FILES, repair) {
+            let client = model_client(READ_STALL_TIMEOUT)?;
             fetch(&client, &target, |progress| {
                 let _ = app.emit("model://progress", progress);
             })?;
@@ -186,8 +237,18 @@ pub fn download(app: &tauri::AppHandle, id: &str, settings: &Settings) -> Result
     result
 }
 
-fn fetch(client: &Client, target: &Path, mut progress: impl FnMut(Progress)) -> Result<(), String> {
-    let total = FILES.iter().map(|f| f.size).sum();
+fn fetch(client: &Client, target: &Path, progress: impl FnMut(Progress)) -> Result<(), String> {
+    fetch_from(client, target, FILES, SOURCE, progress)
+}
+
+fn fetch_from(
+    client: &Client,
+    target: &Path,
+    files: &[ModelFile],
+    source: &str,
+    mut progress: impl FnMut(Progress),
+) -> Result<(), String> {
+    let total = files.iter().map(|f| f.size).sum();
     let mut downloaded = 0;
     let mut last_event = Instant::now();
     progress(Progress {
@@ -196,12 +257,16 @@ fn fetch(client: &Client, target: &Path, mut progress: impl FnMut(Progress)) -> 
         total,
     });
     install(target, |staging| {
-        for file in FILES {
-            let response = client
-                .get(format!("{SOURCE}/{}", file.name))
-                .send()
-                .and_then(|r| r.error_for_status())
-                .map_err(|e| e.without_url().to_string())?;
+        for file in files {
+            let response = tauri::async_runtime::block_on(async {
+                client.get(format!("{source}/{}", file.name)).send().await
+            })
+            .and_then(|r| r.error_for_status())
+            .map_err(transport_error)?;
+            let response = ResponseReader {
+                response,
+                pending: std::io::Cursor::new(Vec::new()),
+            };
             let mut output = File::create(staging.join(file.name)).map_err(|e| e.to_string())?;
             copy_verified(response, &mut output, file, |bytes| {
                 downloaded += bytes;
@@ -295,6 +360,101 @@ fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn small_file() -> ModelFile {
+        ModelFile {
+            name: "small",
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        }
+    }
+    // A local HTTP server exercises the real transport without downloading a model.
+    fn server(
+        body: impl FnOnce(std::net::TcpStream) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            use std::io::BufRead;
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                headers.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            body(stream);
+            headers
+        });
+        (url, worker)
+    }
+    #[test]
+    fn ordinary_download_skips_hashes_but_explicit_repair_detects_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = small_file();
+        let files = std::slice::from_ref(&spec);
+        assert!(needs_download(root.path(), files, false));
+        std::fs::write(root.path().join("small"), b"abd").unwrap();
+        assert!(!needs_download(root.path(), files, false));
+        assert!(needs_download(root.path(), files, true));
+        std::fs::write(root.path().join("small"), b"abc").unwrap();
+        assert!(!needs_download(root.path(), files, true));
+    }
+    #[test]
+    fn mid_body_stall_cleans_staging_and_releases_busy_flag() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let (source, worker) = server(move |mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na")
+                .unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(3));
+        });
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("model");
+        let started = Instant::now();
+        let client = model_client(Duration::from_millis(100)).unwrap();
+        let busy = AtomicBool::new(false);
+        let result = {
+            let _guard = DownloadGuard::acquire(&busy).unwrap();
+            fetch_from(&client, &target, &[small_file()], &source, |_| {})
+        };
+        assert!(!busy.load(Ordering::Acquire));
+        assert!(DownloadGuard::acquire(&busy).is_ok());
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(result.unwrap_err().contains("stalled"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    #[test]
+    fn read_timeout_resets_when_bytes_arrive_and_user_agent_is_sent() {
+        let (source, worker) = server(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            for byte in b"abc" {
+                stream.write_all(&[*byte]).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("model");
+        let client = model_client(Duration::from_millis(180)).unwrap();
+        let result = fetch_from(&client, &target, &[small_file()], &source, |_| {});
+        let headers = worker.join().unwrap();
+        result.unwrap();
+        assert!(headers
+            .to_lowercase()
+            .contains(&format!("user-agent: parla/{}", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(std::fs::read(target.join("small")).unwrap(), b"abc");
+    }
     #[test]
     fn installed_files_are_verified_before_skipping_download() {
         let root = tempfile::tempdir().unwrap();
@@ -360,10 +520,11 @@ mod tests {
     }
     #[test]
     fn concurrent_download_is_rejected_and_guard_resets() {
-        let guard = DownloadGuard::acquire().unwrap();
-        assert!(DownloadGuard::acquire().is_err());
+        let busy = AtomicBool::new(false);
+        let guard = DownloadGuard::acquire(&busy).unwrap();
+        assert!(DownloadGuard::acquire(&busy).is_err());
         drop(guard);
-        assert!(DownloadGuard::acquire().is_ok());
+        assert!(DownloadGuard::acquire(&busy).is_ok());
     }
     #[test]
     fn live_download_only_when_explicitly_requested() {
@@ -371,11 +532,15 @@ mod tests {
             return;
         };
         let mut last = 0;
-        fetch(&Client::new(), Path::new(&dir), |event| {
-            assert!(event.downloaded >= last);
-            assert!(event.downloaded <= event.total);
-            last = event.downloaded;
-        })
+        fetch(
+            &model_client(READ_STALL_TIMEOUT).unwrap(),
+            Path::new(&dir),
+            |event| {
+                assert!(event.downloaded >= last);
+                assert!(event.downloaded <= event.total);
+                last = event.downloaded;
+            },
+        )
         .unwrap();
         assert!(available(Path::new(&dir)));
         assert_eq!(last, FILES.iter().map(|f| f.size).sum::<u64>());
