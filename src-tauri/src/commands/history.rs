@@ -21,14 +21,12 @@ pub async fn get_history(
     .map_err(|error| error.to_string())?
 }
 
-/// Truncates `history.jsonl`. A no-op when history is disabled.
+/// Truncates `history.jsonl`, propagating a write failure to the UI.
 #[tauri::command]
 pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Some(history) = app.try_state::<History>() {
-            history.clear();
-        }
-        Ok(())
+    tauri::async_runtime::spawn_blocking(move || match app.try_state::<History>() {
+        Some(history) => history.clear(),
+        None => Err("History is disabled".into()),
     })
     .await
     .map_err(|error| error.to_string())?
