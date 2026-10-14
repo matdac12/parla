@@ -1,7 +1,7 @@
 # Parla
 
 Parla is a Windows push-to-talk dictation app focused on speed: hold a hotkey, speak, release, and paste the transcript into the focused app.
-It will compare local and cloud speech-to-text providers by latency; see the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md). The core flow records the microphone, transcribes through OpenAI, and pastes on Windows; the settings/history/benchmark pages are placeholders.
+It will compare local and cloud speech-to-text providers by latency; see the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md). The core flow records the microphone, transcribes through OpenAI or xAI, and pastes on Windows; the settings/history/benchmark pages are placeholders.
 
 ## Windows prerequisites
 
@@ -52,12 +52,19 @@ once the settings UI is available. Missing fields use defaults. Example:
       "api_key": "YOUR_OPENAI_API_KEY",
       "model": "gpt-transcribe",
       "language": null
+    },
+    "xai": {
+      "api_key": "YOUR_XAI_API_KEY",
+      "model": "grok-voice-transcribe-2.0",
+      "language": null
     }
   }
 }
 ```
 
 `OPENAI_API_KEY` overrides the file's key, including an empty environment value.
+Set `"active_provider": "xai"` to dictate through xAI. Its key can be overridden
+with `XAI_API_KEY` instead, using the same rules.
 For the current PowerShell session (then launch Parla from that session):
 
 ```powershell
@@ -84,6 +91,24 @@ One shared rustls HTTP client reuses connections, with a 5 s connect timeout and
 The live integration test uses the committed speech fixture and only contacts
 OpenAI when `OPENAI_API_KEY` is set. Run `cargo test --test openai_live -- --nocapture`
 from `src-tauri/` to see the skip note when no key is available.
+
+### xAI Grok
+
+Verified against official xAI documentation on 2026-10-15:
+[`POST https://api.x.ai/v1/stt`](https://docs.x.ai/developers/rest-api-reference/inference/speech-to-text)
+accepts multipart `file` (16 kHz mono WAV here, sent last) plus `model`, returning
+JSON with `text`; the request shape and response come from the
+[Speech to Text guide](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text).
+The default model is [`grok-voice-transcribe-2.0`](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text)
+(batch), at **[$0.10 per audio hour](https://docs.x.ai/developers/model-capabilities/audio/voice)**
+(about $0.0017/min). A non-null `language` code is also sent as the `format=true`
+option so spoken numbers and currencies are normalized. xAI's batch endpoint
+supports up to 500 MB; the client sets a 5 s connect timeout and 30 s total
+request timeout and does not retry automatically.
+
+The live integration test only contacts xAI when `XAI_API_KEY` is set. Run
+`cargo test --test xai_live -- --nocapture` from `src-tauri/` to see the skip note
+when no key is available.
 
 For the PARLA-8 UI, `invoke("save_settings", { settings })` resolves to
 `{ "warning": null }` on success, or `{ "warning": "Settings saved, but hotkey was not applied: …" }`
@@ -123,7 +148,7 @@ Provider comparison and history instructions will be added with benchmarking.
 - Paste reuses Ctrl if it is already down, and injected cleanup cannot change the physical modifier model. Cleared Alt/Shift/Windows modifiers may appear released to other apps until pressed again; test both left and right Ctrl and repeated Space presses while continuing to hold Ctrl.
 - Clipboard restoration uses a timed delay, not an acknowledgement from the receiving app. Clipboard managers or slow consumers can still cause stale/duplicate pastes. Restoration preserves text only, and comparing clipboard text does not detect copying identical text during the delay.
 - Linux can compile and test the app, but insertion is a no-op returning an unsupported error; the fallback global shortcut plugin requires a supported desktop (Wayland is not a supported target).
-- OpenAI dictation, microphone capture, and settings persistence are implemented. Local/xAI providers, settings UI, history persistence, and benchmarks come in later tickets.
+- OpenAI and xAI dictation, microphone capture, settings persistence, and failure notification/retry are implemented.
 - Transcription failures (missing configuration, network, authentication, timeout, empty audio/transcript) paste nothing. Parla shows a short notification and a red tray icon/error tooltip. Recorder startup failures also notify, but have no clip to retry. Clipboard/injection failures report an error too; an injection failure can occur after input has already reached the destination.
 - Choose **Retry last failed dictation** in the tray after fixing the issue, or call the `retry_last_failed` Tauri command. Retry uses the current settings/provider and **pastes into whichever app has focus when injection runs**. Busy requests report “Busy, try again” and keep the clip; failed retries keep it again. The item is enabled when a recovery clip exists, and disabled while a retry runs and after successful recovery.
 - The last failed clip is held in memory and saved as `<app data>/clips/last-failed.wav` (`%APPDATA%\com.matdac6.parla\clips\last-failed.wav` on Windows). It survives restarts, loads lazily on retry, and can be opened in an audio player. A new failure replaces it; a successful retry deletes it. This file contains your voice and remains until replaced or successfully retried; delete it manually while Parla is closed if unwanted. Disk-save failures are reported and leave the in-memory retry available until exit.

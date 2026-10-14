@@ -1,8 +1,8 @@
-use super::{openai::OpenAi, SttProvider};
+use super::{openai::OpenAi, xai::Xai, SttProvider};
 use std::sync::Arc;
 
 pub fn all() -> Vec<Arc<dyn SttProvider>> {
-    vec![Arc::new(OpenAi)]
+    vec![Arc::new(OpenAi), Arc::new(Xai)]
 }
 
 pub fn get(id: &str) -> Option<Arc<dyn SttProvider>> {
