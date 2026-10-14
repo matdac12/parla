@@ -142,6 +142,19 @@ SOFTWARE.
   rustls TLS), serde / serde_json (MIT OR Apache-2.0), and @tauri-apps/api
   (MIT OR Apache-2.0). See their upstream licenses and the lockfiles.
 
+## PARLA-6 xAI Grok STT provider research
+
+- Implemented `src-tauri/src/provider/xai.rs` as original Parla code against
+  xAI's own documentation (verified 2026-10-15):
+  https://docs.x.ai/developers/model-capabilities/audio/speech-to-text and
+  https://docs.x.ai/developers/rest-api-reference/inference/speech-to-text .
+  No source was copied. No new dependencies were added: the provider reuses the
+  existing blocking reqwest client (rustls TLS) and serde_json.
+- Reviewed `0veek/oto-win` (Apache-2.0, verified 2026-10-15) as a reference for
+  cloud STT providers. It supports Deepgram and OpenAI-compatible endpoints but
+  has no xAI path, so nothing was taken from it and no notice is required.
+  Upstream license: Apache-2.0.
+
 ## PARLA-7 local Parakeet inference and model management
 
 ### cjpais/Handy (MIT)

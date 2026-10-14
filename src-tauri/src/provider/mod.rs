@@ -2,6 +2,7 @@
 pub mod openai;
 pub mod parakeet;
 pub mod registry;
+pub mod xai;
 
 use crate::{clip::Clip, settings::Settings};
 use serde::Serialize;
