@@ -196,7 +196,10 @@ fn finish_session_with_error(
 ) {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     let result = match audio {
-        Err(error) => Err(error),
+        Err(error) => {
+            crate::failure::notify_error(app, &settings.active_provider, &error);
+            Err(error)
+        }
         Ok(clip) => {
             record.audio_ready = Some(timing::elapsed_ms(key_up));
             record.audio_ms = clip.duration().as_millis() as u64;
@@ -224,7 +227,7 @@ fn finish_session_with_error(
                     })
             };
             if let Err(error) = &result {
-                on_failure(app, error.clone(), clip);
+                on_failure(app, error.clone(), clip, &settings.active_provider);
             }
             result
         }
@@ -247,6 +250,9 @@ fn transcribe_and_paste(
     record: &mut DictationRecord,
     paste: impl FnOnce(&str, Duration) -> Result<Instant, String>,
 ) -> Result<(), ProviderError> {
+    if let crate::provider::Availability::Unavailable(reason) = provider.availability(settings) {
+        return Err(ProviderError::MissingConfig(reason));
+    }
     let transcript = provider.transcribe(clip, settings);
     record.provider_returned = Some(timing::elapsed_ms(key_up));
     let text = transcript?;
@@ -283,6 +289,43 @@ mod pipeline_tests {
         fn transcribe(&self, _: &crate::clip::Clip, _: &Settings) -> Result<String, ProviderError> {
             self.0.clone()
         }
+    }
+    #[test]
+    fn unavailable_provider_never_transcribes_or_pastes() {
+        struct Unavailable;
+        impl SttProvider for Unavailable {
+            fn id(&self) -> &'static str {
+                "unavailable"
+            }
+            fn display_name(&self) -> &'static str {
+                "Unavailable"
+            }
+            fn availability(&self, _: &Settings) -> Availability {
+                Availability::Unavailable("model not downloaded".into())
+            }
+            fn transcribe(
+                &self,
+                _: &crate::clip::Clip,
+                _: &Settings,
+            ) -> Result<String, ProviderError> {
+                panic!("unavailable provider must not transcribe")
+            }
+        }
+        let mut record = DictationRecord::new(SystemTime::now(), "unavailable");
+        let result = transcribe_and_paste(
+            &Unavailable,
+            &crate::clip::Clip::new(vec![1]),
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            |_, _| panic!("must not paste"),
+        );
+        assert_eq!(
+            result,
+            Err(ProviderError::MissingConfig("model not downloaded".into()))
+        );
+        assert!(record.provider_returned.is_none());
+        assert!(record.pasted.is_none());
     }
     #[test]
     fn lost_release_times_out_and_a_later_press_can_start_again() {

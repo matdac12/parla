@@ -15,6 +15,7 @@ mod tray;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             tray::setup(app)?;
             let config = settings::load(&settings::path(app.handle())?).unwrap_or_else(|error| {
@@ -23,6 +24,7 @@ pub fn run() {
             });
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
+            app.manage(failure::RetryLock::default());
             app.manage(commands::settings::SaveLock::default());
             flow::setup(app)?;
             Ok(())
@@ -30,6 +32,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::failure::retry_last_failed,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Parla");
