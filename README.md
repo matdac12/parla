@@ -46,7 +46,11 @@ Model setup and download instructions will be added with the local provider.
 
 ## Hotkey
 
-The default will be **hold Ctrl+Space**. Hotkey handling and rebinding are not implemented yet.
+Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space also works: the hold ends when Space comes up. This spike pastes the fixed string `Parla test ✓`; recording and transcription will replace it in PARLA-4. Holding the shortcut does not repeatedly paste.
+
+On Windows, a keyboard-only low-level hook observes key-down/key-up events and ignores injected input; Tauri's global-shortcut plugin reserves the accelerator so normal key handling does not consume it. `Hotkey::set_shortcut(&str)` supports runtime rebinding (for example `Ctrl+Shift+F9`); the settings UI comes later. Release the current hold before rebinding; press and release keys normally after app startup. Letters, digits, F1–F12, arrows, navigation, and common punctuation keys are supported; unsupported keys such as numpad and media keys are rejected. A failed registration retains the previous shortcut; if the default is taken at startup, Parla stays running with a disabled-hotkey tray tooltip so it can be rebound later; `Ctrl+V` is reserved for paste.
+
+Paste runs on a background worker: save nonempty clipboard text, publish the test string, wait 100 ms, reuse an already-held Ctrl (or synthesize it), clear only currently-down conflicting modifiers, send Ctrl+V with a 100 ms modifier hold, then wait **250 ms** (`DEFAULT_RESTORE_DELAY_MS`) before restoring the previous text. The caller can configure that restore delay; settings UI comes later. Clipboard restore is best effort, retries transient read/write failures up to five times with 100 ms total backoff, and rechecks for different copied text before every write. Empty or non-text clipboards are not restored: the test text remains and previous non-text formats are lost. Slow apps may require a longer restore delay.
 
 ## Benchmark
 
@@ -57,4 +61,11 @@ Provider comparison and history instructions will be added with benchmarking.
 - Everything in this repo was built on Linux; Windows behaviour has only been compiled in CI, not run.
 - This initial scaffold's Windows CI run is pending the orchestrator's push; no Windows build has been verified yet.
 - Tray visibility, Settings window focus, hide-on-close, and Quit need a manual Windows smoke test.
-- Dictation, audio capture, text insertion, providers, and real settings are not implemented yet.
+- Hotkey release and paste have not been run on Windows. Verify Notepad, a browser text field, and Windows Terminal; try both release orders, a long hold, repeated short holds, and clipboard restoration under load. Try very rapid release/repress cycles too; event transitions use raw key-up notifications.
+- A non-elevated app cannot inject paste into elevated/admin windows (Windows UIPI). Secure desktop and applications that intercept Ctrl+V are unsupported.
+- The Windows hook is keyboard-only. A 100 ms watchdog (deferred during synthetic input) ends a hold if its key-up was missed; the hook refreshes after recovery and every five seconds while idle to recover silent timeout removal. Recovery refreshes modifier state without sampling our synthetic Ctrl hold. Hook permission, keyboard layouts, IME behavior, and lock/sleep recovery still need manual Windows checks. Rebinding briefly pauses hotkey dispatch.
+- Windows Terminal must allow Ctrl+V paste. Ctrl+Space may conflict with an IME or another global shortcut; registration failure is reported during startup.
+- Paste reuses Ctrl if it is already down, and injected cleanup cannot change the physical modifier model. Cleared Alt/Shift/Windows modifiers may appear released to other apps until pressed again; test both left and right Ctrl and repeated Space presses while continuing to hold Ctrl.
+- Clipboard restoration uses a timed delay, not an acknowledgement from the receiving app. Clipboard managers or slow consumers can still cause stale/duplicate pastes. Restoration preserves text only, and comparing clipboard text does not detect copying identical text during the delay.
+- Linux can compile and test the app, but insertion is a no-op returning an unsupported error; the fallback global shortcut plugin requires a supported desktop (Wayland is not a supported target).
+- Dictation, audio capture, providers, and real settings are not implemented yet.
