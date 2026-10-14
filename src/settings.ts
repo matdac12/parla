@@ -27,12 +27,22 @@ interface ModelProgress {
   total?: number;
 }
 
+/** Shape of `model_status` from PARLA-7. */
+interface ModelStatus {
+  id: string;
+  model_dir: string;
+  available: boolean;
+  downloading: boolean;
+}
+
 interface FieldSpec {
   key: string;
   label: string;
   type: "text" | "password";
   placeholder?: string;
   envHint?: string;
+  /** Store an empty input as JSON null instead of "". */
+  nullable?: boolean;
 }
 
 const PROVIDER_FIELDS: Record<string, FieldSpec[]> = {
@@ -46,7 +56,6 @@ const PROVIDER_FIELDS: Record<string, FieldSpec[]> = {
   ],
 };
 
-const MODEL_STATUS_KEYS = ["downloaded", "present", "ready", "available", "installed"] as const;
 const MODIFIER_CODES = new Set([
   "ControlLeft",
   "ControlRight",
@@ -187,7 +196,7 @@ function buildField(providerId: string, spec: FieldSpec, config: Record<string, 
   const current = config[spec.key];
   input.value = typeof current === "string" ? current : "";
   input.addEventListener("input", () => {
-    config[spec.key] = input.value;
+    config[spec.key] = spec.nullable && input.value.trim() === "" ? null : input.value;
     updateDirty();
   });
 
@@ -208,11 +217,13 @@ function buildField(providerId: string, spec: FieldSpec, config: Record<string, 
 
 interface ParakeetUi {
   status: HTMLParagraphElement;
+  dir: HTMLParagraphElement;
   bar: HTMLDivElement;
   fill: HTMLDivElement;
   button: HTMLButtonElement;
 }
 
+/** Missing-command rejection: the command exists only once PARLA-7 is merged. */
 function isMissingCommand(error: unknown): boolean {
   const text = String(error).toLowerCase();
   return (
@@ -220,33 +231,8 @@ function isMissingCommand(error: unknown): boolean {
   );
 }
 
-function modelReady(info: unknown): boolean {
-  if (!info || typeof info !== "object") return false;
-  const record = info as Record<string, unknown>;
-  for (const key of MODEL_STATUS_KEYS) {
-    if (typeof record[key] === "boolean") return record[key] as boolean;
-  }
-  return false;
-}
-
-function modelSummary(info: unknown): string {
-  if (info === null || info === undefined) return "Model status unavailable.";
-  if (typeof info === "string") return info;
-  if (typeof info === "object") {
-    const record = info as Record<string, unknown>;
-    if (modelReady(info)) return "Model ready.";
-    for (const key of MODEL_STATUS_KEYS) {
-      if (typeof record[key] === "boolean") return "Model not downloaded yet.";
-    }
-    if (typeof record.path === "string" && record.path) return `Model files: ${record.path}`;
-    try {
-      return JSON.stringify(info);
-    } catch {
-      return "Model status unavailable.";
-    }
-  }
-  return String(info);
-}
+// Set by setupParakeet so a successful save can re-check the model status.
+let refreshParakeetStatus: (() => Promise<void>) | null = null;
 
 function setupParakeet(providerId: string, ui: ParakeetUi): void {
   let unavailable = false;
@@ -254,12 +240,29 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
     ui.status.textContent = text;
     ui.status.classList.toggle("error", isError);
   };
+  const setDir = (dir: unknown): void => {
+    ui.dir.textContent = typeof dir === "string" && dir ? `Model directory: ${dir}` : "";
+  };
+  const showProgress = (visible: boolean): void => {
+    ui.bar.hidden = !visible;
+  };
 
   const refresh = async (): Promise<void> => {
     try {
-      const info = await invoke<unknown>("model_status", { id: providerId });
-      setMessage(modelSummary(info));
-      ui.button.disabled = modelReady(info);
+      const info = await invoke<ModelStatus>("model_status", { id: providerId });
+      setDir(info.model_dir);
+      showProgress(Boolean(info.downloading));
+      if (info.downloading) {
+        setMessage("Downloading…");
+        ui.button.disabled = true;
+      } else if (info.available) {
+        setMessage("Model ready.");
+        ui.fill.style.width = "100%";
+        ui.button.disabled = true;
+      } else {
+        setMessage("Model not downloaded yet.");
+        ui.button.disabled = false;
+      }
     } catch (error) {
       if (isMissingCommand(error)) {
         unavailable = true;
@@ -274,11 +277,13 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
   ui.button.addEventListener("click", async () => {
     if (unavailable) return;
     ui.button.disabled = true;
-    ui.bar.hidden = false;
+    showProgress(true);
     ui.fill.style.width = "0%";
     setMessage("Downloading…");
     try {
+      // Resolves after completion, rejects on failure / already downloading / unknown id.
       await invoke("download_model", { id: providerId });
+      await refresh();
     } catch (error) {
       if (isMissingCommand(error)) {
         unavailable = true;
@@ -287,13 +292,13 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
         setMessage(String(error), true);
         ui.button.disabled = false;
       }
-      ui.bar.hidden = true;
+      showProgress(false);
     }
   });
 
   void listen<ModelProgress>("model://progress", (event) => {
     if (event.payload?.id !== providerId) return;
-    ui.bar.hidden = false;
+    showProgress(true);
     const { downloaded, total } = event.payload;
     if (typeof downloaded === "number" && typeof total === "number" && total > 0) {
       const percent = Math.min(100, Math.round((downloaded / total) * 100));
@@ -307,25 +312,42 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
     if (event.payload?.id && event.payload.id !== providerId) return;
     ui.fill.style.width = "100%";
     setMessage("Model downloaded.");
-    ui.bar.hidden = true;
+    showProgress(false);
     ui.button.disabled = true;
     void refresh();
   });
-  void listen<{ id?: string; message?: string }>("model://error", (event) => {
+  void listen<{ id?: string; error?: string }>("model://error", (event) => {
     if (event.payload?.id && event.payload.id !== providerId) return;
-    setMessage(event.payload?.message ?? "Model download failed.", true);
-    ui.bar.hidden = true;
+    setMessage(event.payload?.error ?? "Model download failed.", true);
+    showProgress(false);
     ui.button.disabled = false;
   });
 
+  refreshParakeetStatus = refresh;
   void refresh();
 }
 
-function buildParakeet(providerId: string): HTMLElement {
+function buildParakeet(providerId: string, settings: Settings): HTMLElement {
   const wrapper = document.createElement("div");
   wrapper.className = "field";
 
+  const config = providerSection(settings, providerId);
+  wrapper.append(
+    buildField(
+      providerId,
+      {
+        key: "model_dir",
+        label: "Model directory",
+        type: "text",
+        placeholder: "Default location",
+        nullable: true,
+      },
+      config,
+    ),
+  );
+
   const status = textEl("p", "Checking model…", "model-status") as HTMLParagraphElement;
+  const dir = textEl("p", "", "hint") as HTMLParagraphElement;
   const bar = document.createElement("div");
   bar.className = "progress";
   bar.hidden = true;
@@ -338,8 +360,8 @@ function buildParakeet(providerId: string): HTMLElement {
   button.className = "secondary";
   button.textContent = "Download model";
 
-  wrapper.append(status, bar, button);
-  setupParakeet(providerId, { status, bar, fill, button });
+  wrapper.append(status, dir, bar, button);
+  setupParakeet(providerId, { status, dir, bar, fill, button });
   return wrapper;
 }
 
@@ -353,7 +375,7 @@ function renderProviderConfig(): void {
     card.append(textEl("h2", provider.display_name));
 
     if (provider.id === "parakeet") {
-      card.append(buildParakeet(provider.id));
+      card.append(buildParakeet(provider.id, settings));
     } else if (PROVIDER_FIELDS[provider.id]) {
       const config = providerSection(settings, provider.id);
       for (const spec of PROVIDER_FIELDS[provider.id]) {
@@ -434,6 +456,7 @@ async function save(): Promise<void> {
       setStatus("Settings saved.", "success");
     }
     await refreshProviders();
+    await refreshParakeetStatus?.();
   } catch (error) {
     setStatus(String(error), "error");
   } finally {
