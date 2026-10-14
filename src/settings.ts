@@ -56,6 +56,23 @@ const PROVIDER_FIELDS: Record<string, FieldSpec[]> = {
   ],
 };
 
+/** Main keys the Windows listener accepts (mirrors hotkey.rs key_map!).
+ *  Modifiers are handled separately; Escape stays reserved for cancelling. */
+function supportedKeyCodes(): Set<string> {
+  const keys = [
+    "Space", "Tab", "Backspace", "Delete", "Insert", "Home", "End",
+    "PageUp", "PageDown", "CapsLock", "NumLock", "PrintScreen", "ScrollLock",
+    "Pause", "Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Backquote", "Minus", "Equal", "BracketLeft", "BracketRight", "Semicolon",
+    "Quote", "Backslash", "IntlBackslash", "Comma", "Period", "Slash",
+  ];
+  for (let f = 1; f <= 12; f += 1) keys.push(`F${f}`);
+  for (let c = 65; c <= 90; c += 1) keys.push(`Key${String.fromCharCode(c)}`);
+  for (let d = 0; d <= 9; d += 1) keys.push(`Digit${d}`);
+  return new Set(keys);
+}
+
+const SUPPORTED_KEYS = supportedKeyCodes();
 const MODIFIER_CODES = new Set([
   "ControlLeft",
   "ControlRight",
@@ -82,6 +99,7 @@ const els = {
   providerConfig: byId<HTMLDivElement>("provider-config"),
   hotkey: byId<HTMLInputElement>("hotkey"),
   capture: byId<HTMLButtonElement>("capture"),
+  captureHint: byId<HTMLParagraphElement>("capture-hint"),
   delay: byId<HTMLInputElement>("delay"),
   status: byId<HTMLSpanElement>("status"),
   save: byId<HTMLButtonElement>("save"),
@@ -92,6 +110,8 @@ const state: { settings: Settings | null; providers: ProviderInfo[]; baseline: s
   providers: [],
   baseline: "",
 };
+
+let saving = false;
 
 function textEl(tag: string, text: string, className?: string): HTMLElement {
   const element = document.createElement(tag);
@@ -109,7 +129,7 @@ function setStatus(text: string, kind: "success" | "warning" | "error" | "dirty"
 function updateDirty(): void {
   if (!state.settings) return;
   const dirty = JSON.stringify(state.settings) !== state.baseline;
-  els.save.disabled = !dirty;
+  els.save.disabled = saving || !dirty;
   if (dirty) {
     if (els.status.dataset.kind !== "error" && els.status.dataset.kind !== "warning") {
       setStatus("Unsaved changes.", "dirty");
@@ -234,8 +254,11 @@ function isMissingCommand(error: unknown): boolean {
 // Set by setupParakeet so a successful save can re-check the model status.
 let refreshParakeetStatus: (() => Promise<void>) | null = null;
 
-function setupParakeet(providerId: string, ui: ParakeetUi): void {
+async function setupParakeet(providerId: string, ui: ParakeetUi): Promise<void> {
   let unavailable = false;
+  // Invalidate in-flight status reads when a click or a terminal event starts,
+  // so a slow initial model_status cannot clobber the download state.
+  let statusToken = 0;
   const setMessage = (text: string, isError = false): void => {
     ui.status.textContent = text;
     ui.status.classList.toggle("error", isError);
@@ -248,8 +271,10 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
   };
 
   const refresh = async (): Promise<void> => {
+    const token = ++statusToken;
     try {
       const info = await invoke<ModelStatus>("model_status", { id: providerId });
+      if (token !== statusToken) return;
       setDir(info.model_dir);
       showProgress(Boolean(info.downloading));
       if (info.downloading) {
@@ -264,6 +289,7 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
         ui.button.disabled = false;
       }
     } catch (error) {
+      if (token !== statusToken) return;
       if (isMissingCommand(error)) {
         unavailable = true;
         setMessage("Model download is not available in this build.", true);
@@ -276,6 +302,7 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
 
   ui.button.addEventListener("click", async () => {
     if (unavailable) return;
+    statusToken += 1;
     ui.button.disabled = true;
     showProgress(true);
     ui.fill.style.width = "0%";
@@ -284,6 +311,7 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
       // Resolves after completion, rejects on failure / already downloading / unknown id.
       await invoke("download_model", { id: providerId });
       await refresh();
+      await refreshProviders();
     } catch (error) {
       if (isMissingCommand(error)) {
         unavailable = true;
@@ -296,35 +324,41 @@ function setupParakeet(providerId: string, ui: ParakeetUi): void {
     }
   });
 
-  void listen<ModelProgress>("model://progress", (event) => {
-    if (event.payload?.id !== providerId) return;
-    showProgress(true);
-    const { downloaded, total } = event.payload;
-    if (typeof downloaded === "number" && typeof total === "number" && total > 0) {
-      const percent = Math.min(100, Math.round((downloaded / total) * 100));
-      ui.fill.style.width = `${percent}%`;
-      setMessage(`Downloading… ${percent}%`);
-    } else {
-      setMessage("Downloading…");
-    }
-  });
-  void listen<{ id?: string }>("model://done", (event) => {
-    if (event.payload?.id && event.payload.id !== providerId) return;
-    ui.fill.style.width = "100%";
-    setMessage("Model downloaded.");
-    showProgress(false);
-    ui.button.disabled = true;
-    void refresh();
-  });
-  void listen<{ id?: string; error?: string }>("model://error", (event) => {
-    if (event.payload?.id && event.payload.id !== providerId) return;
-    setMessage(event.payload?.error ?? "Model download failed.", true);
-    showProgress(false);
-    ui.button.disabled = false;
-  });
+  // Attach listeners before the first status read so no event is missed.
+  await Promise.all([
+    listen<ModelProgress>("model://progress", (event) => {
+      if (event.payload?.id !== providerId) return;
+      showProgress(true);
+      const { downloaded, total } = event.payload;
+      if (typeof downloaded === "number" && typeof total === "number" && total > 0) {
+        const percent = Math.min(100, Math.round((downloaded / total) * 100));
+        ui.fill.style.width = `${percent}%`;
+        setMessage(`Downloading… ${percent}%`);
+      } else {
+        setMessage("Downloading…");
+      }
+    }),
+    listen<{ id?: string }>("model://done", (event) => {
+      if (event.payload?.id && event.payload.id !== providerId) return;
+      statusToken += 1;
+      ui.fill.style.width = "100%";
+      setMessage("Model downloaded.");
+      showProgress(false);
+      ui.button.disabled = true;
+      void refresh();
+      void refreshProviders();
+    }),
+    listen<{ id?: string; error?: string }>("model://error", (event) => {
+      if (event.payload?.id && event.payload.id !== providerId) return;
+      statusToken += 1;
+      setMessage(event.payload?.error ?? "Model download failed.", true);
+      showProgress(false);
+      ui.button.disabled = false;
+    }),
+  ]);
 
   refreshParakeetStatus = refresh;
-  void refresh();
+  await refresh();
 }
 
 function buildParakeet(providerId: string, settings: Settings): HTMLElement {
@@ -361,7 +395,7 @@ function buildParakeet(providerId: string, settings: Settings): HTMLElement {
   button.textContent = "Download model";
 
   wrapper.append(status, dir, bar, button);
-  setupParakeet(providerId, { status, dir, bar, fill, button });
+  void setupParakeet(providerId, { status, dir, bar, fill, button });
   return wrapper;
 }
 
@@ -399,11 +433,22 @@ async function refreshProviders(): Promise<void> {
 
 let captureActive = false;
 
+function showCaptureHint(text: string): void {
+  els.captureHint.textContent = text;
+  els.captureHint.hidden = false;
+}
+
+function clearCaptureHint(): void {
+  els.captureHint.textContent = "";
+  els.captureHint.hidden = true;
+}
+
 function stopCapture(): void {
   if (!captureActive) return;
   captureActive = false;
   els.capture.textContent = "Record keys";
   els.capture.classList.remove("capturing");
+  clearCaptureHint();
   window.removeEventListener("keydown", onCaptureKey, true);
 }
 
@@ -414,7 +459,14 @@ function onCaptureKey(event: KeyboardEvent): void {
     stopCapture();
     return;
   }
+  // Modifiers are not main keys; keep recording until a real key arrives.
   if (MODIFIER_CODES.has(event.code)) return;
+  if (!SUPPORTED_KEYS.has(event.code)) {
+    showCaptureHint(
+      `“${event.code}” is not supported. Use letters, digits, F1–F12, arrows, or punctuation.`,
+    );
+    return;
+  }
   const parts: string[] = [];
   if (event.ctrlKey) parts.push("Ctrl");
   if (event.shiftKey) parts.push("Shift");
@@ -433,23 +485,28 @@ function startCapture(): void {
   captureActive = true;
   els.capture.textContent = "Press keys… (Esc cancels)";
   els.capture.classList.add("capturing");
+  clearCaptureHint();
   window.addEventListener("keydown", onCaptureKey, true);
 }
 
 async function save(): Promise<void> {
   const settings = state.settings;
-  if (!settings) return;
+  if (!settings || saving) return;
   const delay = Number.parseInt(els.delay.value, 10);
   if (!Number.isFinite(delay) || delay < 50 || delay > 2000) {
     setStatus("Restore delay must be between 50 and 2000 ms.", "error");
     return;
   }
   settings.restore_delay_ms = delay;
+  // Snapshot exactly what is submitted. Edits made while the save is in flight
+  // are not part of it, so they stay "unsaved" instead of being marked persisted.
+  const submitted: Settings = JSON.parse(JSON.stringify(settings));
+  saving = true;
   els.save.disabled = true;
   setStatus("Saving…");
   try {
-    const result = await invoke<SaveResult>("save_settings", { settings });
-    state.baseline = JSON.stringify(settings);
+    const result = await invoke<SaveResult>("save_settings", { settings: submitted });
+    state.baseline = JSON.stringify(submitted);
     if (result.warning) {
       setStatus(result.warning, "warning");
     } else {
@@ -460,6 +517,7 @@ async function save(): Promise<void> {
   } catch (error) {
     setStatus(String(error), "error");
   } finally {
+    saving = false;
     updateDirty();
   }
 }
