@@ -1,6 +1,7 @@
 //! Small synchronous provider interface; callers run it on a blocking worker.
 pub mod openai;
 pub mod registry;
+pub mod xai;
 
 use crate::{clip::Clip, settings::Settings};
 use serde::Serialize;
