@@ -58,7 +58,7 @@ pub fn load(path: &Path) -> Result<Settings, String> {
 }
 
 /// Write then replace, so an interrupted write does not truncate settings.json.
-/// Callers serialize saves using the shared settings write lock.
+/// Callers serialize saves using commands::settings::SaveLock.
 pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     use std::io::Write;
     let parent = path.parent().ok_or("Settings path has no parent")?;

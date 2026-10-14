@@ -26,6 +26,11 @@ struct HoldGate {
 }
 impl HoldGate {
     fn press(&mut self, busy: bool) -> bool {
+        // A session may have timed out without receiving its release. Once
+        // its worker exits, the next genuine press can recover that stale hold.
+        if self.holding && self.accepted && !busy {
+            self.release();
+        }
         if self.holding {
             return false;
         }
@@ -142,19 +147,30 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
-    let Ok(key_up) = released.recv() else {
-        if let Ok(recorder) = recording {
-            recorder.stop();
-        }
-        return;
-    };
-    finish_session(
-        app,
-        recording.map(|recorder| recorder.stop()),
-        &settings,
-        started_at,
-        key_up,
-    );
+    let (key_up, hold_error) = wait_for_release(&released, Duration::from_secs(120));
+    let audio = recording.map(|recorder| recorder.stop());
+    if hold_error.is_some() {
+        finish_session_with_error(app, audio, &settings, started_at, key_up, hold_error);
+    } else {
+        finish_session(app, audio, &settings, started_at, key_up);
+    }
+}
+
+fn wait_for_release(
+    released: &mpsc::Receiver<Instant>,
+    limit: Duration,
+) -> (Instant, Option<String>) {
+    match released.recv_timeout(limit) {
+        Ok(key_up) => (key_up, None),
+        Err(mpsc::RecvTimeoutError::Timeout) => (
+            Instant::now(),
+            Some(format!("hold exceeded {} s", limit.as_secs())),
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => (
+            Instant::now(),
+            Some("Hotkey release channel disconnected".into()),
+        ),
+    }
 }
 
 /// Reusable completion path for PARLA-9: acquire DictationState::try_begin on a
@@ -166,6 +182,17 @@ pub fn finish_session(
     settings: &Settings,
     started_at: SystemTime,
     key_up: Instant,
+) {
+    finish_session_with_error(app, audio, settings, started_at, key_up, None);
+}
+
+fn finish_session_with_error(
+    app: &tauri::AppHandle,
+    audio: Result<crate::clip::Clip, ProviderError>,
+    settings: &Settings,
+    started_at: SystemTime,
+    key_up: Instant,
+    hold_error: Option<String>,
 ) {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     let result = match audio {
@@ -202,9 +229,12 @@ pub fn finish_session(
             result
         }
     };
-    if let Err(error) = result {
-        record.error = Some(error.to_string());
-    }
+    record.error = match (hold_error, result.err()) {
+        (Some(hold), Some(error)) => Some(format!("{hold}; {error}")),
+        (Some(hold), None) => Some(hold),
+        (None, Some(error)) => Some(error.to_string()),
+        (None, None) => None,
+    };
     // The one completion sink for successful and failed dictations.
     timing::record(app, record);
 }
@@ -253,6 +283,27 @@ mod pipeline_tests {
         fn transcribe(&self, _: &crate::clip::Clip, _: &Settings) -> Result<String, ProviderError> {
             self.0.clone()
         }
+    }
+    #[test]
+    fn lost_release_times_out_and_a_later_press_can_start_again() {
+        let (_sender, receiver) = mpsc::channel();
+        let state = DictationState::default();
+        let mut gate = HoldGate::default();
+        assert!(gate.press(state.is_busy()));
+        let guard = state.try_begin().unwrap();
+        let (_, error) = wait_for_release(&receiver, Duration::from_millis(1));
+        assert!(error.unwrap().starts_with("hold exceeded"));
+        drop(guard);
+        assert!(gate.press(state.is_busy()));
+    }
+    #[test]
+    fn real_release_keeps_its_timestamp_without_timeout_error() {
+        let (sender, receiver) = mpsc::channel();
+        let key_up = Instant::now();
+        sender.send(key_up).unwrap();
+        let (observed, error) = wait_for_release(&receiver, Duration::from_secs(120));
+        assert_eq!(observed, key_up);
+        assert!(error.is_none());
     }
     #[test]
     fn shared_gate_prevents_retry_overlap_and_recovers_after_worker_exit() {

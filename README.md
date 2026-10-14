@@ -85,13 +85,23 @@ The live integration test uses the committed speech fixture and only contacts
 OpenAI when `OPENAI_API_KEY` is set. Run `cargo test --test openai_live -- --nocapture`
 from `src-tauri/` to see the skip note when no key is available.
 
+For the PARLA-8 UI, `invoke("save_settings", { settings })` resolves to
+`{ "warning": null }` on success, or `{ "warning": "Settings saved, but hotkey was not applied: …" }`
+when persistence succeeded but runtime rebinding failed. Show that warning without
+reporting the save as failed: API keys/provider/delay and the requested hotkey are
+already persisted. The previous runtime binding remains active (or the listener
+stays unavailable). Only a changed hotkey is reapplied. Disk failures reject the
+invoke and leave runtime/shared settings unchanged. `get_settings` continues to
+return the complete saved settings object. Saves are serialized separately from
+the shared settings lock; neither disk IO nor main-thread rebinding holds that lock.
+
 ## Local model (Parakeet)
 
 Model setup and download instructions will be added with the local provider.
 
 ## Hotkey
 
-Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space also works: the hold ends when Space comes up. Key-down starts microphone capture (including the recorder’s 150 ms pre-roll); Space-up stops it, transcribes with the selected provider, and pastes the raw transcript. New holds during recording finalization, transcription, or clipboard restoration are ignored through their release; nothing is queued. Each accepted hold snapshots settings, so saves affect the next dictation.
+Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space also works: the hold ends when Space comes up. Key-down starts microphone capture (including the recorder’s 150 ms pre-roll); Space-up stops it, transcribes with the selected provider, and pastes the raw transcript. New holds during recording finalization, transcription, or clipboard restoration are ignored through their release; nothing is queued. Each accepted hold snapshots settings, so saves affect the next dictation. If no release arrives within 120 seconds after recording starts, Parla stops and transcribes the captured clip as a forced release, records `hold exceeded 120 s`, then frees the session after transcription/paste finishes. A later press can recover the stale hold. A disconnected release channel also forces completion.
 
 On Windows, a keyboard-only low-level hook observes key-down/key-up events and ignores injected input; Tauri's global-shortcut plugin reserves the accelerator so normal key handling does not consume it. `Hotkey::set_shortcut(&str)` supports runtime rebinding (for example `Ctrl+Shift+F9`); the settings UI comes later. Release the current hold before rebinding; press and release keys normally after app startup. Letters, digits, F1–F12, arrows, navigation, and common punctuation keys are supported; unsupported keys such as numpad and media keys are rejected. A failed registration retains the previous shortcut; if the default is taken at startup, Parla stays running with a disabled-hotkey tray tooltip so it can be rebound later; `Ctrl+V` is reserved for paste.
 
@@ -115,6 +125,6 @@ Provider comparison and history instructions will be added with benchmarking.
 - Linux can compile and test the app, but insertion is a no-op returning an unsupported error; the fallback global shortcut plugin requires a supported desktop (Wayland is not a supported target).
 - OpenAI dictation, microphone capture, and settings persistence are implemented. Local/xAI providers, settings UI, history persistence, retry UI, and benchmarks come in later tickets.
 - Provider errors paste nothing. The last failed clip is retained only in memory; there is no notification/retry action yet. Empty audio/transcripts are treated as failures. Recorder startup failures are logged and emitted in the timing event without a clip.
-- Settings are loaded at startup. Editing the JSON externally requires a restart; `save_settings` applies the hotkey and restore delay at runtime. A failed persisted hotkey registration leaves the default binding in place if available.
-- Timing emits `dictation://recorded` and logs transcripts/errors; history is not persisted yet. Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
+- Settings are loaded at startup. Editing the JSON externally requires a restart; `save_settings` persists settings first, applies a changed hotkey with a nonfatal warning on failure, and uses the restore delay for the next dictation. A failed persisted hotkey registration leaves the default binding in place if available.
+- Timing emits `dictation://recorded` and logs stage timings, transcript length and failure status only (no transcript or raw provider error body); history is not persisted yet. Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
 - Real API transcription and end-to-end Windows dictation still require a configured key and a manual smoke test. The default model follows the spec; its latency has not been compared on this machine.

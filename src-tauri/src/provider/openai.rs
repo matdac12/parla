@@ -78,7 +78,7 @@ impl SttProvider for OpenAi {
         let response = client.execute(request).map_err(map_transport)?;
         let status = response.status().as_u16();
         let body = response.text().map_err(map_transport)?;
-        parse_response(status, &body, &config.api_key)
+        parse_response(status, &body)
     }
 }
 
@@ -145,13 +145,9 @@ fn classify_transport(timeout: bool, message: String) -> ProviderError {
         ProviderError::Network(message)
     }
 }
-fn parse_response(status: u16, body: &str, key: &str) -> Result<String, ProviderError> {
-    // Some upstream failures echo request details. Never emit a configured key.
-    let safe_body = if key.is_empty() {
-        body.to_owned()
-    } else {
-        body.replace(key, "[redacted]")
-    };
+fn parse_response(status: u16, body: &str) -> Result<String, ProviderError> {
+    // Never retain remote error bodies: they may echo masked keys, transcript
+    // content, request details, or other secrets that exact-key masking misses.
     match status {
         200..=299 => {
             #[derive(Deserialize)]
@@ -162,10 +158,12 @@ fn parse_response(status: u16, body: &str, key: &str) -> Result<String, Provider
                 .map(|value| value.text)
                 .map_err(|_| ProviderError::Other("Invalid OpenAI transcription JSON".into()))
         }
-        401 | 403 => Err(ProviderError::Auth(safe_body)),
+        401 | 403 => Err(ProviderError::Auth(format!(
+            "OpenAI authentication rejected (HTTP {status})"
+        ))),
         _ => Err(ProviderError::Http {
             status,
-            body: safe_body,
+            body: String::new(),
         }),
     }
 }
@@ -221,26 +219,28 @@ mod tests {
     #[test]
     fn parses_json_and_rejects_missing_text() {
         assert_eq!(
-            parse_response(200, r#"{"text":"Hello ✓","usage":{}}"#, "").unwrap(),
+            parse_response(200, r#"{"text":"Hello ✓","usage":{}}"#).unwrap(),
             "Hello ✓"
         );
         assert!(matches!(
-            parse_response(200, r#"{"error":"bad"}"#, ""),
+            parse_response(200, r#"{"error":"bad"}"#),
             Err(ProviderError::Other(_))
         ));
     }
     #[test]
     fn maps_auth_http_timeout_and_network_without_keys() {
         assert_eq!(
-            parse_response(401, "bad secret", "secret"),
-            Err(ProviderError::Auth("bad [redacted]".into()))
+            parse_response(401, "private body sk-masked123*** xai-partial***"),
+            Err(ProviderError::Auth(
+                "OpenAI authentication rejected (HTTP 401)".into()
+            ))
         );
         for status in [429, 500, 503] {
             assert_eq!(
-                parse_response(status, "failed", ""),
+                parse_response(status, "private body sk-masked123*** xai-partial***"),
                 Err(ProviderError::Http {
                     status,
-                    body: "failed".into()
+                    body: String::new()
                 })
             );
         }

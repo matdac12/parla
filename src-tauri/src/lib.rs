@@ -23,6 +23,7 @@ pub fn run() {
             });
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
+            app.manage(commands::settings::SaveLock::default());
             flow::setup(app)?;
             Ok(())
         })
