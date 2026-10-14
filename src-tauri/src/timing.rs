@@ -4,13 +4,17 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// Wall clock is Unix milliseconds. Stage times are monotonic milliseconds
 /// relative to key-up (always zero); absent stages were never completed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictationRecord {
     pub id: String,
+    /// Row origin in `history.jsonl`; PARLA-10 reuses the file for `benchmark`
+    /// rows. `#[serde(default)]` keeps older rows loadable.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     pub started_at: u64,
     pub provider_id: String,
     pub key_up: u64,
@@ -31,6 +35,7 @@ impl DictationRecord {
                 wall.as_nanos(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ),
+            kind: default_kind(),
             started_at: wall.as_millis() as u64,
             provider_id: provider_id.into(),
             key_up: 0,
@@ -48,6 +53,43 @@ pub fn elapsed_ms(key_up: Instant) -> u64 {
     key_up.elapsed().as_millis() as u64
 }
 
+fn default_kind() -> String {
+    "dictation".into()
+}
+
+/// Per-stage latencies derived from the monotonic offsets (which are relative
+/// to key-up). A stage is `None` when either endpoint is missing, so partial
+/// or failed dictations do not report a bogus zero. Shared by the history view
+/// and available to the benchmark view (PARLA-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StageMs {
+    /// Key-up to audio ready.
+    pub audio_ready: Option<u64>,
+    /// Audio ready to provider returned.
+    pub transcribe: Option<u64>,
+    /// Provider returned to pasted.
+    pub paste: Option<u64>,
+    /// Key-up to pasted.
+    pub total: Option<u64>,
+}
+
+impl DictationRecord {
+    pub fn stage_ms(&self) -> StageMs {
+        StageMs {
+            audio_ready: self.audio_ready,
+            transcribe: self
+                .provider_returned
+                .zip(self.audio_ready)
+                .map(|(returned, ready)| returned.saturating_sub(ready)),
+            paste: self
+                .pasted
+                .zip(self.provider_returned)
+                .map(|(pasted, returned)| pasted.saturating_sub(returned)),
+            total: self.pasted,
+        }
+    }
+}
+
 fn log_summary(record: &DictationRecord) -> String {
     crate::provider::redact_secrets(&format!(
         "dictation id={} provider={} audio_ms={} audio_ready={:?} provider_returned={:?} pasted={:?} text_chars={} failed={}",
@@ -61,6 +103,10 @@ pub fn record(app: &tauri::AppHandle, mut record: DictationRecord) {
         .error
         .map(|error| crate::provider::redact_secrets(&error));
     eprintln!("{}", log_summary(&record));
+    // Persist off the hot path: the history thread owns the disk write.
+    if let Some(history) = app.try_state::<crate::history::History>() {
+        history.append(record.clone());
+    }
     if let Err(error) = app.emit("dictation://recorded", &record) {
         eprintln!("Unable to emit dictation record: {error}");
     }
@@ -94,5 +140,36 @@ mod tests {
         let decoded: DictationRecord =
             serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
         assert_eq!(decoded.id, first.id);
+    }
+    #[test]
+    fn stage_latencies_handle_missing_endpoints() {
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        assert_eq!(
+            record.stage_ms(),
+            StageMs {
+                audio_ready: None,
+                transcribe: None,
+                paste: None,
+                total: None,
+            }
+        );
+        record.provider_returned = Some(25);
+        assert_eq!(record.stage_ms().transcribe, None);
+        record.audio_ready = Some(10);
+        assert_eq!(record.stage_ms().transcribe, Some(15));
+        assert_eq!(record.stage_ms().paste, None);
+        record.pasted = Some(40);
+        let stages = record.stage_ms();
+        assert_eq!(stages.audio_ready, Some(10));
+        assert_eq!(stages.paste, Some(15));
+        assert_eq!(stages.total, Some(40));
+    }
+    #[test]
+    fn absent_kind_defaults_to_dictation_for_older_rows() {
+        let decoded: DictationRecord = serde_json::from_str(
+            r#"{"id":"x","started_at":1,"provider_id":"openai","key_up":0,"audio_ready":null,"provider_returned":null,"pasted":null,"audio_ms":0,"text":"","error":null}"#,
+        )
+        .unwrap();
+        assert_eq!(decoded.kind, "dictation");
     }
 }
