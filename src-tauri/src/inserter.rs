@@ -5,15 +5,21 @@
 //! https://github.com/cjpais/Handy/blob/main/src-tauri/src/clipboard.rs
 //! https://github.com/cjpais/Handy/blob/main/src-tauri/src/input.rs
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_RESTORE_DELAY_MS: u64 = 250;
 
 /// Blocking desktop IO: call from the flow worker, never a shortcut callback.
 /// Only nonempty text is saved. Non-text formats are replaced, not restored.
 /// Restore is best effort and skipped if somebody copied different content.
-#[cfg(windows)]
 pub fn paste_text(text: &str, restore_delay: Duration) -> Result<(), String> {
+    paste_text_timed(text, restore_delay).map(|_| ())
+}
+
+/// Returns the injection completion time, excluding clipboard restoration.
+/// Still waits for restoration before releasing the serialized transaction.
+#[cfg(windows)]
+pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, String> {
     // AudioBud also serializes capture/write/paste/restore as one transaction:
     // https://github.com/jamditis/audiobud/blob/main/src-tauri/src/clipboard.rs
     static TRANSACTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -31,7 +37,7 @@ pub fn paste_text(text: &str, restore_delay: Duration) -> Result<(), String> {
 /// Windows is the target. Linux deliberately fails before changing clipboard
 /// contents; this fallback lets the rest of the app and tests run headlessly.
 #[cfg(not(windows))]
-pub fn paste_text(_text: &str, _restore_delay: Duration) -> Result<(), String> {
+pub fn paste_text_timed(_text: &str, _restore_delay: Duration) -> Result<Instant, String> {
     Err("Text insertion is only supported on Windows".into())
 }
 
@@ -54,12 +60,12 @@ fn paste_with_backend(
     desktop: &mut impl Desktop,
     text: &str,
     restore_delay: Duration,
-) -> Result<(), String> {
+) -> Result<Instant, String> {
     let saved = restorable_text(desktop.read_text()?);
     desktop.write_text(text)?;
     // Handy's delay before injection allows clipboard consumers to settle.
     desktop.wait(Duration::from_millis(100));
-    let result = desktop.send_paste();
+    let result = desktop.send_paste().map(|()| Instant::now());
     // Always attempt restoration, even if input injection failed.
     desktop.wait(restore_delay);
     if let Some(saved) = saved {

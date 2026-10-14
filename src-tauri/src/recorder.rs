@@ -70,6 +70,7 @@ const MAX_TAIL_ROUNDS: usize = 8;
 /// The one recorder the app uses. Created at startup, retried lazily if the
 /// machine had no input device then.
 static RECORDER: OnceLock<Arc<Recorder>> = OnceLock::new();
+static RECORDER_INIT: Mutex<()> = Mutex::new(());
 
 /// Opens the microphone at startup, logging (not failing) when there is none.
 pub fn warm_up() {
@@ -78,6 +79,12 @@ pub fn warm_up() {
 
 /// The shared recorder, or `None` when no input device can be opened.
 pub fn recorder() -> Option<Arc<Recorder>> {
+    if let Some(existing) = RECORDER.get() {
+        return Some(Arc::clone(existing));
+    }
+    // Startup warm-up and a first hotkey/Test mic can arrive concurrently.
+    // Serialize only initialization so they cannot open the device twice.
+    let _init = RECORDER_INIT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = RECORDER.get() {
         return Some(Arc::clone(existing));
     }

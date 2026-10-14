@@ -1,7 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the settings window.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Core events for Parla pages; custom commands are registered in lib.rs.",
+  "windows": [
+    "main",
+    "settings",
+    "history",
+    "bench"
+  ],
+  "permissions": [
+    "core:default"
+  ]
 }
