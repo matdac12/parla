@@ -15,5 +15,6 @@ tauri-build = { version = "2", features = [] }
 anyhow = "1"
 cpal = "0.18"
 hound = "3.5"
+ringbuf = "0.5"
 rubato = "5.0"
 tauri = { version = "2", features = ["tray-icon"] }

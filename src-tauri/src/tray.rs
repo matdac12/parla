@@ -56,17 +56,18 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
 }
 
 /// Records three seconds from the default microphone, saves it as
-/// `clips/test.wav` in the app data dir, and logs the path. Off the UI thread
-/// so the menu stays responsive.
+/// `clips/test.wav` in the app data dir, and logs the path. Everything runs on
+/// a spawned thread: acquiring the recorder can block while the device opens,
+/// and the menu callback must not.
 fn run_test_mic(app: &tauri::AppHandle) {
-    let Some(recorder) = crate::recorder::recorder() else {
-        eprintln!("test mic: no input device available");
-        return;
-    };
     let app = app.clone();
     std::thread::spawn(move || {
+        let Some(recorder) = crate::recorder::recorder() else {
+            eprintln!("test mic: no input device available");
+            return;
+        };
         if let Err(error) = recorder.start() {
-            eprintln!("test mic: cannot start recording: {error:#}");
+            eprintln!("test mic: not starting ({error:#})");
             return;
         }
         std::thread::sleep(Duration::from_secs(3));

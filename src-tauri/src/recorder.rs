@@ -1,25 +1,38 @@
 //! Pre-warmed microphone capture.
 //!
 //! The default input device is opened once, at startup, and its stream is kept
-//! running so pressing the hotkey has no device-startup latency. Audio is
-//! dropped while idle; [`Recorder::start`] begins buffering and
-//! [`Recorder::stop`] returns the recording as a 16 kHz mono [`Clip`].
+//! running so pressing the hotkey has no device-startup latency.
 //!
-//! The cpal `Stream` is `!Send` on some platforms, so it lives on a dedicated
-//! thread that talks to callers only through atomics, a mutex and a command
-//! channel. The design (dedicated thread, mix-to-mono, rubato resampling,
-//! reopen-on-next-start after a device failure) follows Handy's recorder
-//! (github.com/cjpais/Handy, MIT); see `THIRD_PARTY_NOTICES.md`.
+//! The realtime cpal callback does two things only: convert the device samples
+//! to mono f32 into a reused scratch buffer and push them into a lock-free SPSC
+//! ring ([`ringbuf`]). No allocation, no blocking, no shared lock on the audio
+//! thread. A worker thread drains the ring and owns the recording buffer; the
+//! recording boundary is a generation id carried in the [`Capture`] state, so a
+//! clip can never contain audio from before its `start()`. While idle the
+//! worker keeps the most recent [`PRE_ROLL_MS`] of audio as a pre-roll, so the
+//! first syllable is not clipped.
+//!
+//! Overflow policy: the ring holds [`RING_SECONDS`] of audio. If the consumer
+//! stalls and the ring fills, the callback drops the newest samples for the
+//! rest of that block and counts them (`Recorder::dropped_samples`).
+//!
+//! The cpal `Stream` is `!Send` on some platforms, so it lives on the worker
+//! thread. The design (dedicated thread, mix-to-mono, pre-warmed stream,
+//! rubato resampling, reopen-on-next-start after a device failure) follows
+//! Handy's recorder (github.com/cjpais/Handy, MIT); see `THIRD_PARTY_NOTICES.md`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
+use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{
     Fft, FixedSync, Indexing, ResampleError, Resampler, ResamplerConstructionError, WindowFunction,
@@ -27,8 +40,25 @@ use rubato::{
 
 use crate::clip::{Clip, SAMPLE_RATE};
 
-/// How long `start` waits for the device after a disconnect before giving up.
-const REOPEN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a public call waits for the worker before giving up.
+const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the worker blocks waiting for a command before draining the ring
+/// again. Small enough that the ring never comes close to filling.
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Ring capacity, in seconds of device audio. Generous: the worker only needs
+/// to keep up with a 1 ms poll.
+const RING_SECONDS: usize = 2;
+
+/// Idle audio kept so `start` does not clip the first syllable.
+const PRE_ROLL_MS: usize = 150;
+
+/// Samples the worker drains from the ring at a time.
+const DRAIN_SCRATCH: usize = 4096;
+
+/// Initial scratch capacity for the callback's mono mix, per channel.
+const CALLBACK_FRAMES_HINT: usize = 8192;
 
 /// rubato's FFT block size. Larger blocks resample more cleanly at the cost of
 /// a little more output latency; 1024 is Handy's proven choice.
@@ -66,23 +96,39 @@ pub fn recorder() -> Option<Arc<Recorder>> {
     }
 }
 
-/// State shared between the public handle and the audio thread.
-struct Shared {
-    /// Set while buffering; the callback ignores audio when false.
-    recording: AtomicBool,
-    /// Mono f32 samples at the device rate, appended by the audio callback.
-    buffer: Mutex<Vec<f32>>,
-    /// The open device's sample rate, so `stop` knows how to resample.
-    rate: Mutex<u32>,
-    /// Set by the stream's error callback; cleared by a successful reopen.
-    failed: AtomicBool,
-    /// Whether a stream is currently running.
-    open: AtomicBool,
+/// The active recording's generation, if any. Guarded so `start` and `stop`
+/// are serialized and a second `start` is rejected.
+#[derive(Default)]
+struct Control {
+    generation: u64,
+    active: bool,
 }
 
-/// Commands the audio thread services while it parks on the open stream.
+struct Shared {
+    control: Mutex<Control>,
+    /// Set by the worker when a stream is running.
+    open: AtomicBool,
+    /// Set when the stream failed (device unplugged); a later `start` reopens.
+    failed: AtomicBool,
+    /// The open device's sample rate, so `stop` knows how to resample.
+    rate: AtomicU32,
+    /// Samples the callback could not push because the ring was full.
+    dropped: AtomicU64,
+}
+
+/// Commands the worker services while it drains the ring.
 enum Command {
-    Reopen(Sender<Result<(), String>>),
+    Start {
+        generation: u64,
+        ack: Sender<()>,
+    },
+    Stop {
+        generation: u64,
+        reply: Sender<(u64, Vec<f32>)>,
+    },
+    Reopen {
+        ack: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -94,15 +140,15 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Opens the default input device and starts its stream inside a dedicated
-    /// thread. Errors when no device can be opened.
+    /// Opens the default input device and starts its stream on a worker thread.
+    /// Errors when no device can be opened.
     pub fn new() -> Result<Recorder> {
         let shared = Arc::new(Shared {
-            recording: AtomicBool::new(false),
-            buffer: Mutex::new(Vec::new()),
-            rate: Mutex::new(SAMPLE_RATE),
-            failed: AtomicBool::new(false),
+            control: Mutex::new(Control::default()),
             open: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            rate: AtomicU32::new(SAMPLE_RATE),
+            dropped: AtomicU64::new(0),
         });
 
         let (command_tx, command_rx) = mpsc::channel();
@@ -128,38 +174,67 @@ impl Recorder {
         }
     }
 
-    /// Starts buffering. Reopens the device first if it never opened or was
-    /// lost (unplugged, changed).
+    /// Begins a recording. Errors if one is already in progress, so two callers
+    /// (hotkey and the tray test) cannot overwrite each other. Reopens the
+    /// device first if it never opened or was lost.
     pub fn start(&self) -> Result<()> {
+        let mut control = self.lock_control();
+        if control.active {
+            bail!("a recording is already in progress");
+        }
         if !self.shared.open.load(Ordering::SeqCst) || self.shared.failed.load(Ordering::SeqCst) {
             self.reopen()?;
         }
-        self.shared
-            .buffer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.shared.recording.store(true, Ordering::SeqCst);
+        control.generation = control.generation.wrapping_add(1);
+        let generation = control.generation;
+
+        let (ack_tx, ack_rx) = mpsc::channel();
+        self.commands
+            .send(Command::Start {
+                generation,
+                ack: ack_tx,
+            })
+            .map_err(|_| anyhow!("audio thread is not running"))?;
+        ack_rx
+            .recv_timeout(WORKER_TIMEOUT)
+            .map_err(|_| anyhow!("timed out starting the recording"))?;
+        control.active = true;
         Ok(())
     }
 
-    /// Stops buffering and returns what was captured, resampled to 16 kHz mono
-    /// i16. Returns an empty clip when nothing was being recorded.
+    /// Ends the recording and returns what was captured, resampled to 16 kHz
+    /// mono i16. Returns an empty clip when nothing is being recorded.
     pub fn stop(&self) -> Clip {
-        self.shared.recording.store(false, Ordering::SeqCst);
-        let raw = {
-            let mut buffer = self
-                .shared
-                .buffer
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::mem::take(&mut *buffer)
+        let mut control = self.lock_control();
+        if !control.active {
+            return Clip::new(Vec::new());
+        }
+        let generation = control.generation;
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let raw = if self
+            .commands
+            .send(Command::Stop {
+                generation,
+                reply: reply_tx,
+            })
+            .is_ok()
+        {
+            match reply_rx.recv_timeout(WORKER_TIMEOUT) {
+                Ok((replied, samples)) if replied == generation => samples,
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
         };
-        let rate = *self
-            .shared
-            .rate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        control.active = false;
+
+        let dropped = self.shared.dropped.swap(0, Ordering::AcqRel);
+        if dropped > 0 {
+            eprintln!("recorder: dropped {dropped} samples (ring overflow)");
+        }
+
+        let rate = self.shared.rate.load(Ordering::Acquire);
         let samples = resample_to_16k(&raw, rate)
             .into_iter()
             .map(f32_to_i16)
@@ -169,15 +244,27 @@ impl Recorder {
 
     /// Whether audio is currently being buffered.
     pub fn is_recording(&self) -> bool {
-        self.shared.recording.load(Ordering::SeqCst)
+        self.lock_control().active
+    }
+
+    /// Samples dropped since the last `stop` because the ring overflowed.
+    pub fn dropped_samples(&self) -> u64 {
+        self.shared.dropped.load(Ordering::Acquire)
+    }
+
+    fn lock_control(&self) -> std::sync::MutexGuard<'_, Control> {
+        self.shared
+            .control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn reopen(&self) -> Result<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.commands
-            .send(Command::Reopen(ack_tx))
+            .send(Command::Reopen { ack: ack_tx })
             .map_err(|_| anyhow!("audio thread is not running"))?;
-        match ack_rx.recv_timeout(REOPEN_TIMEOUT) {
+        match ack_rx.recv_timeout(WORKER_TIMEOUT) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(message)) => Err(anyhow!(message)),
             Err(_) => Err(anyhow!("timed out reopening the microphone")),
@@ -194,32 +281,63 @@ impl Drop for Recorder {
     }
 }
 
-/// Owns the cpal stream. Opened here and never leaves this thread.
+/// Owns the cpal stream and the recording buffer.
 fn audio_thread(
     shared: Arc<Shared>,
     commands: Receiver<Command>,
     ready: Sender<Result<(), String>>,
 ) {
-    let (mut stream, startup) = match open_stream(&shared) {
-        Ok(stream) => (Some(stream), Ok(())),
-        Err(error) => (None, Err(error)),
+    let mut session = match open_session(&shared) {
+        Ok(session) => {
+            shared.open.store(true, Ordering::SeqCst);
+            shared.failed.store(false, Ordering::SeqCst);
+            if ready.send(Ok(())).is_err() {
+                return;
+            }
+            Some(session)
+        }
+        Err(error) => {
+            shared.open.store(false, Ordering::SeqCst);
+            shared.failed.store(true, Ordering::SeqCst);
+            let _ = ready.send(Err(error));
+            None
+        }
     };
-    shared.open.store(stream.is_some(), Ordering::SeqCst);
-    shared.failed.store(stream.is_none(), Ordering::SeqCst);
-    if ready.send(startup).is_err() {
-        return;
-    }
 
-    while let Ok(command) = commands.recv() {
-        match command {
-            Command::Reopen(ack) => {
-                drop(stream.take());
+    let mut capture = Capture::new();
+    if let Some(session) = session.as_ref() {
+        capture.set_preroll_cap(preroll_capacity(session.rate));
+    }
+    let mut scratch = vec![0.0f32; DRAIN_SCRATCH];
+
+    loop {
+        if let Some(session) = session.as_mut() {
+            drain(session, &mut scratch, &mut capture);
+        }
+
+        match commands.recv_timeout(POLL_INTERVAL) {
+            Ok(Command::Start { generation, ack }) => {
+                capture.begin(generation);
+                let _ = ack.send(());
+            }
+            Ok(Command::Stop { generation, reply }) => {
+                // Drain anything that arrived since the top of the loop, then
+                // hand back only this generation's audio.
+                if let Some(session) = session.as_mut() {
+                    drain(session, &mut scratch, &mut capture);
+                }
+                let samples = capture.finish(generation);
+                let _ = reply.send((generation, samples));
+            }
+            Ok(Command::Reopen { ack }) => {
+                drop(session.take());
                 shared.open.store(false, Ordering::SeqCst);
-                match open_stream(&shared) {
+                match open_session(&shared) {
                     Ok(new) => {
                         shared.failed.store(false, Ordering::SeqCst);
                         shared.open.store(true, Ordering::SeqCst);
-                        stream = Some(new);
+                        capture.set_preroll_cap(preroll_capacity(new.rate));
+                        session = Some(new);
                         let _ = ack.send(Ok(()));
                     }
                     Err(error) => {
@@ -228,18 +346,29 @@ fn audio_thread(
                     }
                 }
             }
-            Command::Shutdown => {
-                drop(stream.take());
+            Ok(Command::Shutdown) => {
                 shared.open.store(false, Ordering::SeqCst);
                 return;
             }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
 
+/// An open microphone owned by the worker thread. `stream` keeps the device
+/// running; `consumer` is the read end of its sample ring.
+struct OpenSession {
+    /// Held only to keep the device running; dropping it closes the stream.
+    #[allow(dead_code)]
+    stream: cpal::Stream,
+    consumer: HeapCons<f32>,
+    rate: u32,
+}
+
 /// Opens the default input device at its OS default format and starts the
-/// stream. Records the device format in `shared` for `stop` to read.
-fn open_stream(shared: &Arc<Shared>) -> Result<cpal::Stream, String> {
+/// stream, returning the session that owns it.
+fn open_session(shared: &Arc<Shared>) -> Result<OpenSession, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -251,35 +380,39 @@ fn open_stream(shared: &Arc<Shared>) -> Result<cpal::Stream, String> {
     let sample_format = supported.sample_format();
     let config = supported.config();
     let channels = config.channels as usize;
+    let rate = config.sample_rate;
+    shared.rate.store(rate, Ordering::Release);
 
-    *shared
-        .rate
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config.sample_rate;
+    let (producer, consumer) = HeapRb::<f32>::new(ring_capacity(rate)).split();
 
     let stream = match sample_format {
-        SampleFormat::I8 => build_stream::<i8>(&device, &config, shared, channels),
-        SampleFormat::I16 => build_stream::<i16>(&device, &config, shared, channels),
-        SampleFormat::I32 => build_stream::<i32>(&device, &config, shared, channels),
-        SampleFormat::I64 => build_stream::<i64>(&device, &config, shared, channels),
-        SampleFormat::U8 => build_stream::<u8>(&device, &config, shared, channels),
-        SampleFormat::U16 => build_stream::<u16>(&device, &config, shared, channels),
-        SampleFormat::U32 => build_stream::<u32>(&device, &config, shared, channels),
-        SampleFormat::U64 => build_stream::<u64>(&device, &config, shared, channels),
-        SampleFormat::F32 => build_stream::<f32>(&device, &config, shared, channels),
-        SampleFormat::F64 => build_stream::<f64>(&device, &config, shared, channels),
+        SampleFormat::I8 => build_stream::<i8>(&device, &config, producer, shared, channels),
+        SampleFormat::I16 => build_stream::<i16>(&device, &config, producer, shared, channels),
+        SampleFormat::I32 => build_stream::<i32>(&device, &config, producer, shared, channels),
+        SampleFormat::I64 => build_stream::<i64>(&device, &config, producer, shared, channels),
+        SampleFormat::U8 => build_stream::<u8>(&device, &config, producer, shared, channels),
+        SampleFormat::U16 => build_stream::<u16>(&device, &config, producer, shared, channels),
+        SampleFormat::U32 => build_stream::<u32>(&device, &config, producer, shared, channels),
+        SampleFormat::U64 => build_stream::<u64>(&device, &config, producer, shared, channels),
+        SampleFormat::F32 => build_stream::<f32>(&device, &config, producer, shared, channels),
+        SampleFormat::F64 => build_stream::<f64>(&device, &config, producer, shared, channels),
         other => return Err(format!("unsupported input sample format {other}")),
     }?;
 
     stream
         .play()
         .map_err(|error| format!("starting the microphone stream failed: {error}"))?;
-    Ok(stream)
+    Ok(OpenSession {
+        stream,
+        consumer,
+        rate,
+    })
 }
 
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    mut producer: HeapProd<f32>,
     shared: &Arc<Shared>,
     channels: usize,
 ) -> Result<cpal::Stream, String>
@@ -287,18 +420,26 @@ where
     T: SizedSample,
     f32: FromSample<T>,
 {
+    let frames_hint = match config.buffer_size {
+        cpal::BufferSize::Fixed(frames) => frames as usize,
+        _ => CALLBACK_FRAMES_HINT,
+    };
+    // Reused for the life of the stream: no allocation in the callback.
+    let mut scratch: Vec<f32> = Vec::with_capacity(frames_hint.max(1024) * channels.max(1));
     let data_shared = Arc::clone(shared);
     let error_shared = Arc::clone(shared);
+
     device
         .build_input_stream::<T, _, _>(
             *config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                if !data_shared.recording.load(Ordering::Relaxed) {
-                    return;
-                }
-                let mono = collect_mono(data, channels);
-                if let Ok(mut buffer) = data_shared.buffer.lock() {
-                    buffer.extend_from_slice(&mono);
+                scratch.clear();
+                downmix_into(data, channels, &mut scratch);
+                let pushed = producer.push_iter(scratch.iter().copied());
+                if pushed < scratch.len() {
+                    data_shared
+                        .dropped
+                        .fetch_add((scratch.len() - pushed) as u64, Ordering::Relaxed);
                 }
             },
             move |error: cpal::Error| {
@@ -311,28 +452,113 @@ where
         .map_err(|error| format!("building the input stream failed: {error}"))
 }
 
-/// Converts a device-format buffer to mono f32, averaging channels.
-fn collect_mono<T>(data: &[T], channels: usize) -> Vec<f32>
+/// Converts a device-format buffer to mono f32, appending to `out` (no
+/// allocation when `out` already has capacity, which the callback guarantees).
+fn downmix_into<T>(data: &[T], channels: usize, out: &mut Vec<f32>)
 where
     T: SizedSample,
     f32: FromSample<T>,
 {
-    let interleaved: Vec<f32> = data
-        .iter()
-        .map(|&sample| f32::from_sample(sample))
-        .collect();
-    downmix_to_mono(&interleaved, channels)
+    if channels <= 1 {
+        out.extend(data.iter().map(|&sample| f32::from_sample(sample)));
+    } else {
+        out.extend(data.chunks_exact(channels).map(|frame| {
+            frame
+                .iter()
+                .map(|&sample| f32::from_sample(sample))
+                .sum::<f32>()
+                / channels as f32
+        }));
+    }
 }
 
-/// Averages interleaved f32 frames down to one channel.
-pub(crate) fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return interleaved.to_vec();
+/// Reads everything currently in the ring into the capture state.
+fn drain(session: &mut OpenSession, scratch: &mut [f32], capture: &mut Capture) {
+    loop {
+        let count = session.consumer.pop_slice(scratch);
+        if count == 0 {
+            break;
+        }
+        capture.feed(&scratch[..count]);
     }
-    interleaved
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
+}
+
+/// The worker's recording state. Keeps the active session's samples and, while
+/// idle, a short pre-roll of the most recent audio.
+struct Capture {
+    active: Option<u64>,
+    buffer: Vec<f32>,
+    preroll: VecDeque<f32>,
+    preroll_cap: usize,
+}
+
+impl Capture {
+    fn new() -> Self {
+        Self {
+            active: None,
+            buffer: Vec::new(),
+            preroll: VecDeque::new(),
+            preroll_cap: 0,
+        }
+    }
+
+    fn set_preroll_cap(&mut self, cap: usize) {
+        self.preroll_cap = cap;
+        while self.preroll.len() > cap {
+            self.preroll.pop_front();
+        }
+    }
+
+    /// Feeds device audio. Goes to the active session, or to the pre-roll while
+    /// idle.
+    fn feed(&mut self, chunk: &[f32]) {
+        if self.active.is_some() {
+            self.buffer.extend_from_slice(chunk);
+        } else {
+            push_preroll(&mut self.preroll, chunk, self.preroll_cap);
+        }
+    }
+
+    /// Starts a session: clears the previous buffer and seeds it with the
+    /// pre-roll, so the clip begins just before `start`.
+    fn begin(&mut self, generation: u64) {
+        self.buffer.clear();
+        self.buffer.extend(self.preroll.drain(..));
+        self.active = Some(generation);
+    }
+
+    /// Ends session `generation`, returning its samples. A mismatched
+    /// generation is ignored (nothing is taken).
+    fn finish(&mut self, generation: u64) -> Vec<f32> {
+        if self.active == Some(generation) {
+            self.active = None;
+            self.preroll.clear();
+            std::mem::take(&mut self.buffer)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Keeps the last `cap` samples of `chunk` in `preroll`.
+fn push_preroll(preroll: &mut VecDeque<f32>, chunk: &[f32], cap: usize) {
+    if cap == 0 {
+        return;
+    }
+    for &sample in chunk {
+        if preroll.len() == cap {
+            preroll.pop_front();
+        }
+        preroll.push_back(sample);
+    }
+}
+
+fn ring_capacity(rate: u32) -> usize {
+    (rate as usize * RING_SECONDS / 1000).max(8192)
+}
+
+fn preroll_capacity(rate: u32) -> usize {
+    (rate as usize * PRE_ROLL_MS / 1000).max(1)
 }
 
 /// Clamps a normalized float sample into the i16 range.
@@ -341,14 +567,16 @@ pub(crate) fn f32_to_i16(sample: f32) -> i16 {
 }
 
 /// Resamples mono f32 audio from `in_rate` to Parla's 16 kHz using rubato's
-/// windowed FFT resampler (proper anti-aliasing, not naive decimation).
+/// windowed FFT resampler (proper anti-aliasing, not naive decimation). The
+/// output length is `round(input.len() * 16000 / in_rate)`; the resampler's
+/// leading delay is trimmed so an onset stays aligned.
 fn resample_to_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
     if input.is_empty() || in_rate == 0 || in_rate == SAMPLE_RATE {
         return input.to_vec();
     }
     let mut resampler = MonoResampler::new(in_rate as usize, SAMPLE_RATE as usize)
         .expect("a positive device rate always yields a valid resampler");
-    let mut out = Vec::with_capacity(input.len() * SAMPLE_RATE as usize / in_rate as usize + 1024);
+    let mut out = Vec::with_capacity(input.len() * SAMPLE_RATE as usize / in_rate as usize + 16);
     if let Err(error) = resampler.push(input, &mut out) {
         eprintln!("resampling failed: {error}");
     }
@@ -358,15 +586,18 @@ fn resample_to_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
     out
 }
 
-/// Mono-only subset of Handy's `FrameResampler`: emits whole output samples in
-/// order, then flushes the resampler's delay line so the tail is not lost.
+/// Mono-only subset of Handy's `FrameResampler`, plus trimming of the leading
+/// delay line so the output starts at input sample zero.
 struct MonoResampler {
     resampler: Fft<f32>,
     chunks_in: usize,
     out_buf: Vec<f32>,
     in_buf: Vec<f32>,
     in_count: usize,
+    /// Output frames emitted, after the leading delay has been dropped.
     out_count: usize,
+    /// Leading output frames still to drop (the resampler's delay).
+    skip: usize,
     in_hz: usize,
     out_hz: usize,
 }
@@ -386,6 +617,7 @@ impl MonoResampler {
             FixedSync::Input,
         )?;
         let out_frames = resampler.output_frames_max();
+        let skip = resampler.output_delay();
         Ok(Self {
             resampler,
             chunks_in: RESAMPLER_CHUNK,
@@ -393,9 +625,33 @@ impl MonoResampler {
             in_buf: Vec::with_capacity(RESAMPLER_CHUNK),
             in_count: 0,
             out_count: 0,
+            skip,
             in_hz,
             out_hz,
         })
+    }
+
+    /// Total output frames a finished recording should yield.
+    fn expected(&self) -> usize {
+        let num = self.in_count as u64 * self.out_hz as u64;
+        ((num + self.in_hz as u64 / 2) / self.in_hz as u64) as usize
+    }
+
+    /// Emits `frames` frames of `out_buf`, dropping the leading delay and never
+    /// exceeding `limit` total frames.
+    fn emit(&mut self, frames: usize, limit: usize, out: &mut Vec<f32>) {
+        let mut start = 0;
+        if self.skip > 0 {
+            let drop = self.skip.min(frames);
+            self.skip -= drop;
+            start = drop;
+        }
+        let room = limit.saturating_sub(self.out_count);
+        let take = (frames - start).min(room);
+        if take > 0 {
+            out.extend_from_slice(&self.out_buf[start..start + take]);
+            self.out_count += take;
+        }
     }
 
     fn push(&mut self, mut input: &[f32], out: &mut Vec<f32>) -> Result<(), ResampleError> {
@@ -406,8 +662,7 @@ impl MonoResampler {
             input = &input[take..];
             if self.in_buf.len() == self.chunks_in {
                 let frames = self.process()?;
-                self.out_count += frames;
-                out.extend_from_slice(&self.out_buf[..frames]);
+                self.emit(frames, usize::MAX, out);
             }
         }
         Ok(())
@@ -417,20 +672,19 @@ impl MonoResampler {
         if self.in_count == 0 {
             return Ok(());
         }
-        let expected = self.in_count * self.out_hz / self.in_hz + self.resampler.output_delay();
+        let expected = self.expected();
         if !self.in_buf.is_empty() {
             let frames = self.process()?;
-            let take = expected.saturating_sub(self.out_count).min(frames);
-            self.out_count += take;
-            out.extend_from_slice(&self.out_buf[..take]);
+            self.emit(frames, expected, out);
         }
         let mut rounds = 0;
         while self.out_count < expected && rounds < MAX_TAIL_ROUNDS {
             rounds += 1;
             let frames = self.process()?;
-            let take = (expected - self.out_count).min(frames);
-            self.out_count += take;
-            out.extend_from_slice(&self.out_buf[..take]);
+            self.emit(frames, expected, out);
+            if frames == 0 {
+                break;
+            }
         }
         Ok(())
     }
@@ -460,14 +714,19 @@ mod tests {
 
     #[test]
     fn downmix_averages_stereo_frames() {
-        assert_eq!(downmix_to_mono(&[1.0, 0.0], 2), vec![0.5]);
-        assert_eq!(downmix_to_mono(&[1.0, 0.0, 0.0, 1.0], 2), vec![0.5, 0.5]);
-        assert_eq!(downmix_to_mono(&[-1.0, 1.0, 1.0, -1.0], 2), vec![0.0, 0.0]);
+        let mut out = Vec::new();
+        downmix_into(&[1.0f32, 0.0, 0.0, 1.0], 2, &mut out);
+        assert_eq!(out, vec![0.5, 0.5]);
+        out.clear();
+        downmix_into(&[-1.0f32, 1.0, 1.0, -1.0], 2, &mut out);
+        assert_eq!(out, vec![0.0, 0.0]);
     }
 
     #[test]
     fn downmix_passes_mono_through() {
-        assert_eq!(downmix_to_mono(&[0.1, 0.2, 0.3], 1), vec![0.1, 0.2, 0.3]);
+        let mut out = Vec::new();
+        downmix_into(&[0.1f32, 0.2, 0.3], 1, &mut out);
+        assert_eq!(out, vec![0.1, 0.2, 0.3]);
     }
 
     #[test]
@@ -482,7 +741,45 @@ mod tests {
     }
 
     #[test]
-    fn resampling_48k_to_16k_preserves_length_and_amplitude() {
+    fn a_new_session_never_contains_previous_audio() {
+        let mut capture = Capture::new();
+        capture.set_preroll_cap(4);
+
+        // Idle audio fills the (capped) pre-roll.
+        capture.feed(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        capture.begin(1);
+        capture.feed(&[2.0, 2.0]);
+        assert_eq!(capture.finish(1), vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0]);
+
+        // The next session holds its own pre-roll and audio only.
+        capture.feed(&[3.0, 3.0, 3.0, 3.0]);
+        capture.begin(2);
+        capture.feed(&[4.0]);
+        let second = capture.finish(2);
+        assert_eq!(second, vec![3.0, 3.0, 3.0, 3.0, 4.0]);
+        assert!(!second.contains(&1.0) && !second.contains(&2.0));
+    }
+
+    #[test]
+    fn preroll_keeps_only_the_most_recent_cap() {
+        let mut capture = Capture::new();
+        capture.set_preroll_cap(2);
+        capture.feed(&[1.0, 2.0, 3.0]);
+        capture.begin(1);
+        assert_eq!(capture.finish(1), vec![2.0, 3.0]);
+    }
+
+    #[test]
+    fn finish_with_a_stale_generation_is_a_noop() {
+        let mut capture = Capture::new();
+        capture.begin(5);
+        capture.feed(&[7.0, 7.0]);
+        assert!(capture.finish(6).is_empty());
+        assert_eq!(capture.finish(5), vec![7.0, 7.0]);
+    }
+
+    #[test]
+    fn resampling_48k_to_16k_has_exact_length() {
         let in_rate = 48_000usize;
         let frequency = 1_000.0;
         let frames = in_rate / 10; // 100 ms
@@ -495,18 +792,41 @@ mod tests {
 
         let out = resample_to_16k(&input, in_rate as u32);
 
-        let ideal = frames * SAMPLE_RATE as usize / in_rate;
-        assert!(
-            out.len().abs_diff(ideal) < 256,
-            "length {} is not close to {}",
-            out.len(),
-            ideal
-        );
+        assert_eq!(out.len(), frames * SAMPLE_RATE as usize / in_rate);
         let peak = out.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
         assert!(
             (0.35..0.6).contains(&peak),
             "peak amplitude {peak} is not close to 0.5"
         );
+    }
+
+    #[test]
+    fn resampling_keeps_an_onset_aligned() {
+        let in_rate = 48_000u32;
+        let frames = in_rate as usize;
+        let onset = 12_000usize;
+        let input: Vec<f32> = (0..frames)
+            .map(|i| if i >= onset { 1.0 } else { 0.0 })
+            .collect();
+
+        let out = resample_to_16k(&input, in_rate);
+        assert_eq!(out.len(), frames * SAMPLE_RATE as usize / in_rate as usize);
+
+        let crossed = out
+            .iter()
+            .position(|&sample| sample >= 0.5)
+            .expect("the step should cross 0.5");
+        let expected = onset * SAMPLE_RATE as usize / in_rate as usize;
+        assert!(
+            crossed.abs_diff(expected) <= 4,
+            "onset crossed at {crossed}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn resampling_at_16k_is_a_passthrough() {
+        let input = vec![0.25f32, -0.25, 0.5];
+        assert_eq!(resample_to_16k(&input, SAMPLE_RATE), input);
     }
 
     /// Real hardware check. Run with `cargo test -- --ignored --nocapture`.
@@ -515,24 +835,45 @@ mod tests {
     fn records_from_the_default_device() {
         let recorder = Recorder::new().expect("a default input device");
         recorder.start().expect("start recording");
+        assert!(recorder.is_recording());
+        assert!(
+            recorder.start().is_err(),
+            "a second start must be rejected while recording"
+        );
+
         thread::sleep(Duration::from_secs(1));
-        let clip = recorder.stop();
-        assert_eq!(clip.sample_rate, SAMPLE_RATE);
+        let first = recorder.stop();
+        assert!(!recorder.is_recording());
+        assert_eq!(first.sample_rate, SAMPLE_RATE);
         println!(
-            "captured {} samples ({:?})",
-            clip.samples.len(),
-            clip.duration()
+            "first: {} samples ({:?}), dropped {}",
+            first.samples.len(),
+            first.duration(),
+            recorder.dropped_samples()
         );
         assert!(
-            clip.duration() >= Duration::from_millis(900),
+            first.duration() >= Duration::from_millis(900),
             "only {:?} captured",
-            clip.duration()
+            first.duration()
         );
-    }
 
-    #[test]
-    fn resampling_at_16k_is_a_passthrough() {
-        let input = vec![0.25f32, -0.25, 0.5];
-        assert_eq!(resample_to_16k(&input, SAMPLE_RATE), input);
+        // Once the idle stream has run a while, a start/stop with no delay
+        // should still return the pre-roll, not an empty clip.
+        thread::sleep(Duration::from_millis(400));
+        recorder.start().expect("pre-roll recording");
+        let preroll = recorder.stop();
+        println!("pre-roll: {:?}", preroll.duration());
+        assert!(
+            preroll.duration() >= Duration::from_millis(100),
+            "pre-roll missing: only {:?} captured",
+            preroll.duration()
+        );
+
+        // A later recording still works and is independent.
+        recorder.start().expect("second recording");
+        thread::sleep(Duration::from_millis(300));
+        let second = recorder.stop();
+        assert!(second.duration() >= Duration::from_millis(250));
+        assert_eq!(second.sample_rate, SAMPLE_RATE);
     }
 }
