@@ -28,7 +28,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: parla-windows-x64
-          path: src-tauri/target/release/parla.exe
+          # ort statically links ONNX Runtime and copies companion DLLs here.
+          path: |
+            src-tauri/target/release/parla.exe
+            src-tauri/target/release/*.dll
           if-no-files-found: error
 
   linux:

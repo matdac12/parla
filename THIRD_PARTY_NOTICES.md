@@ -141,3 +141,65 @@ SOFTWARE.
 - Added dependencies: reqwest (MIT OR Apache-2.0, default features disabled,
   rustls TLS), serde / serde_json (MIT OR Apache-2.0), and @tauri-apps/api
   (MIT OR Apache-2.0). See their upstream licenses and the lockfiles.
+
+## PARLA-7 local Parakeet inference and model management
+
+### cjpais/Handy (MIT)
+
+Source: https://github.com/cjpais/Handy/blob/main/src-tauri/src/managers/transcription.rs
+and `src-tauri/src/managers/model.rs` (verified 2026-10-15).
+Copyright (c) 2025 CJ Pais. MIT license retained in the Handy section above.
+Adapted the proven ParakeetModel::load(directory, Quantization::Int8) and
+transcribe_with pattern, with a process-owned mutex retaining the engine between
+utterances. Studied staged model downloads and the V3 int8 model catalogue.
+No downloader source copied; Parla downloads individually verified Hugging Face
+files rather than Handy's `https://blob.handy.computer/parakeet-v3-int8.tar.gz`.
+
+### cjpais/transcribe-rs (MIT)
+
+Dependency: https://github.com/cjpais/transcribe-rs/tree/abc6f582967c40839c1d05ec5acc98d1068d9d58
+Only the `onnx` feature is enabled (the upstream feature includes the shared ONNX
+engines); no Whisper, cloud engine, or GPU accelerator feature is enabled.
+Used its Parakeet V3 int8 engine and documented model layout. No source copied.
+
+```text
+MIT License
+
+Copyright (c) 2025 Ilya Stupakov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### NVIDIA Parakeet TDT 0.6B V3 / Ilya Stupakov ONNX export (CC BY 4.0)
+
+Model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+ONNX export: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/tree/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce
+License: https://creativecommons.org/licenses/by/4.0/
+Downloaded on explicit request, not included in the repository or CI artifact.
+The app uses the export's int8 encoder/decoder, nemo128 preprocessor, and vocabulary
+without further changes. Attribution: NVIDIA (original model), Ilya Stupakov
+(ONNX conversion/quantization).
+
+### ONNX Runtime / ort
+
+ONNX Runtime: https://github.com/microsoft/onnxruntime (MIT).
+ort: https://github.com/pykeio/ort (MIT OR Apache-2.0), pinned to 2.0.0-rc.12.
+Default CPU binary download and static-link/copy-dylibs strategy; the Windows CI
+artifact retains companion DLLs (including DirectML.dll in the upstream CPU
+archive). No DirectML execution-provider feature is enabled in Parla.

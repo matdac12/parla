@@ -128,3 +128,66 @@ Provider comparison and history instructions will be added with benchmarking.
 - Settings are loaded at startup. Editing the JSON externally requires a restart; `save_settings` persists settings first, applies a changed hotkey with a nonfatal warning on failure, and uses the restore delay for the next dictation. A failed persisted hotkey registration leaves the default binding in place if available.
 - Timing emits `dictation://recorded` and logs stage timings, transcript length and failure status only (no transcript or raw provider error body); history is not persisted yet. Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
 - Real API transcription and end-to-end Windows dictation still require a configured key and a manual smoke test. The default model follows the spec; its latency has not been compared on this machine.
+
+## Local model (Parakeet)
+
+Choose **Parakeet V3 (local)** in Settings and use **Download Parakeet model**
+(the settings UI is supplied by PARLA-8). The one-time download requires internet;
+afterwards transcription stays on your CPU and needs no API key or network.
+Until all four files are present with the expected sizes the provider is unavailable.
+Downloads verify exact sizes and SHA-256 hashes in a sibling temporary directory,
+then publish the completed directory by rename. Failed downloads can be retried;
+partial downloads are discarded rather than resumed. The download command also
+checks existing files' hashes and repairs corrupt manual installations.
+
+The int8 NVIDIA Parakeet TDT 0.6B **V3** ONNX export occupies 670,619,706 bytes
+(about 640 MiB; allow at least 1.4 GB free while replacing an existing model).
+First use loads it into RAM; later dictations reuse the loaded model. When Parakeet
+is active at startup it warms in the background. CPU latency depends on the machine
+and clip length; the first load costs more than later dictations. No GPU is required.
+
+For a manual installation, download these exact files into
+`%APPDATA%\com.matdac6.parla\models\parakeet-tdt-0.6b-v3\`:
+
+- [encoder-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.int8.onnx)
+- [decoder_joint-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.int8.onnx)
+- [nemo128.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx)
+- [vocab.txt](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt)
+
+Keep the filenames unchanged. This is Tauri v2 `app_data_dir()` for identifier
+`com.matdac6.parla`: Windows roaming AppData, not LocalAppData. On Linux it is
+`$XDG_DATA_HOME/com.matdac6.parla/models/parakeet-tdt-0.6b-v3` (normally
+`~/.local/share/com.matdac6.parla/models/parakeet-tdt-0.6b-v3`). To use another
+folder, set `providers.parakeet` to `{ "model_dir": "<absolute folder>" }` in
+settings.json; `null` uses the default. Set `active_provider` to `"parakeet"`.
+
+The Windows CI artifact includes `parla.exe` and ONNX Runtime companion DLLs;
+keep them together when extracting it. ONNX Runtime itself is statically linked
+using `ort`'s prebuilt CPU binaries. `transcribe-rs` is pinned to a git revision,
+and `ort`/`ort-sys` are pinned to the compatible rc.12 API. No model is bundled,
+committed, or downloaded by CI.
+
+For an optional inference smoke test, set `PARLA_PARAKEET_MODEL_DIR` to an installed
+model folder and run `cargo test provider::parakeet::tests::live_fixture` from
+`src-tauri`. Without that variable the test skips inference. An explicit network
+smoke test is available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
+`cargo test models::tests::live_download_only_when_explicitly_requested`; leave this
+variable unset in CI.
+
+Settings IPC (listen before invoking; IDs are provider IDs):
+
+```typescript
+invoke('model_status', { id: 'parakeet' })
+// Promise<{ id: 'parakeet', model_dir: string, available: boolean, downloading: boolean }>
+invoke('download_model', { id: 'parakeet' })
+// Promise<void>, resolves after installation; rejects on error, unknown ID, or busy.
+// model://progress: { id: 'parakeet', downloaded: number, total: number } (aggregate bytes)
+// model://done:     { id: 'parakeet' }
+// model://error:    { id: 'parakeet', error: string }
+```
+
+`model://error` reports an accepted download failing; unknown IDs and concurrent
+invocations reject directly without a terminal event. The settings snapshot fixes
+the destination for the current download; changing `model_dir` during download
+changes what subsequent status checks and dictations see. Query status again after
+a terminal event or settings change. Terminal events see `downloading: false`.
