@@ -1,6 +1,6 @@
 # Third-party notices
 
-No third-party source code or artwork has been copied into this scaffold. The placeholder icon is original to Parla.
+Adapted third-party source and design patterns are attributed below. The placeholder icon is original to Parla.
 
 Dependencies retain their own licenses; dependency versions are recorded in `package-lock.json` and `src-tauri/Cargo.lock`.
 
@@ -129,3 +129,15 @@ SOFTWARE.
 - `src-tauri/tests/fixtures/hello.wav` was generated locally with espeak-ng
   1.52.0 (GPLv3), then resampled to 16 kHz mono with ffmpeg. It is synthesized
   audio output, not copied source code or third-party recorded material.
+
+## PARLA-4 OpenAI client research
+
+- Reviewed https://github.com/cjpais/transcribe-rs (`Cargo.toml` and
+  `src/remote/openai.rs`, MIT) on 2026-10-15. Its `openai` feature pulls in
+  `async-openai`/Tokio and accepts audio file paths with a fixed model enum.
+  Parla uses an original small blocking reqwest client instead, to upload
+  in-memory WAV bytes, support arbitrary model settings and control timeouts.
+  No source was copied from transcribe-rs.
+- Added dependencies: reqwest (MIT OR Apache-2.0, default features disabled,
+  rustls TLS), serde / serde_json (MIT OR Apache-2.0), and @tauri-apps/api
+  (MIT OR Apache-2.0). See their upstream licenses and the lockfiles.

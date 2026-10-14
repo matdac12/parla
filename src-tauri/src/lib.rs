@@ -1,22 +1,35 @@
+use tauri::Manager;
+
 mod bench;
 pub mod clip;
+mod commands;
+pub mod failure;
 mod flow;
 pub mod hotkey;
 pub mod inserter;
-mod provider;
+pub mod provider;
 pub mod recorder;
-mod settings;
-mod timing;
+pub mod settings;
+pub mod timing;
 mod tray;
 
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             tray::setup(app)?;
-            recorder::warm_up();
+            let config = settings::load(&settings::path(app.handle())?).unwrap_or_else(|error| {
+                eprintln!("{error}; using defaults until settings are repaired");
+                settings::Settings::default()
+            });
+            app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
+            app.manage(failure::LastFailedClip::default());
             flow::setup(app)?;
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::settings::get_settings,
+            commands::settings::save_settings,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Parla");
 }
