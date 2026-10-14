@@ -1,7 +1,7 @@
 mod bench;
 mod flow;
-mod hotkey;
-mod inserter;
+pub mod hotkey;
+pub mod inserter;
 mod provider;
 mod recorder;
 mod settings;
@@ -12,6 +12,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             tray::setup(app)?;
+            flow::setup(app)?;
             Ok(())
         })
         .run(tauri::generate_context!())
