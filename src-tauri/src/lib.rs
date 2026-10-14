@@ -28,6 +28,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::providers::list_providers,
             commands::settings::get_settings,
             commands::settings::save_settings,
         ])

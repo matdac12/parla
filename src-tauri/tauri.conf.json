@@ -14,6 +14,7 @@
       {
         "label": "main",
         "title": "Parla Settings",
+        "url": "settings.html",
         "width": 640,
         "height": 480,
         "visible": false

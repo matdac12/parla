@@ -1,1 +1,73 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Parla Settings</title></head><body><main><h1>Settings</h1><p>Coming in PARLA-8.</p></main></body></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parla Settings</title>
+    <script type="module" src="/src/settings.ts"></script>
+  </head>
+  <body>
+    <main>
+      <header class="page-head">
+        <h1>Parla Settings</h1>
+        <p class="subtitle">
+          Hold the hotkey, speak, release, and the transcript is pasted into the focused app.
+        </p>
+      </header>
+
+      <p id="load-error" class="banner banner-error" hidden></p>
+
+      <form id="settings-form">
+        <section class="card">
+          <h2>Active provider</h2>
+          <div id="providers" class="provider-list" role="radiogroup" aria-label="Active provider"></div>
+        </section>
+
+        <div id="provider-config"></div>
+
+        <section class="card">
+          <h2>Hotkey</h2>
+          <div class="field">
+            <label for="hotkey">Accelerator</label>
+            <div class="hotkey-row">
+              <input
+                id="hotkey"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Ctrl+Space"
+                aria-describedby="hotkey-hint"
+              />
+              <button type="button" id="capture" class="secondary">Record keys</button>
+            </div>
+            <p id="hotkey-hint" class="hint">
+              Examples: <code>Ctrl+Space</code>, <code>Ctrl+Shift+F9</code>. Press “Record keys”, then
+              hold the combination you want (Esc cancels). Rebinding takes effect immediately on save.
+            </p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Clipboard</h2>
+          <div class="field">
+            <label for="delay">Restore delay (ms)</label>
+            <input id="delay" type="number" min="50" max="2000" step="50" inputmode="numeric" />
+            <p class="hint">
+              How long Parla waits after pasting before restoring your previous clipboard (50–2000 ms).
+              Raise it if a slow app pastes the old clipboard.
+            </p>
+          </div>
+        </section>
+
+        <div class="actions">
+          <span id="status" class="status" role="status" aria-live="polite"></span>
+          <button type="submit" id="save">Save</button>
+        </div>
+      </form>
+
+      <p class="footer-hint">
+        Settings are stored in the Parla app config folder. Close this window to keep Parla in the tray.
+      </p>
+    </main>
+  </body>
+</html>
