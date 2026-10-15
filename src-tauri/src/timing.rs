@@ -24,6 +24,10 @@ pub struct DictationRecord {
     pub audio_ms: u64,
     pub text: String,
     pub error: Option<String>,
+    /// Groups the per-provider rows of one benchmark run (PARLA-10). Absent on
+    /// dictation rows and on rows written before the benchmark existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_run_id: Option<String>,
 }
 impl DictationRecord {
     pub fn new(started_at: SystemTime, provider_id: &str) -> Self {
@@ -45,6 +49,7 @@ impl DictationRecord {
             audio_ms: 0,
             text: String::new(),
             error: None,
+            bench_run_id: None,
         }
     }
 }

@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod failure;
 pub mod history;
 pub mod models;

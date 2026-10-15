@@ -26,6 +26,14 @@
         "width": 960,
         "height": 600,
         "visible": false
+      },
+      {
+        "label": "bench",
+        "title": "Parla Benchmark",
+        "url": "bench.html",
+        "width": 960,
+        "height": 640,
+        "visible": false
       }
     ],
     "security": {

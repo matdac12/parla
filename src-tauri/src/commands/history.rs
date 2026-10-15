@@ -3,6 +3,10 @@
 use crate::history::{History, DEFAULT_LIMIT};
 use tauri::Manager;
 
+/// The history view lists dictations only; benchmark rows belong to the
+/// benchmark window (`bench_runs`).
+const DICTATION_KIND: &str = "dictation";
+
 /// Newest-first history rows. `limit` defaults to `DEFAULT_LIMIT` and is
 /// capped by `History::load_recent`, so the file never has to fit in memory.
 #[tauri::command]
@@ -14,7 +18,7 @@ pub async fn get_history(
     tauri::async_runtime::spawn_blocking(move || {
         Ok(app
             .try_state::<History>()
-            .map(|history| history.load_recent(limit))
+            .map(|history| history.load_recent_kind(limit, Some(DICTATION_KIND)))
             .unwrap_or_default())
     })
     .await
