@@ -10,9 +10,10 @@ use tauri::{
 
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let history = MenuItem::with_id(app, "history", "History…", true, None::<&str>)?;
     let test_mic = MenuItem::with_id(app, "test_mic", "Test mic (3 s)", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings, &test_mic, &quit])?;
+    let menu = Menu::with_items(app, &[&settings, &history, &test_mic, &quit])?;
 
     // Tauri's native tray API: https://v2.tauri.app/learn/system-tray/
     TrayIconBuilder::with_id("parla")
@@ -24,35 +25,45 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .tooltip("Parla")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "settings" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(error) = window
-                        .unminimize()
-                        .and_then(|()| window.show())
-                        .and_then(|()| window.set_focus())
-                    {
-                        eprintln!("failed to open settings: {error}");
-                    }
-                }
-            }
+            "settings" => show_window(app, "main", "settings"),
+            "history" => show_window(app, "history", "history"),
             "test_mic" => run_test_mic(app),
             "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
 
-    if let Some(window) = app.get_webview_window("main") {
-        let settings_window = window.clone();
-        window.on_window_event(move |event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                if let Err(error) = settings_window.hide() {
-                    eprintln!("failed to hide settings: {error}");
+    // Closing either window hides it instead of destroying it, so the tray
+    // item can show it again.
+    for (label, what) in [("main", "settings"), ("history", "history")] {
+        if let Some(window) = app.get_webview_window(label) {
+            let hide_target = window.clone();
+            window.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(error) = hide_target.hide() {
+                        eprintln!("failed to hide the {what} window: {error}");
+                    }
                 }
-            }
-        });
+            });
+        }
     }
     Ok(())
+}
+
+/// Shows, unminimizes and focuses a hidden window, or logs why it could not.
+fn show_window(app: &tauri::AppHandle, label: &str, what: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        eprintln!("failed to open {what}: window is unavailable");
+        return;
+    };
+    if let Err(error) = window
+        .unminimize()
+        .and_then(|()| window.show())
+        .and_then(|()| window.set_focus())
+    {
+        eprintln!("failed to open {what}: {error}");
+    }
 }
 
 /// Records three seconds from the default microphone, saves it as

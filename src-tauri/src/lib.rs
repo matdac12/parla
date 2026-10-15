@@ -5,6 +5,7 @@ pub mod clip;
 mod commands;
 pub mod failure;
 mod flow;
+pub mod history;
 pub mod hotkey;
 pub mod inserter;
 pub mod provider;
@@ -24,6 +25,9 @@ pub fn run() {
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
             app.manage(commands::settings::SaveLock::default());
+            if let Err(error) = history::setup(app) {
+                eprintln!("History disabled: {error}");
+            }
             flow::setup(app)?;
             Ok(())
         })
@@ -31,6 +35,8 @@ pub fn run() {
             commands::providers::list_providers,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::history::get_history,
+            commands::history::clear_history,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Parla");

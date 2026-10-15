@@ -18,6 +18,14 @@
         "width": 640,
         "height": 480,
         "visible": false
+      },
+      {
+        "label": "history",
+        "title": "Parla History",
+        "url": "history.html",
+        "width": 960,
+        "height": 600,
+        "visible": false
       }
     ],
     "security": {
