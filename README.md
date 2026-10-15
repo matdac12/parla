@@ -1,14 +1,45 @@
 # Parla
 
-Parla is a Windows push-to-talk dictation app focused on speed: hold a hotkey, speak, release, and paste the transcript into the focused app.
-It will compare local and cloud speech-to-text providers by latency; see the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md). The core flow records the microphone, transcribes through OpenAI or xAI, and pastes on Windows; the history view lists past dictations with per-stage latency, while the settings/benchmark pages are placeholders.
+Parla is a Windows push-to-talk dictation app where speed comes first: hold a
+hotkey, speak, release, and the raw transcript is pasted into the focused app.
+It records the microphone on key-down, transcribes the whole clip on release
+through OpenAI, xAI Grok, or a local Parakeet V3 model, and appends per-stage
+latency to a local history so providers can be compared on your own voice and
+network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md).
+
+## Quick start on Windows
+
+1. Open the latest green **CI** run on `main` under
+   [Actions](https://github.com/matdac6/parla/actions) and download the
+   `parla-windows-x64` artifact.
+2. Extract the whole folder. `parla.exe` and the ONNX Runtime `.dll` files
+   (including `DirectML.dll`) must stay in the same folder; copying only the
+   executable will fail to start.
+3. Run `parla.exe`. It has no main window: it lives in the system tray.
+   WebView2 is required (preinstalled on Windows 11; see
+   [prerequisites](#windows-prerequisites)).
+4. Open the tray menu and choose **Settings…**, paste an OpenAI or xAI API key
+   (or download the local Parakeet model), then **Save**.
+5. Focus Notepad, hold **Ctrl+Space**, speak, release. The transcript is pasted
+   into the focused app.
 
 ## Windows prerequisites
 
-- Install [Rust via rustup](https://rustup.rs/), using the stable MSVC toolchain `x86_64-pc-windows-msvc`.
-- Install [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **Desktop development with C++**, including the Windows SDK and MSVC compiler.
-- Install [Node.js LTS](https://nodejs.org/en/download) with npm (Node 24 is used in CI).
-- Install the [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section) on Windows 10. It is preinstalled on Windows 11.
+Building needs:
+
+- [Rust via rustup](https://rustup.rs/) with the stable MSVC toolchain
+  `x86_64-pc-windows-msvc`.
+- [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+  with **Desktop development with C++**, which includes the MSVC compiler and
+  the Windows SDK.
+- [Node.js LTS](https://nodejs.org/en/download) with npm (CI uses Node 24).
+- The [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section).
+  It is preinstalled on Windows 11 and required on Windows 10.
+- **Internet during the first build.** Cargo fetches `transcribe-rs` from its
+  GitHub revision, and `ort-sys` (via the `ort` crate's default
+  `download-binaries` feature) downloads a prebuilt ONNX Runtime archive from
+  `cdn.pyke.io` and copies its companion DLLs next to the executable. `npm ci`
+  also fetches packages. A later offline rebuild works from the cargo/npm caches.
 
 See also [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/).
 
@@ -23,7 +54,8 @@ npm ci
 npm run tauri dev
 ```
 
-The app starts in the tray. Choose **Settings…** to open or focus its window. Closing the window hides it; choose **Quit** in the tray menu to exit.
+The dev app starts in the tray. Choose **Settings…** in the tray to open its
+window. Closing any window hides it; choose **Quit** to exit.
 
 For a standalone executable, from the repository root:
 
@@ -32,17 +64,52 @@ npm run tauri build -- --no-bundle
 .\src-tauri\target\release\parla.exe
 ```
 
-The build leaves `parla.exe` and its required DLLs, including `DirectML.dll`, in
-`src-tauri\target\release\`. Keep the executable and DLLs in the same folder;
-copying only the executable will prevent startup. Or download the `parla-windows-x64` artifact from the latest green [GitHub Actions run](https://github.com/matdac6/parla/actions), extract the whole artifact into one folder, and run `parla.exe`. WebView2 is still required; no installer is produced.
+The build leaves `parla.exe` and the ONNX Runtime companion DLLs (including
+`DirectML.dll`) in `src-tauri\target\release\`. Keep them in the same folder;
+copying only the executable will prevent startup. No installer, code signing, or
+auto-update is produced.
 
-For frontend development alone: `npm run dev`. To type-check and build it: `npm run build`.
+The first build compiles the whole Rust dependency tree and downloads ONNX
+Runtime, so expect several minutes; incremental rebuilds are much faster.
+For frontend-only work, `npm run dev` serves the pages, and `npm run build`
+type-checks and bundles them.
 
-## API keys
+## Using Parla
 
-Settings live at **`%APPDATA%\com.matdac6.parla\settings.json`** on Windows.
-Create the directory/file before launching, or save through the settings commands
-once the settings UI is available. Missing fields use defaults. Example:
+The tray menu contains, in order:
+
+- **Settings…** — shows or focuses the settings window (providers, keys, hotkey,
+  restore delay, Parakeet model).
+- **History…** — shows the dictation history window.
+- **Benchmark…** — shows the benchmark window.
+- **Test mic (3 s)** — records three seconds from the default microphone, saves
+  it as `clips/test.wav` in the app data directory, and reveals the file in
+  Explorer.
+- **Retry last failed dictation** — enabled only while a recovery clip exists.
+- **Quit** — exits Parla.
+
+Hold-to-talk: pressing the hotkey starts microphone capture (the recorder adds a
+150 ms pre-roll so the first syllable is not clipped). Releasing the main key
+stops capture in either order — release Space, or release Ctrl first — and then
+the clip is transcribed and the raw transcript is pasted with Ctrl+V. Before
+pasting, Parla saves any nonempty text clipboard; after the paste and a delay it
+restores that text (best effort). The transcript is raw: no filler removal or
+rewriting. New holds that start while a dictation is finalizing, transcribing, or
+pasting are ignored through their release; nothing is queued. If no release
+arrives within 120 seconds of capture starting, Parla stops and transcribes the
+clip anyway.
+
+Parla opens the default input device once at startup and keeps its stream warm,
+so pressing the hotkey has no device-startup latency.
+
+## Providers and API keys
+
+The settings window lists every provider, whether it is ready, and lets you pick
+the active one. Keys and model names are written into `providers.<id>`.
+
+Settings live at **`%APPDATA%\com.matdac6.parla\settings.json`** on Windows
+(`~/.config/com.matdac6.parla/settings.json` on Linux). Missing fields use
+defaults. Example:
 
 ```json
 {
@@ -59,210 +126,268 @@ once the settings UI is available. Missing fields use defaults. Example:
       "api_key": "YOUR_XAI_API_KEY",
       "model": "grok-voice-transcribe-2.0",
       "language": null
+    },
+    "parakeet": {
+      "model_dir": null
     }
   }
 }
 ```
 
-`OPENAI_API_KEY` overrides the file's key, including an empty environment value.
-Set `"active_provider": "xai"` to dictate through xAI. Its key can be overridden
-with `XAI_API_KEY` instead, using the same rules.
-For the current PowerShell session (then launch Parla from that session):
+Keys are stored as plaintext in the file. Environment variables override the
+file's key at request time and are never written to the file or returned by
+`get_settings`: `OPENAI_API_KEY` for OpenAI and `XAI_API_KEY` for xAI (an
+environment value, even an empty one, wins over the file). `language` is `null`
+for automatic detection or an ISO code such as `"it"`. Model names are
+configurable per provider.
 
-```powershell
-$env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
-.\src-tauri\target\release\parla.exe
-```
+### OpenAI
 
-Keys in the JSON file are stored as plaintext. Environment overrides are resolved
-at request time and are never written to the file or returned by `get_settings`.
-Leave `language` null for automatic detection, or use an ISO language code such
-as `"it"`. Model names are configurable per provider.
-
-Verified against official OpenAI documentation on 2026-10-15:
+Verified against the official documentation on 2026-10-15:
 [`POST /v1/audio/transcriptions`](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
-accepts multipart `file` (16 kHz mono WAV here) and `model`, returning JSON with
-`text`. The spec's [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe)
-is now listed and remains the default, at an estimated
+accepts a multipart `file` (16 kHz mono WAV) plus `model` and
+`response_format=json`, and returns JSON with `text`. The default model is
+[`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe)
+at an estimated
 **[$0.0045 per audio minute](https://developers.openai.com/api/docs/pricing)**.
-No local latency comparison has been run; the model setting allows benchmarking
-against alternatives such as `gpt-4o-mini-transcribe` (estimated $0.003/min).
-One shared rustls HTTP client reuses connections, with a 5 s connect timeout and
-30 s total request timeout. Requests do not retry automatically.
-
-The live integration test uses the committed speech fixture and only contacts
-OpenAI when `OPENAI_API_KEY` is set. Run `cargo test --test openai_live -- --nocapture`
-from `src-tauri/` to see the skip note when no key is available.
+A non-null `language` is sent as the `language` field. The upload cap is 25 MB.
 
 ### xAI Grok
 
-Verified against official xAI documentation on 2026-10-15:
+Verified against the official xAI documentation on 2026-10-15:
 [`POST https://api.x.ai/v1/stt`](https://docs.x.ai/developers/rest-api-reference/inference/speech-to-text)
-accepts multipart `file` (16 kHz mono WAV here, sent last) plus `model`, returning
-JSON with `text`; the request shape and response come from the
+accepts a multipart `file` (16 kHz mono WAV here, sent last) plus `model`, and
+returns JSON with `text`; the request shape comes from the
 [Speech to Text guide](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text).
-The default model is [`grok-voice-transcribe-2.0`](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text)
-(batch), at **[$0.10 per audio hour](https://docs.x.ai/developers/model-capabilities/audio/voice)**
-(about $0.0017/min). A non-null `language` code is also sent as the `format=true`
-option so spoken numbers and currencies are normalized. xAI's batch endpoint
-supports up to 500 MB; the client sets a 5 s connect timeout and 30 s total
-request timeout and does not retry automatically.
+The default model is
+[`grok-voice-transcribe-2.0`](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text)
+(batch) at **[$0.10 per audio hour](https://docs.x.ai/developers/model-capabilities/audio/voice)**
+(about $0.0017/min). A non-null `language` is also sent with `format=true` so
+spoken numbers and currencies are normalized. The batch endpoint accepts up to
+500 MB.
 
-The live integration test only contacts xAI when `XAI_API_KEY` is set. Run
-`cargo test --test xai_live -- --nocapture` from `src-tauri/` to see the skip note
-when no key is available.
+Both cloud providers share one connection-reusing rustls HTTP client with a 5 s
+connect timeout and a 30 s total request timeout, and neither retries
+automatically. There is no local latency comparison yet; set a different model
+to benchmark alternatives (for example `gpt-4o-mini-transcribe`).
 
-For the PARLA-8 UI, `invoke("save_settings", { settings })` resolves to
-`{ "warning": null }` on success, or `{ "warning": "Settings saved, but hotkey was not applied: …" }`
-when persistence succeeded but runtime rebinding failed. Show that warning without
-reporting the save as failed: API keys/provider/delay and the requested hotkey are
-already persisted. The previous runtime binding remains active (or the listener
-stays unavailable). Only a changed hotkey is reapplied. Disk failures reject the
-invoke and leave runtime/shared settings unchanged. `get_settings` continues to
-return the complete saved settings object. Saves are serialized separately from
-the shared settings lock; neither disk IO nor main-thread rebinding holds that lock.
+## Local model (Parakeet V3)
 
-The settings window (tray **Settings…**) lists every registered provider with its
-availability, lets you pick the active one, and writes API keys and model names into
-`providers.<id>`. Keys are stored as plaintext; the password field has a show/hide
-toggle and never logs or echoes the value. Providers that are not ready are disabled
-with the reason shown inline (for example, a missing key or an undownloaded model), and
-the list refreshes after each save so typing a key enables its provider immediately.
+Choose **Parakeet V3 (local)** in Settings and click **Download model**
+(progress is shown inline). The one-time download needs internet; afterwards
+transcription runs on your CPU with no API key or network. The provider is
+unavailable until all four files are present at their expected sizes.
 
-## Hotkey
-
-Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space also works: the hold ends when Space comes up. Key-down starts microphone capture (including the recorder’s 150 ms pre-roll); Space-up stops it, transcribes with the selected provider, and pastes the raw transcript. New holds during recording finalization, transcription, or clipboard restoration are ignored through their release; nothing is queued. Each accepted hold snapshots settings, so saves affect the next dictation. If no release arrives within 120 seconds after recording starts, Parla stops and transcribes the captured clip as a forced release, records `hold exceeded 120 s`, then frees the session after transcription/paste finishes. A later press can recover the stale hold. A disconnected release channel also forces completion.
-
-On Windows, a keyboard-only low-level hook observes key-down/key-up events and ignores injected input; Tauri's global-shortcut plugin reserves the accelerator so normal key handling does not consume it. `Hotkey::set_shortcut(&str)` supports runtime rebinding (for example `Ctrl+Shift+F9`); the settings UI comes later. Release the current hold before rebinding; press and release keys normally after app startup. Letters, digits, F1–F12, arrows, navigation, and common punctuation keys are supported; unsupported keys such as numpad and media keys are rejected. A failed registration retains the previous shortcut; if the default is taken at startup, Parla stays running with a disabled-hotkey tray tooltip so it can be rebound later; `Ctrl+V` is reserved for paste.
-
-Paste runs on a background worker: save nonempty clipboard text, publish the transcript, wait 100 ms, reuse an already-held Ctrl (or synthesize it), clear only currently-down conflicting modifiers, send Ctrl+V with a 100 ms modifier hold, then wait **250 ms** (`DEFAULT_RESTORE_DELAY_MS`) before restoring the previous text. The JSON/commands configure that restore delay; settings UI comes later. Timing records capture injection completion before the restoration delay, but the worker remains busy until restoration finishes. Clipboard restore is best effort, retries transient read/write failures up to five times with 100 ms total backoff, and rechecks for different copied text before every write. Empty or non-text clipboards are not restored: the transcript remains and previous non-text formats are lost. Slow apps may require a longer restore delay.
-
-The settings window's **Hotkey** field accepts accelerators such as `Ctrl+Space` or
-`Ctrl+Shift+F9`; **Record keys** captures one by holding the combination you want (Esc
-cancels). Saving rebinds immediately, without a restart. An accelerator that cannot be
-registered (for example the reserved `Ctrl+V`) leaves the previous binding active and is
-reported inline as a warning rather than failing the save.
-
-## History
-
-Every completed dictation (success or failure) is appended as one JSON object per line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is append-only; writes happen on a background thread after the paste, so they never block dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates dictations from benchmark rows.
-
-Open the **History…** tray item to see the newest dictations first. The columns are: the wall-clock time, the provider, the captured audio length, then the latency breakdown — **Ready** (key-up to audio ready), **Transcribe** (audio ready to provider returned), **Paste** (provider returned to input injection), and **Total** (key-up to pasted). A dash means that stage never completed (for example a failed transcription has no paste time). The transcript is truncated with the full text on hover or click; failures are tinted and show the error in red. The view updates live from the `dictation://recorded` event. **Clear history…** truncates the file after a confirmation.
-
-Reads are bounded: the view asks for the newest 200 rows and the backend walks the file backwards, so a large history never has to fit in memory. Corrupt lines are skipped rather than breaking the view.
-
-## Benchmark
-
-The **Benchmark…** tray item compares providers on your own voice and network.
-
-1. Click **Record clip**, speak, click **Stop recording** (it stops by itself after 30 s). Hotkey dictation is blocked while the benchmark owns the microphone.
-2. Click **Run benchmark**. The clip goes through every provider in turn (the order of the provider list); each row fills in as its provider finishes. **Run again** re-runs the same clip, so you can compare runs on identical audio. Providers that are not configured (no key, no model) appear as rows with the reason and are not called. A provider failing shows its error in its row and does not stop the others.
-
-What the numbers mean:
-- **Request**: time spent in the provider's transcribe call (encoding, upload, server time, download; inference for Parakeet).
-- **Total**: from handing the clip to that provider until its text is ready. A benchmark has no key-up, so "clip ready" stands in for it; expect it to be Request plus a few ms.
-- Providers run sequentially. Cloud providers get no warm-up, so the first request includes TLS setup, like the first dictation after a pause. Local Parakeet is warmed first with an untimed half-second of silence, so its model load is not counted in Request. The fastest successful row is highlighted.
-
-Storage: each provider result is a row in `history.jsonl` with `kind: "benchmark"` and a shared `bench_run_id` (for a benchmark row, `audio_ready` is when the request began and `provider_returned` the total, both relative to that provider's turn). The **Previous runs** list rebuilds runs from those rows. The clip is saved as `clips/bench-<id>.wav` in the app data directory.
-
-Tip: to compare providers, record the same sentence of ~5 s a few times on different days or networks, and compare Request across runs rather than trusting a single run; a single request can be an outlier.
-
-## Known limitations / untested on Windows
-
-- Everything in this repo was built on Linux; Windows behaviour has only been compiled in CI, not run.
-- This initial scaffold's Windows CI run is pending the orchestrator's push; no Windows build has been verified yet.
-- Tray visibility, Settings window focus, hide-on-close, and Quit need a manual Windows smoke test.
-- Hotkey release and paste have not been run on Windows. Verify Notepad, a browser text field, and Windows Terminal; try both release orders, a long hold, repeated short holds, and clipboard restoration under load. Try very rapid release/repress cycles too; event transitions use raw key-up notifications.
-- A non-elevated app cannot inject paste into elevated/admin windows (Windows UIPI). Secure desktop and applications that intercept Ctrl+V are unsupported.
-- The Windows hook is keyboard-only. A 100 ms watchdog (deferred during synthetic input) ends a hold if its key-up was missed; the hook refreshes after recovery and every five seconds while idle to recover silent timeout removal. Recovery refreshes modifier state without sampling our synthetic Ctrl hold. Hook permission, keyboard layouts, IME behavior, and lock/sleep recovery still need manual Windows checks. Rebinding briefly pauses hotkey dispatch.
-- Windows Terminal must allow Ctrl+V paste. Ctrl+Space may conflict with an IME or another global shortcut; registration failure is reported during startup.
-- Paste reuses Ctrl if it is already down, and injected cleanup cannot change the physical modifier model. Cleared Alt/Shift/Windows modifiers may appear released to other apps until pressed again; test both left and right Ctrl and repeated Space presses while continuing to hold Ctrl.
-- Clipboard restoration uses a timed delay, not an acknowledgement from the receiving app. Clipboard managers or slow consumers can still cause stale/duplicate pastes. Restoration preserves text only, and comparing clipboard text does not detect copying identical text during the delay.
-- Linux can compile and test the app, but insertion is a no-op returning an unsupported error; the fallback global shortcut plugin requires a supported desktop (Wayland is not a supported target).
-- OpenAI and xAI dictation, microphone capture, settings persistence and UI, the history view, and failure notification/retry are implemented.
-- Transcription failures (missing configuration, network, authentication, timeout, empty audio/transcript) paste nothing. Parla shows a short notification and a red tray icon/error tooltip. Recorder startup failures also notify, but have no clip to retry. Clipboard/injection failures report an error too; an injection failure can occur after input has already reached the destination.
-- Choose **Retry last failed dictation** in the tray after fixing the issue, or call the `retry_last_failed` Tauri command. Tray retries wait 300 ms for the menu to dismiss; command retries start immediately. Retry uses the current settings/provider and **pastes into whichever app has focus when injection runs**. Busy requests report “Busy, try again” and keep the clip; failed retries keep it again. The item is enabled when a recovery clip exists, and disabled while a retry runs and after successful recovery.
-- The last failed clip is held in memory and saved as `<app data>/clips/last-failed.wav` (`%APPDATA%\com.matdac6.parla\clips\last-failed.wav` on Windows). It survives restarts, loads lazily on retry, and can be opened in an audio player. A new failure replaces it; a successful retry deletes it. This file contains your voice and remains until replaced or successfully retried; delete it manually while Parla is closed if unwanted. Disk-save failures are reported, attempt to remove the previous recovery file to prevent stale recovery after restart, and leave the in-memory retry available until exit.
-- [Tauri notification support](https://v2.tauri.app/plugin/notification/) is reliable on Windows only for installed apps with an AppUserModelID. Development may show PowerShell’s name/icon; delivery from the unpackaged `parla.exe` is not guaranteed. The red tray icon and error tooltip are always set for failures as a fallback, even when the notification API reports success. Any successful dictation restores the normal tray visuals; an ordinary success keeps the previous failed clip and its retry action available. Busy and post-success informational notices show a toast without changing the tray visuals. Notification delivery, recovery after restart, and retry focus/paste still need a Windows smoke test.
-- Settings are loaded at startup. Editing the JSON externally requires a restart; `save_settings` persists settings first, applies a changed hotkey with a nonfatal warning on failure, and uses the restore delay for the next dictation. A failed persisted hotkey registration leaves the default binding in place if available.
-- Timing emits `dictation://recorded` and logs stage timings, transcript length and failure status only (no transcript or raw provider error body); each record is also appended to `history.jsonl` (see **History**). Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
-- Real API transcription and end-to-end Windows dictation still require a configured key and a manual smoke test. The default model follows the spec; its latency has not been compared on this machine.
-
-## Local model (Parakeet)
-
-Choose **Parakeet V3 (local)** in Settings and use **Download Parakeet model**
-(the settings UI is supplied by PARLA-8). The one-time download requires internet;
-afterwards transcription stays on your CPU and needs no API key or network.
-Until all four files are present with the expected sizes the provider is unavailable.
-Downloads verify exact sizes and SHA-256 hashes in a sibling temporary directory,
-then publish the completed directory by rename. Failed downloads can be retried;
-partial downloads are discarded rather than resumed. The download command also
-uses an expected-size fast path for installed files, without re-reading 670 MB.
-An explicit repair (`download_model` with `repair: true`) verifies existing files'
-hashes and replaces corrupt installations. Normal downloads always verify incoming
-files. Downloads abort after 30 seconds without incoming bytes (15-second connect
-limit, one-hour total request cap); the busy flag clears so you can retry.
-Hugging Face requests identify the app with `User-Agent: parla/<version>`.
-
-The int8 NVIDIA Parakeet TDT 0.6B **V3** ONNX export occupies 670,619,706 bytes
-(about 640 MiB; allow at least 1.4 GB free while replacing an existing model).
-First use loads it into RAM; later dictations reuse the loaded model. When Parakeet
-is active at startup it warms in the background. CPU latency depends on the machine
-and clip length; the first load costs more than later dictations. No GPU is required.
-
-For a manual installation, download these exact files into
-`%LOCALAPPDATA%\com.matdac6.parla\models\parakeet-tdt-0.6b-v3\`:
+Four files, **670,619,706 bytes** total (about 640 MiB; allow at least 1.4 GB
+free while replacing an existing model), stored at
+**`%LOCALAPPDATA%\com.matdac6.parla\models\parakeet-tdt-0.6b-v3\`** on Windows
+(`~/.local/share/com.matdac6.parla/models/parakeet-tdt-0.6b-v3` on Linux):
 
 - [encoder-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.int8.onnx)
 - [decoder_joint-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.int8.onnx)
 - [nemo128.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx)
 - [vocab.txt](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt)
 
-Keep the filenames unchanged. This is Tauri v2 `app_local_data_dir()` for identifier
-`com.matdac6.parla`: Windows LocalAppData, so the model is not copied by roaming profiles.
-`model_status.model_dir` reports this resolved location. Settings and API keys stay
-in roaming `%APPDATA%\com.matdac6.parla\settings.json`. Existing models from the
-previous roaming folder are not moved automatically: move the four files to the
-new folder or set `providers.parakeet.model_dir` to their existing folder. On Linux it is
-`$XDG_DATA_HOME/com.matdac6.parla/models/parakeet-tdt-0.6b-v3` (normally
-`~/.local/share/com.matdac6.parla/models/parakeet-tdt-0.6b-v3`). To use another
-folder, set `providers.parakeet` to `{ "model_dir": "<absolute folder>" }` in
-settings.json; `null` uses the default. Set `active_provider` to `"parakeet"`.
+Keep the filenames unchanged. A download verifies exact sizes and SHA-256 hashes
+in a sibling temporary directory, then publishes the completed directory by
+rename; a failed download is discarded, not resumed, and can be retried.
+**Download model** also short-circuits when the installed files already match
+their expected sizes (without re-reading 670 MB). An explicit repair — verify
+existing hashes and replace a corrupt installation — is available through the
+`download_model` IPC command with `repair: true`; the settings window exposes
+only the normal download. Downloads abort after 30 s with no incoming bytes
+(15 s connect limit, one-hour total cap), and Hugging Face requests identify the
+app with `User-Agent: parla/<version>`.
 
-The Windows CI artifact includes `parla.exe` and ONNX Runtime companion DLLs;
-keep them together when extracting it. CI dereferences build-output symlinks into
-real files and refuses to upload an artifact without a `DirectML.dll` larger than
-1 MB. ONNX Runtime itself is statically linked
-using `ort`'s prebuilt CPU binaries. `transcribe-rs` is pinned to a git revision,
-and `ort`/`ort-sys` are pinned to the compatible rc.12 API. No model is bundled,
-committed, or downloaded by CI. The prebuilt Windows runtime links DirectML even
-when Parla uses CPU inference, so `DirectML.dll` is a load-time requirement. Under
-[Windows' standard DLL search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order),
-the application directory precedes System32; keeping the supplied DLL beside
-`parla.exe` selects the matching version rather than System32's DirectML DLL.
+Inference is CPU-only and needs no GPU. The model loads into RAM on first use
+(so the first dictation costs more) and is reused afterwards; when Parakeet is
+the active provider at startup, it warms in the background. To use a different
+folder, set `providers.parakeet.model_dir` to an absolute path (`null` uses the
+default) and set `active_provider` to `"parakeet"`.
 
-For an optional inference smoke test, set `PARLA_PARAKEET_MODEL_DIR` to an installed
+The Windows CI artifact bundles `parla.exe` and the ONNX Runtime companion DLLs.
+ONNX Runtime is statically linked from `ort`'s prebuilt CPU binaries; the
+prebuilt Windows runtime links DirectML even for CPU inference, so `DirectML.dll`
+is a load-time requirement and must sit beside `parla.exe`. No model is bundled,
+committed, or downloaded by CI.
+
+Optional inference smoke test: set `PARLA_PARAKEET_MODEL_DIR` to an installed
 model folder and run `cargo test provider::parakeet::tests::live_fixture` from
-`src-tauri`. Without that variable the test skips inference. An explicit network
-smoke test is available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
-`cargo test models::tests::live_download_only_when_explicitly_requested`; leave this
-variable unset in CI.
+`src-tauri`; without the variable the test skips. A network download test is
+available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
+`cargo test models::tests::live_download_only_when_explicitly_requested`.
 
-Settings IPC (listen before invoking; IDs are provider IDs):
+## Hotkey
 
-```typescript
-invoke('model_status', { id: 'parakeet' })
-// Promise<{ id: 'parakeet', model_dir: string, available: boolean, downloading: boolean }>
-invoke('download_model', { id: 'parakeet' }) // normal install; fast size check
-invoke('download_model', { id: 'parakeet', repair: true }) // verify hashes; repair if needed
-// Promise<void>, resolves after installation; rejects on error, unknown ID, or busy.
-// model://progress: { id: 'parakeet', downloaded: number, total: number } (aggregate bytes)
-// model://done:     { id: 'parakeet' }
-// model://error:    { id: 'parakeet', error: string }
+The default hotkey is hold **Ctrl+Space** (see
+[Using Parla](#using-parla) for the hold behaviour). Rebind it in the settings
+window: type an accelerator such as `Ctrl+Shift+F9`, or click **Record keys**
+and hold the combination you want (Esc cancels). Saving rebinds immediately,
+with no restart, and requires that no hold is in progress. An accelerator that
+cannot be registered leaves the previous binding active and is reported inline
+as a warning rather than failing the save. Letters, digits, F1–F12, arrows,
+navigation keys, and common punctuation are supported; numpad and media keys are
+rejected, and **Ctrl+V is reserved** for pasting.
+
+On Windows the hotkey is a keyboard-only low-level hook that ignores injected
+input; Tauri's global-shortcut plugin merely reserves the accelerator. If the
+default is already taken at startup, Parla keeps running with a
+disabled-hotkey tray tooltip so you can rebind it in Settings. `Ctrl+Space` can
+also conflict with an IME or another global shortcut.
+
+## History
+
+Every completed dictation (success or failure) is appended as one JSON object per
+line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows
+(`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is
+append-only and written on a background thread after the paste, so it never
+blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
+two kinds of row.
+
+Tray **History…** lists dictations newest first with: wall-clock time, provider,
+captured audio length, then the latency breakdown — **Ready** (key-up to audio
+ready), **Transcribe** (audio ready to provider returned), **Paste** (provider
+returned to input injection), and **Total** (key-up to pasted). A dash means that
+stage never completed (a failed transcription has no paste time). The transcript
+is truncated, with the full text on hover or click; failures are tinted and show
+the error. The view updates live and **Clear history…** truncates the file after
+a confirmation. Reads are bounded: the view requests the newest 200 rows and the
+backend walks the file backwards, so a large history never has to fit in memory;
+corrupt lines are skipped.
+
+## Benchmark
+
+Tray **Benchmark…** compares providers on your own voice and network.
+
+1. Click **Record clip**, speak, click **Stop recording** (it stops by itself
+   after 30 s). Hotkey dictation is blocked while the benchmark owns the
+   microphone.
+2. Click **Run benchmark**. The clip goes through every registered provider in
+   turn; each row fills in as its provider finishes. **Run again** re-runs the
+   same clip, so runs compare identical audio. Providers that are not configured
+   appear as rows with the reason and are not called; one provider failing shows
+   its error and does not stop the others.
+
+What the numbers mean:
+
+- **Request** — time in the provider's transcribe call (encoding, upload, server
+  time, and download for cloud providers; inference for Parakeet).
+- **Total** — from handing the clip to that provider until its text is ready. A
+  benchmark has no key-up, so "clip ready" stands in for it; expect Request plus
+  a few milliseconds.
+
+Providers run sequentially. Cloud providers get no warm-up, so the first request
+includes TLS setup, like the first dictation after a pause. Local Parakeet is
+warmed with an untimed half-second of silence so its model load is not counted.
+The fastest successful row is highlighted.
+
+Storage: each provider result is a row in `history.jsonl` with
+`kind: "benchmark"` and a shared `bench_run_id`; the **Previous runs** list
+rebuilds runs from those rows. The clip is saved as `clips/bench-<id>.wav` in the
+app data directory. To compare providers, record the same ~5 s sentence a few
+times and compare Request across runs rather than trusting a single run.
+
+## When something fails
+
+A transcription failure (missing configuration, network, authentication,
+timeout, empty audio, or an empty transcript) pastes nothing: Parla shows a
+short notification and sets a red tray icon and error tooltip. Recorder startup
+failures notify too, but there is no clip to retry. Clipboard and injection
+failures also report an error; an injection failure can occur after input has
+already reached the destination.
+
+To recover, choose **Retry last failed dictation** in the tray after fixing the
+issue (the tray waits 300 ms for the menu to dismiss; the `retry_last_failed`
+command starts immediately). Retry uses the current settings/provider and pastes
+into whichever app has focus when injection runs. Busy retries report
+"Busy, try again" and keep the clip; failed retries keep it as well.
+
+The last failed clip is held in memory and saved as
+**`%APPDATA%\com.matdac6.parla\clips\last-failed.wav`**. It survives restarts,
+loads lazily on retry, and can be opened in an audio player. A new failure
+replaces it; a successful retry deletes it. It contains your voice and stays
+until replaced or successfully retried — delete it manually while Parla is
+closed if you don't want it kept.
+
+Notification delivery on Windows is guaranteed only for installed apps with an
+AppUserModelID; development may show PowerShell's name and icon, and delivery
+from the unpackaged `parla.exe` is not guaranteed. The red tray icon and error
+tooltip are always set as a fallback.
+
+## Development
+
+From `src-tauri/`, with Rust on `PATH`:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-`model://error` reports an accepted download failing; unknown IDs and concurrent
-invocations reject directly without a terminal event. The settings snapshot fixes
-the destination for the current download; changing `model_dir` during download
-changes what subsequent status checks and dictations see. Query status again after
-a terminal event or settings change. Terminal events see `downloading: false`.
+and from the repository root, `npm ci && npm run build` if you touched the
+frontend.
+
+Linux can compile, format, lint, and unit-test the app, but text insertion is a
+no-op that returns an unsupported error (Windows is the target), and the global
+shortcut backend needs a supported desktop (Wayland is not supported). Live
+tests are gated by environment variables and skip when absent:
+
+- `OPENAI_API_KEY` — `cargo test --test openai_live`
+- `XAI_API_KEY` — `cargo test --test xai_live`
+- `PARLA_PARAKEET_MODEL_DIR` — `cargo test provider::parakeet::tests::live_fixture`
+- `PARLA_PARAKEET_DOWNLOAD_DIR` — `cargo test models::tests::live_download_only_when_explicitly_requested`
+
+CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
+`npx tauri build --no-bundle`, stages `parla.exe` and the ONNX Runtime DLLs
+(failing if a real `DirectML.dll` larger than 1 MB is missing), and uploads the
+`parla-windows-x64` artifact. The `linux` job runs `cargo fmt --check`,
+`cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and
+`npm ci && npm run build`.
+
+## Known limitations / untested on Windows
+
+Everything here was built on Linux and only compiled and unit-tested in CI on the
+Windows runner; nothing has been run on Windows yet. The list below is what needs
+a manual Windows smoke test or is a known limitation.
+
+- **No installer, code signing, or auto-update.** The app ships as a plain
+  `--no-bundle` build. Windows SmartScreen will likely warn on first run; signed
+  and packaged behavior (including reliable notifications) is untested.
+- **Tray, windows, and lifecycle.** Tray visibility, settings/history/benchmark
+  window focus, hide-on-close, and Quit need a manual Windows check.
+- **Hotkey and paste.** Hotkey release and pasting have not been run on Windows.
+  Test Notepad, a browser text field, and Windows Terminal; try both release
+  orders, a long hold, repeated short holds, very rapid release/repress cycles
+  (event transitions use raw key-up notifications), and clipboard restoration
+  under load.
+- **Elevated windows.** A non-elevated app cannot inject paste into
+  elevated/admin windows (Windows UIPI). Secure desktop and applications that
+  intercept Ctrl+V are unsupported. Windows Terminal must be allowed to paste
+  with Ctrl+V.
+- **Keyboard hook.** The hook is keyboard-only. A 100 ms watchdog (deferred
+  during synthetic input) ends a hold whose key-up was missed; the hook refreshes
+  after recovery and every five seconds while idle to survive silent timeout
+  removal. Hook permission, keyboard layouts, IME behavior, and lock/sleep
+  recovery still need manual Windows checks, and rebinding briefly pauses hotkey
+  dispatch.
+- **Modifiers.** Paste reuses Ctrl if it is already held, and injected cleanup
+  cannot change the physical modifier model: cleared Alt/Shift/Windows modifiers
+  can appear released to other apps until pressed again. Test both left and right
+  Ctrl and repeated Space presses while continuing to hold Ctrl.
+- **Clipboard restore is best effort.** Restoration uses a timed delay, not an
+  acknowledgement from the receiving app, so clipboard managers or slow consumers
+  can cause stale or duplicate pastes. Only text is preserved (empty or non-text
+  clipboards are not restored, and previous non-text formats are lost);
+  comparing clipboard text does not detect copying identical text during the
+  delay. A longer restore delay helps slow apps.
+- **Local Parakeet.** The first run loads the whole model into RAM, costing more
+  than later dictations; inference is CPU-only. Allow ~1.4 GB free while
+  replacing the model.
+- **Settings reload.** Settings are read at startup; editing `settings.json`
+  externally requires a restart.
+- **Real end-to-end dictation.** Live transcription needs a configured key (or a
+  downloaded local model) and a manual smoke test; the default models' latency
+  has not been compared on this machine.
+- **Linux.** Compiles and tests, but insertion is a no-op and Wayland is not a
+  supported desktop.
