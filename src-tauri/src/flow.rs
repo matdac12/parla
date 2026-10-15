@@ -232,6 +232,9 @@ fn finish_session_with_error(
             result
         }
     };
+    if result.is_ok() {
+        crate::failure::on_success(app);
+    }
     record.error = match (hold_error, result.err()) {
         (Some(hold), Some(error)) => Some(format!("{hold}; {error}")),
         (Some(hold), None) => Some(hold),

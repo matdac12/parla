@@ -76,16 +76,15 @@ pub fn user_message(provider_display_name: &str, error: &ProviderError) -> Strin
 pub fn notify_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
     let provider = registry::get(provider_id);
     let name = provider.as_ref().map_or("Provider", |p| p.display_name());
-    notify(app, &user_message(name, error));
+    notify_failure(app, &user_message(name, error));
 }
 
-fn notify(app: &tauri::AppHandle, message: &str) {
+fn notify_failure(app: &tauri::AppHandle, message: &str) {
     // Windows support is guaranteed only for installed apps. The plugin uses the
     // configured identifier for installed builds; development can use PowerShell's
     // AUMID. Standalone exe delivery may silently fail, so ALWAYS set the tray fallback.
     // https://v2.tauri.app/plugin/notification/
     // https://github.com/tauri-apps/plugins-workspace/blob/v2/plugins/notification/src/desktop.rs
-    eprintln!("Parla: {message}");
     if let Some(tray) = app.tray_by_id("parla") {
         if let Err(error) = tray.set_tooltip(Some(format!("Parla — {message}"))) {
             eprintln!("Cannot update error tooltip: {error}");
@@ -108,15 +107,35 @@ fn notify(app: &tauri::AppHandle, message: &str) {
             eprintln!("Cannot update error icon: {error}");
         }
     }
+    show_toast(app, "Parla — dictation failed", message);
+}
+
+fn notify_info(app: &tauri::AppHandle, message: &str) {
+    show_toast(app, "Parla", message);
+}
+
+fn show_toast(app: &tauri::AppHandle, title: &str, message: &str) {
+    eprintln!("Parla: {message}");
     if let Err(error) = app
         .notification()
         .builder()
-        .title("Parla — dictation failed")
+        .title(title)
         .body(message)
         .show()
     {
         eprintln!("Notification could not be sent: {error}");
     }
+}
+
+/// A successful paste clears error visuals only. Previous recovery audio and
+/// retry availability intentionally survive an ordinary successful dictation.
+pub fn on_success(app: &tauri::AppHandle) {
+    if let Some(tray) = app.tray_by_id("parla") {
+        if let Err(error) = tray.set_icon(app.default_window_icon().cloned()) {
+            eprintln!("Cannot restore tray icon: {error}");
+        }
+    }
+    crate::hotkey::update_tooltip(app, app.try_state::<crate::hotkey::Hotkey>().is_some());
 }
 
 pub fn clip_path(app: &tauri::AppHandle) -> tauri::Result<PathBuf> {
@@ -127,12 +146,27 @@ pub fn clip_path(app: &tauri::AppHandle) -> tauri::Result<PathBuf> {
         .join("last-failed.wav"))
 }
 fn save_clip(path: &Path, clip: &Clip) -> anyhow::Result<()> {
-    // Publish a complete WAV, leaving the previous recovery file intact if writing fails.
+    // Publish a complete WAV. If replacement fails, remove the previous clip so
+    // a restart cannot mistake stale audio for the newest failed dictation.
     let temporary = path.with_extension("wav.tmp");
-    clip.save_wav(&temporary)?;
-    std::fs::rename(temporary, path)?;
-    Ok(())
+    let result = clip
+        .save_wav(&temporary)
+        .and_then(|()| std::fs::rename(&temporary, path).map_err(anyhow::Error::from));
+    if result.is_err() {
+        for stale in [path, temporary.as_path()] {
+            if let Err(error) = std::fs::remove_file(stale) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "Cannot remove stale recovery audio {}: {error}",
+                        stale.display()
+                    );
+                }
+            }
+        }
+    }
+    result
 }
+
 fn load_clip(path: &Path) -> anyhow::Result<Option<FailedDictation>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -181,7 +215,7 @@ pub fn on_failure(app: &tauri::AppHandle, error: ProviderError, clip: Clip, prov
     set_retry_enabled(app, true);
     notify_error(app, provider_id, &error);
     if persisted.is_err() {
-        notify(
+        notify_info(
             app,
             "Failed clip kept in memory, but could not save it to disk. Retry before quitting.",
         );
@@ -193,7 +227,7 @@ pub fn on_failure(app: &tauri::AppHandle, error: ProviderError, clip: Clip, prov
 pub fn retry_last_failed(app: &tauri::AppHandle) -> Result<(), String> {
     let retry_lock = app.state::<RetryLock>();
     let Ok(_retry) = retry_lock.0.try_lock() else {
-        notify(app, "Busy, try again");
+        notify_info(app, "Busy, try again");
         return Err("Busy, try again".into());
     };
     let failed = app.state::<LastFailedClip>();
@@ -205,7 +239,7 @@ pub fn retry_last_failed(app: &tauri::AppHandle) -> Result<(), String> {
         {
             Ok(saved) => saved,
             Err(_) => {
-                notify(
+                notify_failure(
                     app,
                     "Could not read the saved failed clip. Record a new dictation.",
                 );
@@ -219,7 +253,7 @@ pub fn retry_last_failed(app: &tauri::AppHandle) -> Result<(), String> {
             restore_failed(&failed, saved);
             set_retry_enabled(app, true);
         }
-        notify(app, "Busy, try again");
+        notify_info(app, "Busy, try again");
         return Err("Busy, try again".into());
     };
     // The active dictation may have failed between taking the old clip and
@@ -259,15 +293,10 @@ pub fn retry_last_failed(app: &tauri::AppHandle) -> Result<(), String> {
     {
         eprintln!("Cannot remove recovered clip: {error}");
         set_retry_enabled(app, true);
-        notify(
+        notify_info(
             app,
             "Dictation pasted, but the old recovery file could not be removed.",
         );
-    } else if let Some(tray) = app.tray_by_id("parla") {
-        if let Err(error) = tray.set_icon(app.default_window_icon().cloned()) {
-            eprintln!("Cannot restore tray icon: {error}");
-        }
-        crate::hotkey::update_tooltip(app, app.try_state::<crate::hotkey::Hotkey>().is_some());
     }
     Ok(())
 }
@@ -406,6 +435,23 @@ mod tests {
             },
         );
         assert_eq!(take_failed(&failed).unwrap().clip.samples, [2]);
+    }
+
+    #[test]
+    fn failed_save_does_not_resurrect_the_previous_clip_after_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "parla-retry-save-failure-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = dir.join("last-failed.wav");
+        save_clip(&path, &Clip::new(vec![1])).unwrap();
+        // A directory at the temporary path deterministically prevents writing
+        // the replacement WAV, without relying on Unix permissions or disk size.
+        std::fs::create_dir(path.with_extension("wav.tmp")).unwrap();
+        assert!(save_clip(&path, &Clip::new(vec![2])).is_err());
+        assert!(load_clip(&path).unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

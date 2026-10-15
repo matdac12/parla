@@ -45,10 +45,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
             }
             "test_mic" => run_test_mic(app),
             "retry_failed" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    let _ = crate::failure::retry_last_failed(&app);
-                });
+                crate::commands::failure::retry_from_tray(app.clone());
             }
             "quit" => app.exit(0),
             _ => {}
