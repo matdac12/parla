@@ -38,6 +38,8 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .visible(false)
         .build()?;
     window.set_ignore_cursor_events(true)?;
+    // See `hide`: an invisible window alone does not stop WebView2 rendering.
+    let _ = window.as_ref().hide();
     Ok(())
 }
 
@@ -167,6 +169,8 @@ fn reveal(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(LABEL) {
         // `focusable(false)` keeps the paste target focused.
         let _ = window.show();
+        // Resume rendering; see `hide`.
+        let _ = window.as_ref().show();
     }
 }
 
@@ -174,6 +178,9 @@ fn hide(app: &tauri::AppHandle) {
     set_interactive(app, false);
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.hide();
+        // Hiding the window leaves WebView2 "visible": it keeps compositing at
+        // 60 fps (~15% of a core) while idle in the tray. Hide the webview too.
+        let _ = window.as_ref().hide();
     }
 }
 

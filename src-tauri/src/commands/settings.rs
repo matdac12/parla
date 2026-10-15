@@ -36,12 +36,15 @@ pub async fn save_settings(
         let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
         let shared = app.state::<SharedSettings>();
         let path = settings::path(&app)?;
-        save_with(
+        let previous = active_provider(&shared)?;
+        let saved = save_with(
             &shared,
             settings,
             |settings| settings::save(&path, settings),
             |settings| settings::apply(&app, settings),
-        )
+        )?;
+        sync_model_residency(&shared, &previous);
+        Ok(saved)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -55,10 +58,31 @@ pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), St
         let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
         let shared = app.state::<SharedSettings>();
         let path = settings::path(&app)?;
-        select_provider_with(&shared, &id, |value| settings::save(&path, value))
+        let previous = active_provider(&shared)?;
+        select_provider_with(&shared, &id, |value| settings::save(&path, value))?;
+        sync_model_residency(&shared, &previous);
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn active_provider(shared: &SharedSettings) -> Result<String, String> {
+    Ok(shared
+        .read()
+        .map_err(|_| "Settings lock poisoned")?
+        .active_provider
+        .clone())
+}
+
+/// Loads or frees the local model when the active provider changes.
+fn sync_model_residency(shared: &SharedSettings, previous: &str) {
+    let Ok(current) = shared.read().map(|s| s.clone()) else {
+        return;
+    };
+    if current.active_provider != previous {
+        crate::provider::parakeet::sync_residency(&current);
+    }
 }
 
 // Caller holds SaveLock. Update only the persisted provider choice; unfinished

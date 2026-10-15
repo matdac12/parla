@@ -9,7 +9,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
+    time::Duration,
 };
 use transcribe_rs::onnx::{
     parakeet::{ParakeetModel, ParakeetParams},
@@ -50,7 +54,54 @@ fn with_model<T>(
         let model = load(&dir)?;
         *cached = Some(CachedModel { dir, model });
     }
-    use_model(&mut cached.as_mut().expect("loaded model").model)
+    let result = use_model(&mut cached.as_mut().expect("loaded model").model);
+    drop(cached);
+    let use_id = USES.fetch_add(1, Ordering::AcqRel) + 1;
+    if settings.active_provider != models::ID {
+        release_when_idle(use_id);
+    }
+    result
+}
+
+/// Bumped by every model use, so a delayed release never drops a model that
+/// was used again in the meantime.
+static USES: AtomicU64 = AtomicU64::new(0);
+/// How long a non-active model (e.g. loaded by the bench) stays resident.
+const IDLE_RELEASE: Duration = Duration::from_secs(60);
+
+fn release_when_idle(use_id: u64) {
+    let _ = std::thread::Builder::new()
+        .name("parla-parakeet-release".into())
+        .spawn(move || {
+            std::thread::sleep(IDLE_RELEASE);
+            if USES.load(Ordering::Acquire) == use_id {
+                release();
+            }
+        });
+}
+
+/// Drops the cached model (~700 MB resident) until it is next needed.
+pub fn release() {
+    if let Ok(mut cached) = engine().lock() {
+        *cached = None;
+    }
+}
+
+/// Keeps the model resident only while Parakeet is the active provider: warms
+/// it in the background when selected, frees it when another provider is.
+pub fn sync_residency(settings: &Settings) {
+    if settings.active_provider == models::ID {
+        let settings = settings.clone();
+        let _ = std::thread::Builder::new()
+            .name("parla-parakeet-warm".into())
+            .spawn(move || {
+                if let Err(error) = warm(&settings) {
+                    eprintln!("Parakeet warm-up: {error}");
+                }
+            });
+    } else {
+        release();
+    }
 }
 fn load(dir: &Path) -> Result<ParakeetModel, ProviderError> {
     ParakeetModel::load(dir, &Quantization::Int8)
