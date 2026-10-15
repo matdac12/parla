@@ -17,6 +17,7 @@ mod tray;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             tray::setup(app)?;
             let config = settings::load(&settings::path(app.handle())?).unwrap_or_else(|error| {
@@ -26,6 +27,7 @@ pub fn run() {
             models::setup(app.handle(), &config)?;
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
+            app.manage(failure::RetryLock::default());
             app.manage(commands::settings::SaveLock::default());
             if let Err(error) = history::setup(app) {
                 eprintln!("History disabled: {error}");
@@ -39,6 +41,7 @@ pub fn run() {
             commands::settings::save_settings,
             commands::history::get_history,
             commands::history::clear_history,
+            commands::failure::retry_last_failed,
             commands::models::model_status,
             commands::models::download_model,
         ])

@@ -12,8 +12,16 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let history = MenuItem::with_id(app, "history", "History…", true, None::<&str>)?;
     let test_mic = MenuItem::with_id(app, "test_mic", "Test mic (3 s)", true, None::<&str>)?;
+    let retry = MenuItem::with_id(
+        app,
+        "retry_failed",
+        "Retry last failed dictation",
+        crate::failure::clip_path(app.handle()).is_ok_and(|path| path.is_file()),
+        None::<&str>,
+    )?;
+    app.manage(crate::failure::RetryMenu(retry.clone()));
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings, &history, &test_mic, &quit])?;
+    let menu = Menu::with_items(app, &[&settings, &history, &test_mic, &retry, &quit])?;
 
     // Tauri's native tray API: https://v2.tauri.app/learn/system-tray/
     TrayIconBuilder::with_id("parla")
@@ -28,6 +36,9 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
             "settings" => show_window(app, "main", "settings"),
             "history" => show_window(app, "history", "history"),
             "test_mic" => run_test_mic(app),
+            "retry_failed" => {
+                crate::commands::failure::retry_from_tray(app.clone());
+            }
             "quit" => app.exit(0),
             _ => {}
         })
