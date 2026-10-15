@@ -14,13 +14,26 @@ const LOCK = `<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"
 function setLocked(locked: boolean): void {
   pill.dataset.locked = String(locked);
   mode.innerHTML = locked ? LOCK : '<span class="dot"></span>';
-  mode.title = locked ? "Locked: press Ctrl+Alt to stop" : "Holding";
+  mode.title = locked ? "Locked: press Ctrl+Alt to stop, Esc to cancel" : "Holding";
 }
 setLocked(false);
 
 const container = document.createElement("div");
 container.className = "bars";
-pill.append(mode, container);
+
+// After recording: a spinner while transcribing, then a check or cross.
+const spinner = document.createElement("div");
+spinner.className = "spinner";
+const result = document.createElement("div");
+result.className = "result";
+const CHECK = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+  <path class="stroke" d="M3.6 8.4l3 3 5.8-6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+const CROSS = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+  <path class="stroke" d="M4.8 4.8l6.4 6.4M11.2 4.8l-6.4 6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+</svg>`;
+
+pill.append(mode, container, spinner, result);
 
 const bars: HTMLDivElement[] = [];
 for (let i = 0; i < BARS; i++) {
@@ -39,9 +52,25 @@ function render(): void {
   });
 }
 render();
+
+function setPhase(phase: string): void {
+  if (phase === "recording") {
+    history.fill(0);
+    render();
+    result.innerHTML = "";
+  } else if (phase === "done") {
+    result.innerHTML = CHECK;
+  } else if (phase === "error") {
+    result.innerHTML = CROSS;
+  }
+  pill.dataset.phase = phase;
+}
+setPhase("recording");
+
 void listen<number>("level", (event) => {
   history.shift();
   history.push(Math.min(1, Math.sqrt(event.payload) * 2.2));
   render();
 });
 void listen<boolean>("mode", (event) => setLocked(event.payload));
+void listen<string>("phase", (event) => setPhase(event.payload));

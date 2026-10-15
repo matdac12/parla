@@ -1,3 +1,4 @@
+pub mod app;
 pub mod bench;
 pub mod failure;
 pub mod history;

@@ -13,6 +13,7 @@ mod overlay;
 pub mod provider;
 pub mod recorder;
 pub mod settings;
+pub mod stats;
 pub mod timing;
 mod tray;
 
@@ -35,6 +36,9 @@ pub fn run() {
             if let Err(error) = history::setup(app) {
                 eprintln!("History disabled: {error}");
             }
+            if let Err(error) = stats::setup(app) {
+                eprintln!("Stats disabled: {error}");
+            }
             tray::setup(app)?;
             overlay::setup(app)?;
             flow::setup(app)?;
@@ -54,6 +58,8 @@ pub fn run() {
             commands::bench::bench_clip,
             commands::bench::bench_run,
             commands::bench::bench_runs,
+            commands::app::get_stats,
+            commands::app::open_window,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Parla");

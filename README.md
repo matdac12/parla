@@ -1,11 +1,12 @@
 # Parla
 
-Parla is a Windows push-to-talk dictation app where speed comes first: hold a
-hotkey, speak, release, and the raw transcript is pasted into the focused app.
-It records the microphone on key-down, transcribes the whole clip on release
-through OpenAI, xAI Grok, or a local Parakeet V3 model, and appends per-stage
-latency to a local history so providers can be compared on your own voice and
-network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md).
+Parla is a Windows dictation app where speed comes first: hold **Ctrl+Alt** to
+talk, or tap **Ctrl+Alt+Space** to lock hands-free recording, and the raw
+transcript is pasted into the focused app. It records the microphone while you
+talk, transcribes the whole clip when you stop through OpenAI, xAI Grok, or a
+local Parakeet V3 model, shows a small pill on screen (live level meter, spinner
+while transcribing, then a check), and appends per-stage latency to a local
+history so providers can be compared on your own voice and network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md).
 
 ## Quick start on Windows
 
@@ -20,8 +21,9 @@ network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design
    [prerequisites](#windows-prerequisites)).
 4. Open the tray menu and choose **Settings…**, paste an OpenAI or xAI API key
    (or download the local Parakeet model), then **Save**.
-5. Focus Notepad, hold **Ctrl+Space**, speak, release. The transcript is pasted
-   into the focused app.
+5. Focus Notepad, hold **Ctrl+Alt**, speak, release. The transcript is pasted
+   into the focused app. Or tap **Ctrl+Alt+Space** to lock recording
+   hands-free, speak, and press **Ctrl+Alt** to stop (**Esc** cancels).
 
 ## Windows prerequisites
 
@@ -54,8 +56,11 @@ npm ci
 npm run tauri dev
 ```
 
-The dev app starts in the tray. Choose **Settings…** in the tray to open its
-window. Closing any window hides it; choose **Quit** to exit.
+The dev app starts in the tray. Choose **Open Parla** or **Settings…** in the tray to open its
+window. Closing any window hides it; choose **Quit** to exit. The main,
+history, benchmark and recording-pill windows are created in code at startup
+(not in `tauri.conf.json`), after the app state is registered, so a page can
+never call a command before its state exists.
 
 For a standalone executable, from the repository root:
 
@@ -76,11 +81,32 @@ type-checks and bundles them.
 
 ## Using Parla
 
+### The Parla window
+
+**Open Parla** in the tray opens the main window. It shows two lifetime totals
+(**Words dictated** and **Dictations**) and the transcript history, newest first:
+each entry has its time, provider, audio length, word count and full text, with a
+**Copy** button. A search box filters the loaded transcripts, new dictations
+appear at the top as they finish, and **Show older** loads more (200 at a time, up
+to 2000). Failed dictations are listed in red without a Copy button.
+
+The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
+history does not reset them. A word is a whitespace-separated token of a
+transcript that was pasted successfully; failures and benchmark rows are not
+counted. On first run the counters start from whatever is already in
+`history.jsonl`.
+
+**Settings** opens inside the same window, with a back arrow (or **Esc**) to
+return home. The **Benchmark** and **Latency log** buttons open their own
+windows.
+
 The tray menu contains, in order:
 
-- **Settings…** — shows or focuses the settings window (providers, keys, hotkey,
-  restore delay, Parakeet model).
-- **History…** — shows the dictation history window.
+- **Open Parla** — shows or focuses the main window.
+- **Settings…** — opens the main window on its settings view (providers, keys,
+  hotkey, restore delay, Parakeet model).
+- **History…** — shows the latency log window (per-stage timings; see
+  [History](#history)).
 - **Benchmark…** — shows the benchmark window.
 - **Test mic (3 s)** — records three seconds from the default microphone, saves
   it as `clips/test.wav` in the app data directory, and reveals the file in
@@ -88,16 +114,50 @@ The tray menu contains, in order:
 - **Retry last failed dictation** — enabled only while a recovery clip exists.
 - **Quit** — exits Parla.
 
-Hold-to-talk: pressing the hotkey starts microphone capture (the recorder adds a
-150 ms pre-roll so the first syllable is not clipped). Releasing the main key
-stops capture in either order — release Space, or release Ctrl first — and then
-the clip is transcribed and the raw transcript is pasted with Ctrl+V. Before
-pasting, Parla saves any nonempty text clipboard; after the paste and a delay it
-restores that text (best effort). The transcript is raw: no filler removal or
-rewriting. New holds that start while a dictation is finalizing, transcribing, or
-pasting are ignored through their release; nothing is queued. If no release
+### Two ways to record
+
+Both use the same shortcut, **Ctrl+Alt+Space** by default (left Alt):
+
+- **Hold to talk.** Hold **Ctrl+Alt**. Recording runs while both keys are down;
+  release either one to stop, transcribe, and paste.
+- **Hands-free.** Tap **Ctrl+Alt+Space** (or press Space while already holding
+  Ctrl+Alt). The recording is *locked* and keeps going after you let go. Press
+  **Ctrl+Alt** again (the full shortcut also works) to stop, transcribe, and
+  paste.
+- **Cancel.** Press **Esc** at any point while recording to discard the clip
+  without transcribing or pasting anything. Esc is swallowed only while a
+  recording is in progress, so the focused app does not also see it, and behaves
+  normally otherwise. Esc does not cancel a transcription that is already
+  running.
+
+Safeguards: a hold shorter than 300 ms is discarded silently, so a stray
+Ctrl+Alt press does nothing; pressing any other key during the hold (another
+Ctrl+Alt shortcut, for instance) cancels it; and only the **left** Alt counts,
+so AltGr on layouts such as Italian (Right Alt plus a synthetic Ctrl) never
+starts a recording. A shortcut with only one modifier (say `Ctrl+F9`) has no
+hold mode: tap to start, tap to stop.
+
+While transcribing, new presses are ignored; nothing is queued. If no stop
 arrives within 120 seconds of capture starting, Parla stops and transcribes the
-clip anyway.
+clip anyway. Before pasting, Parla saves any nonempty text clipboard; after the
+paste and a delay it restores that text (best effort). The transcript is raw: no
+filler removal or rewriting.
+
+### Recording pill
+
+A small dark pill appears at the bottom centre of the primary monitor about
+250 ms after recording starts (so brief or cancelled presses never flash it).
+It never takes focus and ignores the mouse, so pasting still goes to your app.
+
+- **Recording:** nine bars follow your voice. A small dot on the left means the
+  keys are held; a padlock (with violet bars) means the recording is locked
+  hands-free.
+- **Transcribing:** the pill shrinks to a spinner from the moment you stop until
+  the text is ready.
+- **Done:** a green check for about 0.75 s once the text has been pasted. A red
+  cross for about 1.4 s means the dictation failed (the usual failure
+  notification and red tray icon still apply). A cancelled recording just
+  disappears.
 
 Parla opens the default input device once at startup and keeps its stream warm,
 so pressing the hotkey has no device-startup latency.
@@ -114,7 +174,7 @@ defaults. Example:
 ```json
 {
   "active_provider": "openai",
-  "hotkey": "Ctrl+Space",
+  "hotkey": "Ctrl+Alt+Space",
   "restore_delay_ms": 250,
   "providers": {
     "openai": {
@@ -139,7 +199,9 @@ file's key at request time and are never written to the file or returned by
 `get_settings`: `OPENAI_API_KEY` for OpenAI and `XAI_API_KEY` for xAI (an
 environment value, even an empty one, wins over the file). `language` is `null`
 for automatic detection or an ISO code such as `"it"`. Model names are
-configurable per provider.
+configurable per provider. The settings window prefills each model field with its
+default (`gpt-transcribe`, `grok-voice-transcribe-2.0`) and restores it if you
+clear the field.
 
 ### OpenAI
 
@@ -219,21 +281,25 @@ available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
 
 ## Hotkey
 
-The default hotkey is hold **Ctrl+Space** (see
-[Using Parla](#using-parla) for the hold behaviour). Rebind it in the settings
-window: type an accelerator such as `Ctrl+Shift+F9`, or click **Record keys**
-and hold the combination you want (Esc cancels). Saving rebinds immediately,
-with no restart, and requires that no hold is in progress. An accelerator that
-cannot be registered leaves the previous binding active and is reported inline
-as a warning rather than failing the save. Letters, digits, F1–F12, arrows,
+The default shortcut is **Ctrl+Alt+Space**; see [Using Parla](#using-parla) for
+what holding, tapping and **Esc** do. Rebind it in the settings window: type an
+accelerator such as `Ctrl+Shift+F9`, or click **Record keys** and hold the
+combination you want (Esc cancels). Saving rebinds immediately, with no restart,
+and requires that no recording is in progress. An accelerator that cannot be
+registered leaves the previous binding active and is reported inline as a
+warning rather than failing the save. Letters, digits, F1–F12, arrows,
 navigation keys, and common punctuation are supported; numpad and media keys are
 rejected, and **Ctrl+V is reserved** for pasting.
+
+The hold mode uses the shortcut's modifiers as the chord, and needs two or more
+(`Ctrl+Alt+Space`, `Ctrl+Shift+F9`). With fewer, the shortcut is tap to start,
+tap to stop.
 
 On Windows the hotkey is a keyboard-only low-level hook that ignores injected
 input; Tauri's global-shortcut plugin merely reserves the accelerator. If the
 default is already taken at startup, Parla keeps running with a
-disabled-hotkey tray tooltip so you can rebind it in Settings. `Ctrl+Space` can
-also conflict with an IME or another global shortcut.
+disabled-hotkey tray tooltip so you can rebind it in Settings. `Ctrl+Alt+Space`
+can also conflict with an IME or another global shortcut.
 
 ## History
 
@@ -244,7 +310,8 @@ append-only and written on a background thread after the paste, so it never
 blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
 two kinds of row.
 
-Tray **History…** lists dictations newest first with: wall-clock time, provider,
+The main window's list is the place to read and copy transcripts. Tray
+**History…** is the latency log: it lists dictations newest first with: wall-clock time, provider,
 captured audio length, then the latency breakdown — **Ready** (key-up to audio
 ready), **Transcribe** (audio ready to provider returned), **Paste** (provider
 returned to input injection), and **Total** (key-up to pasted). A dash means that
@@ -291,7 +358,8 @@ times and compare Request across runs rather than trusting a single run.
 
 A transcription failure (missing configuration, network, authentication,
 timeout, empty audio, or an empty transcript) pastes nothing: Parla shows a
-short notification and sets a red tray icon and error tooltip. Recorder startup
+red cross in the pill, a short notification, and sets a red tray icon and error
+tooltip. Recorder startup
 failures notify too, but there is no clip to retry. Clipboard and injection
 failures also report an error; an injection failure can occur after input has
 already reached the destination.
@@ -313,6 +381,17 @@ Notification delivery on Windows is guaranteed only for installed apps with an
 AppUserModelID; development may show PowerShell's name and icon, and delivery
 from the unpackaged `parla.exe` is not guaranteed. The red tray icon and error
 tooltip are always set as a fallback.
+
+## Resource use
+
+Measured once on a Windows 11 machine with the app idle in the tray and OpenAI
+as the active provider: about **610 MB** working set (**270 MB** private) in
+total, of which `parla.exe` itself is only about 40 MB. Nearly all of the rest is
+the WebView2 browser processes behind the four hidden windows (main, history,
+benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
+700 MB (about 1.4 GB working set in total). These are single measurements, not
+benchmarks; creating the windows lazily and unloading the model when idle are
+the obvious reductions and are not built yet.
 
 ## Development
 
@@ -347,34 +426,33 @@ CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
 
 ## Known limitations / untested on Windows
 
-Everything here was built on Linux and only compiled and unit-tested in CI on the
-Windows runner; nothing has been run on Windows yet. The list below is what needs
-a manual Windows smoke test or is a known limitation.
+CI compiles and unit-tests on Linux and on the Windows runner. On a real Windows
+machine the maintainer has so far confirmed: the app starts in the tray; OpenAI,
+xAI and local Parakeet dictation paste into text fields; the benchmark view runs
+all three providers; hold-to-talk, hands-free, Esc cancel and the recording pill
+behave as described. Still unchecked: Windows Terminal, elevated windows,
+lock/sleep recovery, notification delivery, clipboard restore under load, and
+the failure/retry path.
 
 - **No installer, code signing, or auto-update.** The app ships as a plain
   `--no-bundle` build. Windows SmartScreen will likely warn on first run; signed
   and packaged behavior (including reliable notifications) is untested.
-- **Tray, windows, and lifecycle.** Tray visibility, settings/history/benchmark
-  window focus, hide-on-close, and Quit need a manual Windows check.
-- **Hotkey and paste.** Hotkey release and pasting have not been run on Windows.
-  Test Notepad, a browser text field, and Windows Terminal; try both release
-  orders, a long hold, repeated short holds, very rapid release/repress cycles
-  (event transitions use raw key-up notifications), and clipboard restoration
-  under load.
 - **Elevated windows.** A non-elevated app cannot inject paste into
   elevated/admin windows (Windows UIPI). Secure desktop and applications that
   intercept Ctrl+V are unsupported. Windows Terminal must be allowed to paste
   with Ctrl+V.
 - **Keyboard hook.** The hook is keyboard-only. A 100 ms watchdog (deferred
-  during synthetic input) ends a hold whose key-up was missed; the hook refreshes
-  after recovery and every five seconds while idle to survive silent timeout
-  removal. Hook permission, keyboard layouts, IME behavior, and lock/sleep
-  recovery still need manual Windows checks, and rebinding briefly pauses hotkey
-  dispatch.
+  during synthetic input) ends a hold or chord whose key-up was missed; the hook
+  refreshes after recovery and every five seconds while idle to survive silent
+  timeout removal. Hook permission, keyboard layouts, IME behavior, and
+  lock/sleep recovery still need manual checks, and rebinding briefly pauses
+  hotkey dispatch.
+- **Esc.** Esc is swallowed only while recording, and a transcription already in
+  flight cannot be cancelled.
 - **Modifiers.** Paste reuses Ctrl if it is already held, and injected cleanup
   cannot change the physical modifier model: cleared Alt/Shift/Windows modifiers
-  can appear released to other apps until pressed again. Test both left and right
-  Ctrl and repeated Space presses while continuing to hold Ctrl.
+  can appear released to other apps until pressed again. If you release Ctrl
+  but keep Alt held when a hold ends, the paste can arrive as Ctrl+Alt+V.
 - **Clipboard restore is best effort.** Restoration uses a timed delay, not an
   acknowledgement from the receiving app, so clipboard managers or slow consumers
   can cause stale or duplicate pastes. Only text is preserved (empty or non-text
@@ -382,12 +460,12 @@ a manual Windows smoke test or is a known limitation.
   comparing clipboard text does not detect copying identical text during the
   delay. A longer restore delay helps slow apps.
 - **Local Parakeet.** The first run loads the whole model into RAM, costing more
-  than later dictations; inference is CPU-only. Allow ~1.4 GB free while
-  replacing the model.
+  than later dictations; inference is CPU-only, so time grows with clip length
+  (and it is weaker than the cloud providers on speech that switches between
+  languages mid-sentence). Allow ~1.4 GB free while replacing the model.
 - **Settings reload.** Settings are read at startup; editing `settings.json`
   externally requires a restart.
-- **Real end-to-end dictation.** Live transcription needs a configured key (or a
-  downloaded local model) and a manual smoke test; the default models' latency
-  has not been compared on this machine.
+- **Memory.** Idle use is dominated by the hidden WebView2 windows; see
+  [Resource use](#resource-use).
 - **Linux.** Compiles and tests, but insertion is a no-op and Wayland is not a
   supported desktop.

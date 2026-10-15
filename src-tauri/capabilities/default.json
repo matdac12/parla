@@ -3,7 +3,7 @@
   "identifier": "default",
   "description": "Core events for Parla pages; custom commands are registered in lib.rs.",
   "windows": [
-    "main",
+    "app",
     "settings",
     "history",
     "bench",

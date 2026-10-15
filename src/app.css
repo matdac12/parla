@@ -1,0 +1,93 @@
+#view-home { max-width: 52rem; padding: 1.5rem 1.75rem 2.5rem; margin: auto; }
+#view-home[hidden] { display: none; }
+
+.app-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.nav-actions { display: flex; gap: 0.5rem; }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 1.25rem 0 1.75rem;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.stat-value {
+  font-size: 2rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.stat-label {
+  color: var(--text-3);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+h2 { margin: 0; font-size: 1rem; }
+#search {
+  width: 16rem;
+  max-width: 50%;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+#search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.entries { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 150ms var(--ease);
+}
+.entry:hover { border-color: var(--border-strong); }
+.entry-meta { grid-column: 1 / -1; color: var(--text-3); font-size: 0.8rem; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.entry-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; user-select: text; }
+.entry.failed { background: var(--danger-bg); }
+.entry.failed .entry-text { color: var(--danger); }
+.copy { align-self: start; min-width: 4.5rem; }
+.copy.copied { color: var(--success); border-color: var(--success); background: var(--success-bg); }
+.more { display: flex; justify-content: center; margin-top: 1rem; }
+
+.back-title { display: flex; align-items: center; gap: 0.6rem; }
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 50%;
+}

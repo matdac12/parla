@@ -1,8 +1,9 @@
-//! The small always-on-top "recording" pill with a live level meter.
+//! The small always-on-top pill: live level meter while recording, a spinner
+//! while transcribing, and a brief done/error confirmation.
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -14,6 +15,8 @@ const LABEL: &str = "overlay";
 const WIDTH: f64 = 144.0;
 const HEIGHT: f64 = 40.0;
 const SHOW_DELAY: Duration = Duration::from_millis(250);
+const DONE_HOLD: Duration = Duration::from_millis(750);
+const ERROR_HOLD: Duration = Duration::from_millis(1400);
 
 /// Creates the hidden, non-focusable, click-through overlay window.
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
@@ -55,56 +58,106 @@ fn place(app: &tauri::AppHandle) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-/// Shows the overlay after a short delay (so brief or cancelled holds never
-/// flash it) and streams microphone levels to it until the returned guard is
-/// dropped.
-pub fn show(app: &tauri::AppHandle) -> Meter {
-    let running = Arc::new(AtomicBool::new(true));
-    let flag = running.clone();
+/// Bumped by every `begin`, so a delayed hide never hides a newer session.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// One dictation's pill: recording (live meter) -> processing (spinner) -> a
+/// brief done/error confirmation. Dropping it without `finish` hides the pill
+/// at once (cancelled dictation).
+pub struct Overlay {
+    app: tauri::AppHandle,
+    generation: u64,
+    metering: Arc<AtomicBool>,
+    settled: bool,
+}
+
+/// Starts a session. The pill appears after a short delay (so brief or
+/// cancelled holds never flash it) and streams microphone levels.
+pub fn begin(app: &tauri::AppHandle) -> Overlay {
+    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let metering = Arc::new(AtomicBool::new(true));
+    let _ = app.emit_to(LABEL, "phase", "recording");
+    let flag = metering.clone();
     let handle = app.clone();
     let _ = std::thread::Builder::new()
         .name("parla-meter".into())
         .spawn(move || {
+            let live =
+                || flag.load(Ordering::Acquire) && GENERATION.load(Ordering::Acquire) == generation;
             let step = Duration::from_millis(25);
             for _ in 0..(SHOW_DELAY.as_millis() / step.as_millis()) {
-                if !flag.load(Ordering::Relaxed) {
+                if !live() {
                     return;
                 }
                 std::thread::sleep(step);
             }
-            if !flag.load(Ordering::Relaxed) {
+            if !live() {
                 return;
             }
-            place(&handle);
-            if let Some(window) = handle.get_webview_window(LABEL) {
-                // `focusable(false)` keeps the paste target focused.
-                let _ = window.show();
-            }
-            while flag.load(Ordering::Relaxed) {
+            reveal(&handle);
+            while live() {
                 let _ = handle.emit_to(LABEL, "level", crate::recorder::current_level());
                 std::thread::sleep(Duration::from_millis(40));
             }
-            // The guard may have hidden the window before it was shown.
-            if let Some(window) = handle.get_webview_window(LABEL) {
-                let _ = window.hide();
-            }
         });
-    Meter {
+    Overlay {
         app: app.clone(),
-        running,
+        generation,
+        metering,
+        settled: false,
     }
 }
 
-pub struct Meter {
-    app: tauri::AppHandle,
-    running: Arc<AtomicBool>,
+fn reveal(app: &tauri::AppHandle) {
+    place(app);
+    if let Some(window) = app.get_webview_window(LABEL) {
+        // `focusable(false)` keeps the paste target focused.
+        let _ = window.show();
+    }
 }
 
-impl Drop for Meter {
+fn hide(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.hide();
+    }
+}
+
+impl Overlay {
+    /// Recording ended; the clip is being transcribed. Shows a spinner.
+    pub fn processing(&self) {
+        self.metering.store(false, Ordering::Release);
+        reveal(&self.app);
+        let _ = self.app.emit_to(LABEL, "phase", "processing");
+    }
+
+    /// Shows a short confirmation (check on success, cross on failure), then
+    /// hides the pill.
+    pub fn finish(mut self, ok: bool) {
+        self.settled = true;
+        self.metering.store(false, Ordering::Release);
+        reveal(&self.app);
+        let _ = self
+            .app
+            .emit_to(LABEL, "phase", if ok { "done" } else { "error" });
+        let app = self.app.clone();
+        let generation = self.generation;
+        let hold = if ok { DONE_HOLD } else { ERROR_HOLD };
+        let _ = std::thread::Builder::new()
+            .name("parla-overlay-hide".into())
+            .spawn(move || {
+                std::thread::sleep(hold);
+                if GENERATION.load(Ordering::Acquire) == generation {
+                    hide(&app);
+                }
+            });
+    }
+}
+
+impl Drop for Overlay {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(window) = self.app.get_webview_window(LABEL) {
-            let _ = window.hide();
+        self.metering.store(false, Ordering::Release);
+        if !self.settled && GENERATION.load(Ordering::Acquire) == self.generation {
+            hide(&self.app);
         }
     }
 }

@@ -3,17 +3,58 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Parla Settings</title>
-    <script type="module" src="/src/settings.ts"></script>
+    <title>Parla</title>
+    <script type="module" src="/src/app.ts"></script>
   </head>
   <body>
-    <main>
-      <header class="page-head">
-        <h1>Parla Settings</h1>
-        <p class="subtitle">
-          Hold Ctrl+Alt to talk, or tap Ctrl+Alt+Space to lock it hands-free (press Ctrl+Alt to stop, Esc to cancel). The transcript is pasted into the focused app.
-        </p>
+    <main id="view-home">
+      <header class="app-head">
+        <h1>Parla</h1>
+        <nav class="nav-actions" aria-label="Windows">
+          <button type="button" id="open-settings">Settings</button>
+          <button type="button" data-open="bench">Benchmark</button>
+          <button type="button" data-open="history">Latency log</button>
+        </nav>
       </header>
+
+      <section class="stats" aria-label="Totals">
+        <div class="stat">
+          <span class="stat-value" id="stat-words">0</span>
+          <span class="stat-label">Words dictated</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="stat-dictations">0</span>
+          <span class="stat-label">Dictations</span>
+        </div>
+      </section>
+
+      <section aria-labelledby="history-title">
+        <div class="list-head">
+          <h2 id="history-title">History</h2>
+          <input id="search" type="search" placeholder="Search transcripts" autocomplete="off" spellcheck="false" />
+        </div>
+        <p id="empty" class="status" hidden>No dictations yet. Hold Ctrl+Alt and speak.</p>
+        <ol id="list" class="entries"></ol>
+        <div class="more">
+          <button type="button" id="more" hidden>Show older</button>
+        </div>
+      </section>
+    </main>
+    <main id="view-settings" hidden>
+      <header class="app-head">
+        <div class="back-title">
+          <button type="button" id="back" class="icon-button" aria-label="Back to home">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+              <path d="M10 3.5L5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <h1>Settings</h1>
+        </div>
+      </header>
+      <p class="subtitle">
+        Hold Ctrl+Alt to talk, or tap Ctrl+Alt+Space to lock it hands-free (press Ctrl+Alt to stop, Esc to cancel). The transcript is pasted into the focused app.
+      </p>
+
 
       <p id="load-error" class="banner banner-error" hidden></p>
 
@@ -67,7 +108,7 @@
           <button type="submit" id="save">Save</button>
         </div>
       </form>
-
+    
       <p class="footer-hint">
         Settings are stored in the Parla app config folder. Close this window to keep Parla in the tray.
       </p>

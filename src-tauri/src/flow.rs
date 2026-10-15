@@ -208,18 +208,19 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
-    let meter = recording.is_ok().then(|| crate::overlay::show(app));
+    let overlay = recording.is_ok().then(|| crate::overlay::begin(app));
     let (key_up, hold_error) = wait_for_release(&released, Duration::from_secs(120));
-    drop(meter);
     let audio = recording.map(|recorder| recorder.stop());
     crate::hotkey::RECORDING.store(false, Ordering::Release);
     if cancelled.load(Ordering::Acquire) {
         return;
     }
-    if hold_error.is_some() {
-        finish_session_with_error(app, audio, &settings, started_at, key_up, hold_error);
-    } else {
-        finish_session(app, audio, &settings, started_at, key_up);
+    if let Some(overlay) = &overlay {
+        overlay.processing();
+    }
+    let ok = finish_session_with_error(app, audio, &settings, started_at, key_up, hold_error);
+    if let Some(overlay) = overlay {
+        overlay.finish(ok);
     }
 }
 
@@ -260,7 +261,7 @@ fn finish_session_with_error(
     started_at: SystemTime,
     key_up: Instant,
     hold_error: Option<String>,
-) {
+) -> bool {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     let result = match audio {
         Err(error) => {
@@ -299,6 +300,7 @@ fn finish_session_with_error(
             result
         }
     };
+    let ok = result.is_ok() && hold_error.is_none();
     if result.is_ok() {
         crate::failure::on_success(app);
     }
@@ -310,6 +312,7 @@ fn finish_session_with_error(
     };
     // The one completion sink for successful and failed dictations.
     timing::record(app, record);
+    ok
 }
 
 fn transcribe_and_paste(

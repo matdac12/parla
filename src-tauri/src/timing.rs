@@ -112,6 +112,7 @@ pub fn record(app: &tauri::AppHandle, mut record: DictationRecord) {
     if let Some(history) = app.try_state::<crate::history::History>() {
         history.append(record.clone());
     }
+    crate::stats::record(app, &record);
     if let Err(error) = app.emit("dictation://recorded", &record) {
         eprintln!("Unable to emit dictation record: {error}");
     }

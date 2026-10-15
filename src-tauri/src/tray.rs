@@ -5,10 +5,11 @@ use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open Parla", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let history = MenuItem::with_id(app, "history", "History…", true, None::<&str>)?;
     let bench = MenuItem::with_id(app, "bench", "Benchmark…", true, None::<&str>)?;
@@ -24,7 +25,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&settings, &history, &bench, &test_mic, &retry, &quit],
+        &[&open, &settings, &history, &bench, &test_mic, &retry, &quit],
     )?;
 
     // Tauri's native tray API: https://v2.tauri.app/learn/system-tray/
@@ -37,7 +38,8 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .tooltip("Parla")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "settings" => show_window(app, "main", "settings"),
+            "open" => open_app(app, "home"),
+            "settings" => open_app(app, "settings"),
             "history" => show_window(app, "history", "history"),
             "bench" => show_window(app, "bench", "benchmark"),
             "test_mic" => run_test_mic(app),
@@ -54,14 +56,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     // Created here, not in tauri.conf.json: config windows load their pages
     // before `setup`, and their first IPC calls would race the managed state.
     for (label, what, title, url, width, height) in [
-        (
-            "main",
-            "settings",
-            "Parla Settings",
-            "settings.html",
-            640.0,
-            480.0,
-        ),
+        ("app", "Parla", "Parla", "app.html", 900.0, 680.0),
         (
             "history",
             "history",
@@ -99,8 +94,14 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Opens the main window on `view` ("home" or "settings").
+pub(crate) fn open_app(app: &tauri::AppHandle, view: &str) {
+    show_window(app, "app", "Parla");
+    let _ = app.emit_to("app", "navigate", view);
+}
+
 /// Shows, unminimizes and focuses a hidden window, or logs why it could not.
-fn show_window(app: &tauri::AppHandle, label: &str, what: &str) {
+pub(crate) fn show_window(app: &tauri::AppHandle, label: &str, what: &str) {
     let Some(window) = app.get_webview_window(label) else {
         eprintln!("failed to open {what}: window is unavailable");
         return;
