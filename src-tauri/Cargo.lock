@@ -3156,6 +3156,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "transcribe-rs",
+ "webview2-com",
+ "windows-core 0.62.2",
  "windows-sys 0.60.2",
 ]
 

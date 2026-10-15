@@ -41,3 +41,6 @@ tauri-plugin-notification = "2"
 windows-sys = { version = "0.60.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_System_Threading"] }
 enigo = "0.6.1"
 arboard = { version = "3", default-features = false }
+# Already in the tree via wry; used to lower the hidden overlay's memory target.
+webview2-com = "0.39"
+windows-core = "0.62"

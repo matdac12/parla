@@ -40,8 +40,39 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     window.set_ignore_cursor_events(true)?;
     // See `hide`: an invisible window alone does not stop WebView2 rendering.
     let _ = window.as_ref().hide();
+    set_memory_target(&window, true);
     Ok(())
 }
+
+/// While the pill is hidden, WebView2 may trim the overlay's caches and heap
+/// (it keeps running, so events still arrive). Restored before every reveal.
+#[cfg(windows)]
+fn set_memory_target(window: &tauri::WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core::Interface;
+    let _ = window.with_webview(move |webview| {
+        let level = if low {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        };
+        // SAFETY: runs on the UI thread that owns this live controller. Older
+        // runtimes without ICoreWebView2_19 are left at their default.
+        unsafe {
+            if let Ok(core) = webview.controller().CoreWebView2() {
+                if let Ok(core) = core.cast::<ICoreWebView2_19>() {
+                    let _ = core.SetMemoryUsageTargetLevel(level);
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn set_memory_target(_window: &tauri::WebviewWindow, _low: bool) {}
 
 /// Tells the overlay whether the recording is locked hands-free (true) or held
 /// push-to-talk (false).
@@ -106,6 +137,10 @@ pub struct Overlay {
 pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let metering = Arc::new(AtomicBool::new(true));
+    // Back to normal well before the delayed reveal.
+    if let Some(window) = app.get_webview_window(LABEL) {
+        set_memory_target(&window, false);
+    }
     configure(app, captions, generation);
     set_interactive(app, false);
     let _ = app.emit_to(LABEL, "phase", "recording");
@@ -167,6 +202,9 @@ pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
 fn reveal(app: &tauri::AppHandle) {
     place(app);
     if let Some(window) = app.get_webview_window(LABEL) {
+        // Usually already normal since `begin`; Retry and a racing delayed
+        // `hide` reach here without it.
+        set_memory_target(&window, false);
         // `focusable(false)` keeps the paste target focused.
         let _ = window.show();
         // Resume rendering; see `hide`.
@@ -181,6 +219,7 @@ fn hide(app: &tauri::AppHandle) {
         // Hiding the window leaves WebView2 "visible": it keeps compositing at
         // 60 fps (~15% of a core) while idle in the tray. Hide the webview too.
         let _ = window.as_ref().hide();
+        set_memory_target(&window, true);
     }
 }
 
