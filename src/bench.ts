@@ -110,7 +110,7 @@ function renderRow(id: string, name: string, state: string, result: BenchResult 
     textCell(name),
     msCell(result?.request_ms ?? null),
     msCell(result?.total_ms ?? null),
-    textCell(result?.text ?? (state === "running" ? "Transcribing…" : "—")),
+    textCell(result?.text ?? (state === "running" ? "Transcribing…" : state === "warming" ? "Loading model…" : "—")),
     textCell(result?.error ?? "", "error-text"),
   );
 }

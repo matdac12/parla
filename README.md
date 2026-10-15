@@ -161,7 +161,7 @@ The **Benchmark…** tray item compares providers on your own voice and network.
 What the numbers mean:
 - **Request**: time spent in the provider's transcribe call (encoding, upload, server time, download; inference for Parakeet).
 - **Total**: from handing the clip to that provider until its text is ready. A benchmark has no key-up, so "clip ready" stands in for it; expect it to be Request plus a few ms.
-- Providers run sequentially with no warm-up request, so the first cloud request includes TLS setup, like the first dictation after a pause. The fastest successful row is highlighted.
+- Providers run sequentially. Cloud providers get no warm-up, so the first request includes TLS setup, like the first dictation after a pause. Local Parakeet is warmed first with an untimed half-second of silence, so its model load is not counted in Request. The fastest successful row is highlighted.
 
 Storage: each provider result is a row in `history.jsonl` with `kind: "benchmark"` and a shared `bench_run_id` (for a benchmark row, `audio_ready` is when the request began and `provider_returned` the total, both relative to that provider's turn). The **Previous runs** list rebuilds runs from those rows. The clip is saved as `clips/bench-<id>.wav` in the app data directory.
 

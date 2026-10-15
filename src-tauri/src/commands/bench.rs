@@ -80,6 +80,7 @@ fn start_recording(app: &tauri::AppHandle) -> Result<(), String> {
 /// clip. `None` means there was no such recording to stop.
 fn finish_recording(app: &tauri::AppHandle, token: Option<u64>) -> Option<Result<u64, String>> {
     let session = app.state::<BenchSession>();
+    // Keep the guard until the recorder has stopped and the clip is stored.
     let _guard = session.take_recording(token)?;
     let clip = crate::recorder::recorder()
         .map(|recorder| recorder.stop())

@@ -53,6 +53,7 @@ enum Message {
     Append(DictationRecord),
     Load {
         limit: usize,
+        kind: Option<&'static str>,
         respond: Sender<Vec<DictationRecord>>,
     },
     Clear {
@@ -82,11 +83,22 @@ impl History {
 
     /// Newest-first records, at most `limit` of them.
     pub fn load_recent(&self, limit: usize) -> Vec<DictationRecord> {
+        self.load_recent_kind(limit, None)
+    }
+
+    /// Like `load_recent`, but only rows of `kind` count toward `limit`, so a
+    /// view of one kind still gets up to `limit` rows among other kinds.
+    pub fn load_recent_kind(
+        &self,
+        limit: usize,
+        kind: Option<&'static str>,
+    ) -> Vec<DictationRecord> {
         let (respond, response) = mpsc::channel();
         if self
             .sender
             .send(Message::Load {
                 limit: limit.min(MAX_LIMIT),
+                kind,
                 respond,
             })
             .is_err()
@@ -114,8 +126,12 @@ fn writer_loop(path: PathBuf, receiver: Receiver<Message>) {
     while let Ok(message) = receiver.recv() {
         match message {
             Message::Append(record) => writer.append(&record),
-            Message::Load { limit, respond } => {
-                let _ = respond.send(load_recent_from(writer.path(), limit));
+            Message::Load {
+                limit,
+                kind,
+                respond,
+            } => {
+                let _ = respond.send(load_filtered(writer.path(), limit, kind));
             }
             Message::Clear { respond } => {
                 let _ = respond.send(writer.clear().map_err(|error| error.to_string()));
@@ -223,7 +239,14 @@ fn ends_without_newline(path: &Path) -> std::io::Result<bool> {
 /// and processes each chunk exactly once (no re-parsing of the scanned suffix):
 /// `carry` holds only the partial line at the left edge, capped at `MAX_LINE`.
 /// Returns as soon as it has `limit` records.
+#[cfg(test)]
 fn load_recent_from(path: &Path, limit: usize) -> Vec<DictationRecord> {
+    load_filtered(path, limit, None)
+}
+
+/// `load_recent_from` keeping only rows whose `kind` equals `kind` (if given).
+fn load_filtered(path: &Path, limit: usize, kind: Option<&str>) -> Vec<DictationRecord> {
+    let keep = |record: &DictationRecord| kind.is_none_or(|kind| record.kind == kind);
     if limit == 0 {
         return Vec::new();
     }
@@ -271,9 +294,11 @@ fn load_recent_from(path: &Path, limit: usize) -> Vec<DictationRecord> {
                     line.extend_from_slice(&chunk[index + 1..cursor]);
                     line.extend_from_slice(&carry);
                     if let Ok(record) = serde_json::from_slice::<DictationRecord>(&line) {
-                        records.push(record);
-                        if records.len() >= limit {
-                            return records;
+                        if keep(&record) {
+                            records.push(record);
+                            if records.len() >= limit {
+                                return records;
+                            }
                         }
                     }
                     carry.clear();
@@ -301,7 +326,9 @@ fn load_recent_from(path: &Path, limit: usize) -> Vec<DictationRecord> {
     // trailing newline). An oversized first line is dropped.
     if start == 0 && !oversized && !carry.is_empty() {
         if let Ok(record) = serde_json::from_slice::<DictationRecord>(&carry) {
-            records.push(record);
+            if keep(&record) {
+                records.push(record);
+            }
         }
     }
     records
@@ -378,6 +405,29 @@ mod tests {
         assert_eq!(newest_two[0].text, "three");
         assert_eq!(newest_two[1].text, "two");
         assert!(load_recent_from(&path, 0).is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn kind_filter_still_returns_limit_rows_past_other_kinds() {
+        let path = temp_path("kind");
+        let mut rows = vec![record(1, "d1"), record(2, "d2")];
+        for n in 3..8 {
+            let mut bench = record(n, "b");
+            bench.kind = "benchmark".into();
+            rows.push(bench);
+        }
+        append_all(&path, &rows);
+        let dictations = load_filtered(&path, 2, Some("dictation"));
+        assert_eq!(
+            dictations
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>(),
+            ["d2", "d1"]
+        );
+        assert_eq!(load_filtered(&path, 50, Some("benchmark")).len(), 5);
+        assert_eq!(load_recent_from(&path, 50).len(), 7);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

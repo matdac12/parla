@@ -68,9 +68,19 @@ fn run_one(provider: &dyn SttProvider, clip: &Clip, settings: &Settings) -> Benc
         text: None,
         error: None,
     };
-    if let Availability::Unavailable(reason) = provider.availability(settings) {
-        result.error = Some(redact_secrets(&reason));
-        return result;
+    let availability = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        provider.availability(settings)
+    }));
+    match availability {
+        Ok(Availability::Available) => {}
+        Ok(Availability::Unavailable(reason)) => {
+            result.error = Some(redact_secrets(&reason));
+            return result;
+        }
+        Err(_) => {
+            result.error = Some("Provider crashed".into());
+            return result;
+        }
     }
     let request = Instant::now();
     // One misbehaving provider must not abort the rest of the run.
@@ -88,6 +98,23 @@ fn run_one(provider: &dyn SttProvider, clip: &Clip, settings: &Settings) -> Benc
         Err(_) => result.error = Some("Provider crashed".into()),
     }
     result
+}
+
+/// Local providers load their model on the first call, which would land in
+/// `request_ms` and skew the comparison. Before timing them, transcribe half a
+/// second of silence and throw the outcome away.
+const LOCAL_PROVIDERS: [&str; 1] = ["parakeet"];
+
+fn warm_up(provider: &dyn SttProvider, settings: &Settings) {
+    if !LOCAL_PROVIDERS.contains(&provider.id())
+        || !matches!(provider.availability(settings), Availability::Available)
+    {
+        return;
+    }
+    let silence = Clip::new(vec![0; crate::clip::SAMPLE_RATE as usize / 2]);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        provider.transcribe(&silence, settings)
+    }));
 }
 
 fn history_row(
@@ -137,6 +164,10 @@ pub fn run_with_providers(
     }
     let mut results = Vec::with_capacity(providers.len());
     for provider in &providers {
+        if LOCAL_PROVIDERS.contains(&provider.id()) {
+            on_progress(progress(provider.as_ref(), "warming", None));
+            warm_up(provider.as_ref(), settings);
+        }
         on_progress(progress(provider.as_ref(), "running", None));
         let result = run_one(provider.as_ref(), clip, settings);
         let state = match (&result.error, result.request_ms) {
@@ -339,6 +370,44 @@ mod tests {
         rows.reverse();
         let restored = group_runs(rows, 10);
         assert_eq!(restored, vec![run]);
+    }
+    #[test]
+    fn local_provider_is_warmed_untimed_and_panics_are_isolated() {
+        struct Panicky(&'static str, Arc<AtomicUsize>);
+        impl SttProvider for Panicky {
+            fn id(&self) -> &'static str {
+                self.0
+            }
+            fn display_name(&self) -> &'static str {
+                self.0
+            }
+            fn availability(&self, _: &Settings) -> Availability {
+                if self.0 == "boom" {
+                    panic!("availability");
+                }
+                Availability::Available
+            }
+            fn transcribe(&self, _: &Clip, _: &Settings) -> Result<String, ProviderError> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                Ok("ok".into())
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let providers: Vec<Arc<dyn SttProvider>> = vec![
+            Arc::new(Panicky("boom", calls.clone())),
+            Arc::new(Panicky("parakeet", calls.clone())),
+        ];
+        let run = run_with_providers(
+            &Clip::new(vec![1; 16000]),
+            &Settings::default(),
+            providers,
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(run.results[0].error.as_deref(), Some("Provider crashed"));
+        assert_eq!(run.results[1].text.as_deref(), Some("ok"));
+        // One discarded warm-up plus the timed call; "boom" never transcribed.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn stale_timer_token_cannot_stop_a_newer_recording() {
