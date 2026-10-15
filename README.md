@@ -1,7 +1,7 @@
 # Parla
 
 Parla is a Windows push-to-talk dictation app focused on speed: hold a hotkey, speak, release, and paste the transcript into the focused app.
-It will compare local and cloud speech-to-text providers by latency; see the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md). The core flow records the microphone, transcribes through OpenAI or xAI, and pastes on Windows; the settings/history/benchmark pages are placeholders.
+It will compare local and cloud speech-to-text providers by latency; see the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md). The core flow records the microphone, transcribes through OpenAI or xAI, and pastes on Windows; the history view lists past dictations with per-stage latency, while the settings/benchmark pages are placeholders.
 
 ## Windows prerequisites
 
@@ -120,6 +120,13 @@ invoke and leave runtime/shared settings unchanged. `get_settings` continues to
 return the complete saved settings object. Saves are serialized separately from
 the shared settings lock; neither disk IO nor main-thread rebinding holds that lock.
 
+The settings window (tray **Settings…**) lists every registered provider with its
+availability, lets you pick the active one, and writes API keys and model names into
+`providers.<id>`. Keys are stored as plaintext; the password field has a show/hide
+toggle and never logs or echoes the value. Providers that are not ready are disabled
+with the reason shown inline (for example, a missing key or an undownloaded model), and
+the list refreshes after each save so typing a key enables its provider immediately.
+
 ## Local model (Parakeet)
 
 Model setup and download instructions will be added with the local provider.
@@ -131,6 +138,20 @@ Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space a
 On Windows, a keyboard-only low-level hook observes key-down/key-up events and ignores injected input; Tauri's global-shortcut plugin reserves the accelerator so normal key handling does not consume it. `Hotkey::set_shortcut(&str)` supports runtime rebinding (for example `Ctrl+Shift+F9`); the settings UI comes later. Release the current hold before rebinding; press and release keys normally after app startup. Letters, digits, F1–F12, arrows, navigation, and common punctuation keys are supported; unsupported keys such as numpad and media keys are rejected. A failed registration retains the previous shortcut; if the default is taken at startup, Parla stays running with a disabled-hotkey tray tooltip so it can be rebound later; `Ctrl+V` is reserved for paste.
 
 Paste runs on a background worker: save nonempty clipboard text, publish the transcript, wait 100 ms, reuse an already-held Ctrl (or synthesize it), clear only currently-down conflicting modifiers, send Ctrl+V with a 100 ms modifier hold, then wait **250 ms** (`DEFAULT_RESTORE_DELAY_MS`) before restoring the previous text. The JSON/commands configure that restore delay; settings UI comes later. Timing records capture injection completion before the restoration delay, but the worker remains busy until restoration finishes. Clipboard restore is best effort, retries transient read/write failures up to five times with 100 ms total backoff, and rechecks for different copied text before every write. Empty or non-text clipboards are not restored: the transcript remains and previous non-text formats are lost. Slow apps may require a longer restore delay.
+
+The settings window's **Hotkey** field accepts accelerators such as `Ctrl+Space` or
+`Ctrl+Shift+F9`; **Record keys** captures one by holding the combination you want (Esc
+cancels). Saving rebinds immediately, without a restart. An accelerator that cannot be
+registered (for example the reserved `Ctrl+V`) leaves the previous binding active and is
+reported inline as a warning rather than failing the save.
+
+## History
+
+Every completed dictation (success or failure) is appended as one JSON object per line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is append-only; writes happen on a background thread after the paste, so they never block dictation. A `kind` field (`"dictation"`) leaves room for the benchmark rows coming later.
+
+Open the **History…** tray item to see the newest dictations first. The columns are: the wall-clock time, the provider, the captured audio length, then the latency breakdown — **Ready** (key-up to audio ready), **Transcribe** (audio ready to provider returned), **Paste** (provider returned to input injection), and **Total** (key-up to pasted). A dash means that stage never completed (for example a failed transcription has no paste time). The transcript is truncated with the full text on hover or click; failures are tinted and show the error in red. The view updates live from the `dictation://recorded` event. **Clear history…** truncates the file after a confirmation.
+
+Reads are bounded: the view asks for the newest 200 rows and the backend walks the file backwards, so a large history never has to fit in memory. Corrupt lines are skipped rather than breaking the view.
 
 ## Benchmark
 
@@ -148,11 +169,11 @@ Provider comparison and history instructions will be added with benchmarking.
 - Paste reuses Ctrl if it is already down, and injected cleanup cannot change the physical modifier model. Cleared Alt/Shift/Windows modifiers may appear released to other apps until pressed again; test both left and right Ctrl and repeated Space presses while continuing to hold Ctrl.
 - Clipboard restoration uses a timed delay, not an acknowledgement from the receiving app. Clipboard managers or slow consumers can still cause stale/duplicate pastes. Restoration preserves text only, and comparing clipboard text does not detect copying identical text during the delay.
 - Linux can compile and test the app, but insertion is a no-op returning an unsupported error; the fallback global shortcut plugin requires a supported desktop (Wayland is not a supported target).
-- OpenAI and xAI dictation, microphone capture, settings persistence, and failure notification/retry are implemented.
+- OpenAI and xAI dictation, microphone capture, settings persistence and UI, the history view, and failure notification/retry are implemented.
 - Transcription failures (missing configuration, network, authentication, timeout, empty audio/transcript) paste nothing. Parla shows a short notification and a red tray icon/error tooltip. Recorder startup failures also notify, but have no clip to retry. Clipboard/injection failures report an error too; an injection failure can occur after input has already reached the destination.
 - Choose **Retry last failed dictation** in the tray after fixing the issue, or call the `retry_last_failed` Tauri command. Tray retries wait 300 ms for the menu to dismiss; command retries start immediately. Retry uses the current settings/provider and **pastes into whichever app has focus when injection runs**. Busy requests report “Busy, try again” and keep the clip; failed retries keep it again. The item is enabled when a recovery clip exists, and disabled while a retry runs and after successful recovery.
 - The last failed clip is held in memory and saved as `<app data>/clips/last-failed.wav` (`%APPDATA%\com.matdac6.parla\clips\last-failed.wav` on Windows). It survives restarts, loads lazily on retry, and can be opened in an audio player. A new failure replaces it; a successful retry deletes it. This file contains your voice and remains until replaced or successfully retried; delete it manually while Parla is closed if unwanted. Disk-save failures are reported, attempt to remove the previous recovery file to prevent stale recovery after restart, and leave the in-memory retry available until exit.
 - [Tauri notification support](https://v2.tauri.app/plugin/notification/) is reliable on Windows only for installed apps with an AppUserModelID. Development may show PowerShell’s name/icon; delivery from the unpackaged `parla.exe` is not guaranteed. The red tray icon and error tooltip are always set for failures as a fallback, even when the notification API reports success. Any successful dictation restores the normal tray visuals; an ordinary success keeps the previous failed clip and its retry action available. Busy and post-success informational notices show a toast without changing the tray visuals. Notification delivery, recovery after restart, and retry focus/paste still need a Windows smoke test.
 - Settings are loaded at startup. Editing the JSON externally requires a restart; `save_settings` persists settings first, applies a changed hotkey with a nonfatal warning on failure, and uses the restore delay for the next dictation. A failed persisted hotkey registration leaves the default binding in place if available.
-- Timing emits `dictation://recorded` and logs stage timings, transcript length and failure status only (no transcript or raw provider error body); history is not persisted yet. Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
+- Timing emits `dictation://recorded` and logs stage timings, transcript length and failure status only (no transcript or raw provider error body); each record is also appended to `history.jsonl` (see **History**). Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
 - Real API transcription and end-to-end Windows dictation still require a configured key and a manual smoke test. The default model follows the spec; its latency has not been compared on this machine.

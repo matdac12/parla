@@ -5,6 +5,7 @@ pub mod clip;
 mod commands;
 pub mod failure;
 mod flow;
+pub mod history;
 pub mod hotkey;
 pub mod inserter;
 pub mod provider;
@@ -26,12 +27,18 @@ pub fn run() {
             app.manage(failure::LastFailedClip::default());
             app.manage(failure::RetryLock::default());
             app.manage(commands::settings::SaveLock::default());
+            if let Err(error) = history::setup(app) {
+                eprintln!("History disabled: {error}");
+            }
             flow::setup(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::providers::list_providers,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::history::get_history,
+            commands::history::clear_history,
             commands::failure::retry_last_failed,
         ])
         .run(tauri::generate_context!())
