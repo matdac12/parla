@@ -34,7 +34,7 @@ mockIPC((command, args) => {
       return holdHistory ? new Promise((resolve) => { finishHistory = () => { holdHistory = false; resolve(snapshot); }; }) : snapshot;
     }
     case "has_failed_clip": return false;
-    case "get_stats": return { total_words: 100, dictations: 10 };
+    case "get_stats": return { total_words: 100, dictations: 10, audio_ms: (4 * 60 + 12) * 60_000, first_used_at: Date.now() - 30 * 86_400_000, cost_usd: 0.84, unpriced_audio_ms: 0 };
     case "save_settings": savedSettings = structuredClone(args.settings); return { warning: null };
     default: throw new Error(`Unexpected IPC: ${command}`);
   }
@@ -59,6 +59,22 @@ await check("initial tray Settings route is honored without loading history", ()
 });
 document.getElementById("back").click();
 await settle();
+await check("usage cards show audio time, cost and a projection after a week", async () => {
+  const text = (id) => document.getElementById(id).textContent;
+  assert(text("stat-words") === "100" && text("stat-dictations") === "10", "Counters missing");
+  assert(text("stat-audio") === "4 h 12 m", `Audio time was ${text("stat-audio")}`);
+  assert(text("stat-cost") === "$0.84", `Cost was ${text("stat-cost")}`);
+  assert(document.getElementById("stat-cost-note").hidden, "Unpriced note shown with no unpriced audio");
+  assert(text("stat-projected") === "$10.22", `Projection was ${text("stat-projected")}`);
+  assert(text("stat-projected-note").includes("$144"), "Wispr Flow comparison missing");
+  await emit("stats://updated", { total_words: 3, dictations: 1, audio_ms: 42_000, first_used_at: Date.now() - 86_400_000, cost_usd: 0.002, unpriced_audio_ms: 90_000 });
+  await settle();
+  assert(text("stat-audio") === "42 s", `Short audio was ${text("stat-audio")}`);
+  assert(text("stat-cost") === "< $0.01", `Tiny cost was ${text("stat-cost")}`);
+  assert(!document.getElementById("stat-cost-note").hidden && text("stat-cost-note").includes("2 m"), "Unpriced note missing");
+  assert(text("stat-projected") === "—", "Projection shown before a week of use");
+  assert(text("stat-projected-note").startsWith("From "), "Projection start date missing");
+});
 await check("new dictation preserves existing rows and Copy feedback", async () => {
   const existing = list.firstElementChild;
   const copy = existing.querySelector("button");

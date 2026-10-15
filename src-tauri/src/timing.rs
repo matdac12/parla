@@ -34,6 +34,9 @@ pub struct DictationRecord {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_error: Option<String>,
+    /// Model of the live session that fell back to batch (billed as well).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_model: Option<String>,
     /// Monotonic offsets from streaming session start (not key-up).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_setup_ms: Option<u64>,
@@ -64,6 +67,7 @@ impl DictationRecord {
             transcription_mode: None,
             model: None,
             stream_error: None,
+            stream_model: None,
             stream_setup_ms: None,
             first_caption_ms: None,
         }

@@ -10,6 +10,7 @@ pub mod hotkey;
 pub mod inserter;
 pub mod models;
 mod overlay;
+mod pricing;
 pub mod provider;
 pub mod recorder;
 pub mod settings;

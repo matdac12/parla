@@ -175,7 +175,10 @@ pub fn run_with_providers(
             (Some(_), None) => "skipped",
             (Some(_), Some(_)) => "error",
         };
-        on_row(history_row(&id, started_at, audio_ms, &result));
+        let mut row = history_row(&id, started_at, audio_ms, &result);
+        // Benchmarks are real API spend; the model prices the row (PARLA-19).
+        row.model = crate::flow::batch_model(provider.id(), settings);
+        on_row(row);
         on_progress(progress(provider.as_ref(), state, Some(&result)));
         results.push(result);
     }

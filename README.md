@@ -111,8 +111,10 @@ type-checks and bundles them.
 
 ### The Parla window
 
-**Open Parla** in the tray opens the main window. It shows two lifetime totals
-(**Words dictated** and **Dictations**) and the transcript history, newest first:
+**Open Parla** in the tray opens the main window. It shows lifetime totals
+(**Words dictated**, **Dictations**, **Audio time**, **Total cost (est.)** and
+**Projected per year (est.)** against Wispr Flow's $144) and the transcript
+history, newest first:
 each entry has its time, provider, audio length, word count and full text, with a
 **Copy** button. A search box filters the loaded transcripts, new dictations
 appear at the top as they finish, and **Show older** loads more (200 at a time, up
@@ -128,6 +130,18 @@ counted. On first run the counters start from whatever is already in
 `history.jsonl`.
 Counter updates appear immediately; a dedicated writer persists them in order
 in the background and flushes queued updates when Parla exits normally.
+
+Cost is an estimate: the audio sent to each provider, model and mode (batch or
+streaming) multiplied by built-in list prices in `src-tauri/src/pricing.rs`
+(checked 2026-10-15: xAI $0.10/h batch and $0.20/h streaming; OpenAI
+`gpt-transcribe` $0.0045/min, `gpt-live-transcribe` $0.017/min; Parakeet free).
+A provider counts as billed when it returned a transcript, even if pasting then
+failed. A live session that fell back to batch is counted twice. Benchmark runs
+add to cost but not to words, dictations or audio time. Models without a known
+price are left out of the total and shown as a note. The yearly projection
+(cost per day since first use × 365) appears after 7 days. Counters written by
+older versions keep their words and get audio and cost from `history.jsonl`
+once.
 
 **Settings** opens inside the same window, with a back arrow (or **Esc**) to
 return home. The **Benchmark** and **Latency log** buttons open their own

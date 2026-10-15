@@ -1,12 +1,13 @@
 //! IPC for the main Parla window.
-use crate::stats::{Stats, StatsStore};
+use crate::stats::{StatsStore, Summary};
 use tauri::Manager;
 
 #[tauri::command]
-pub fn get_stats(app: tauri::AppHandle) -> Stats {
+pub fn get_stats(app: tauri::AppHandle) -> Summary {
     app.try_state::<StatsStore>()
         .map(|store| store.get())
         .unwrap_or_default()
+        .summary()
 }
 
 /// Shows one of Parla's own windows (used by the main window's buttons).

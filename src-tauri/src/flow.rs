@@ -409,19 +409,9 @@ impl RecoverySource for crate::recorder::RecoveryAudio {
     }
 }
 
-fn transcribe_and_paste(
-    provider: &dyn SttProvider,
-    clip: &impl RecoverySource,
-    settings: &Settings,
-    key_up: Instant,
-    record: &mut DictationRecord,
-    streamed: Option<Result<crate::streaming::Streamed, ProviderError>>,
-    paste: impl FnOnce(&str, Duration) -> Result<Instant, String>,
-) -> Result<(), ProviderError> {
-    if let crate::provider::Availability::Unavailable(reason) = provider.availability(settings) {
-        return Err(ProviderError::MissingConfig(reason));
-    }
-    let batch_model = match provider.id() {
+/// The model a batch request to `provider_id` uses with these settings.
+pub fn batch_model(provider_id: &str, settings: &Settings) -> Option<String> {
+    match provider_id {
         "openai" => Some(
             settings
                 .provider_config::<crate::provider::openai::OpenAiConfig>("openai")
@@ -434,8 +424,34 @@ fn transcribe_and_paste(
         ),
         "parakeet" => Some("parakeet-tdt-0.6b-v3".into()),
         _ => None,
-    };
-    record.model = batch_model;
+    }
+}
+
+/// The model a live session with `provider_id` uses (see streaming::transport).
+fn streaming_model(provider_id: &str, settings: &Settings) -> Option<String> {
+    match provider_id {
+        "openai" => Some(
+            settings
+                .provider_config::<crate::provider::openai::OpenAiConfig>("openai")
+                .streaming_model,
+        ),
+        _ => batch_model(provider_id, settings),
+    }
+}
+
+fn transcribe_and_paste(
+    provider: &dyn SttProvider,
+    clip: &impl RecoverySource,
+    settings: &Settings,
+    key_up: Instant,
+    record: &mut DictationRecord,
+    streamed: Option<Result<crate::streaming::Streamed, ProviderError>>,
+    paste: impl FnOnce(&str, Duration) -> Result<Instant, String>,
+) -> Result<(), ProviderError> {
+    if let crate::provider::Availability::Unavailable(reason) = provider.availability(settings) {
+        return Err(ProviderError::MissingConfig(reason));
+    }
+    record.model = batch_model(provider.id(), settings);
     let transcript = match streamed {
         Some(Ok(result)) if !result.text.trim().is_empty() => {
             record.transcription_mode = Some("streaming".into());
@@ -453,6 +469,9 @@ fn transcribe_and_paste(
                 }
                 .into(),
             );
+            if attempt.is_some() {
+                record.stream_model = streaming_model(provider.id(), settings);
+            }
             record.stream_error = attempt.map(|outcome| match outcome {
                 Err(error) => error.to_string(),
                 Ok(_) => "Live transcription returned an empty final transcript".into(),

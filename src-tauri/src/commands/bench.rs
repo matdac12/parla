@@ -166,6 +166,7 @@ pub async fn bench_run(app: tauri::AppHandle) -> Result<BenchRun, String> {
                 let _ = app.emit("bench://progress", progress);
             },
             |row| {
+                crate::stats::record(&app, &row);
                 if let Some(history) = &history {
                     history.append(row);
                 }

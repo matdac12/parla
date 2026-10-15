@@ -18,6 +18,10 @@ interface DictationRecord {
 interface Stats {
   total_words: number;
   dictations: number;
+  audio_ms: number;
+  first_used_at: number | null;
+  cost_usd: number;
+  unpriced_audio_ms: number;
 }
 
 const PAGE = 200;
@@ -35,6 +39,11 @@ const search = must<HTMLInputElement>("search");
 const more = must<HTMLButtonElement>("more");
 const words = must<HTMLSpanElement>("stat-words");
 const dictations = must<HTMLSpanElement>("stat-dictations");
+const audio = must<HTMLSpanElement>("stat-audio");
+const cost = must<HTMLSpanElement>("stat-cost");
+const costNote = must<HTMLSpanElement>("stat-cost-note");
+const projected = must<HTMLSpanElement>("stat-projected");
+const projectedNote = must<HTMLSpanElement>("stat-projected-note");
 const home = must<HTMLElement>("view-home");
 const settingsView = must<HTMLElement>("view-settings");
 
@@ -47,9 +56,42 @@ let renderFrame: number | undefined;
 const entries = new Map<string, { record: DictationRecord; retryable: boolean; element: HTMLLIElement }>();
 
 const number = new Intl.NumberFormat();
+const DAY_MS = 86_400_000;
+// The per-year projection waits for a week of use so one busy day cannot skew it.
+const PROJECTION_DAYS = 7;
+const WISPR_FLOW_PER_YEAR = 144;
+
+function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds > 0 && seconds < 60) return `${seconds} s`;
+  const minutes = Math.round(ms / 60_000);
+  const hours = Math.floor(minutes / 60);
+  return hours > 0 ? `${hours} h ${minutes % 60} m` : `${minutes} m`;
+}
+
+const dollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+function formatCost(usd: number): string {
+  return usd > 0 && usd < 0.005 ? "< $0.01" : dollars.format(usd);
+}
+
 function showStats(stats: Stats): void {
   words.textContent = number.format(stats.total_words);
   dictations.textContent = number.format(stats.dictations);
+  audio.textContent = formatDuration(stats.audio_ms);
+  cost.textContent = formatCost(stats.cost_usd);
+  costNote.hidden = stats.unpriced_audio_ms === 0;
+  costNote.textContent = `Excludes ${formatDuration(stats.unpriced_audio_ms)} with no known price`;
+  const comparison = `vs $${WISPR_FLOW_PER_YEAR} for Wispr Flow`;
+  const days = stats.first_used_at === null ? 0 : (Date.now() - stats.first_used_at) / DAY_MS;
+  if (stats.first_used_at === null || days < PROJECTION_DAYS) {
+    projected.textContent = "—";
+    projectedNote.textContent = stats.first_used_at === null
+      ? comparison
+      : `From ${new Date(stats.first_used_at + PROJECTION_DAYS * DAY_MS).toLocaleDateString()}, ${comparison}`;
+    return;
+  }
+  projected.textContent = formatCost((stats.cost_usd / days) * 365);
+  projectedNote.textContent = comparison;
 }
 
 function wordCount(text: string): number {
