@@ -163,6 +163,7 @@ impl Registration {
         );
     }
 
+    #[cfg(test)]
     fn key_event(
         &mut self,
         key: Code,
@@ -171,13 +172,27 @@ impl Registration {
         was_down: bool,
         modifiers: Option<&[Code]>,
     ) -> [Option<HotkeyEvent>; 2] {
+        self.sampled_key_event(key, pressed, injected, || was_down, || modifiers)
+    }
+
+    /// `key_event` taking the OS samples only when this event needs them: the
+    /// hook sees every keystroke on the machine, and each sample is a win32k
+    /// call that can yield the thread.
+    fn sampled_key_event<M: AsRef<[Code]>>(
+        &mut self,
+        key: Code,
+        pressed: bool,
+        injected: bool,
+        was_down: impl FnOnce() -> bool,
+        modifiers: impl FnOnce() -> Option<M>,
+    ) -> [Option<HotkeyEvent>; 2] {
         // SendInput changes logical OS state, not the physically held keys.
         if injected {
             return [None, None];
         }
         let mut recovered = None;
         if pressed && self.shortcut.is_some_and(|shortcut| shortcut.key == key) {
-            if was_down {
+            if was_down() {
                 self.keys.insert(key);
                 return [None, None];
             }
@@ -186,16 +201,26 @@ impl Registration {
             // the prior key-up and still have a cached Pressed.
             self.keys.remove(&key);
             if self.hold.pressed {
-                let Some(modifiers) = modifiers else {
+                let Some(modifiers) = modifiers() else {
                     // Pair the stale hold, but do not guess a new chord while
                     // synthetic input prevents a reliable recovery snapshot.
                     return [self.hold.update(false), None];
                 };
-                self.sync_modifiers(modifiers);
+                self.sync_modifiers(modifiers.as_ref());
             }
             recovered = self.hold.update(false);
         }
         [recovered, self.raw_event(key, pressed)]
+    }
+
+    /// Nothing for the watchdog to reconcile: no hold, no chord, and no cached
+    /// main-key press (whose missed release a tick would clear).
+    fn quiet(&self) -> bool {
+        !self.hold.pressed
+            && !self.chord_active
+            && !self
+                .shortcut
+                .is_some_and(|shortcut| self.keys.contains(&shortcut.key))
     }
 
     fn reconcile_main_key(
@@ -474,6 +499,67 @@ mod tests {
             state.key_event(Code::Space, true, false, false, Some(&[])),
             [Some(HotkeyEvent::Released), None]
         );
+    }
+
+    #[test]
+    fn a_quiet_watchdog_tick_has_nothing_to_reconcile() {
+        // `quiet` lets the timer skip a tick; a full tick must then be a no-op.
+        let mut state = chord_registration();
+        assert!(state.quiet());
+        for key in [Code::KeyA, Code::ShiftLeft, Code::ControlLeft] {
+            feed(&mut state, key, true);
+            assert!(state.quiet());
+            let before = (state.keys.clone(), state.hold.pressed, state.chord_active);
+            assert_eq!(state.reconcile_main_key(false, Some(&[])), None);
+            assert_eq!(state.chord_reconcile(&[]), None);
+            assert_eq!(
+                before,
+                (state.keys.clone(), state.hold.pressed, state.chord_active)
+            );
+            feed(&mut state, key, false);
+        }
+        // A cached main-key press, a chord, or a hold each need the full tick.
+        feed(&mut state, Code::Space, true);
+        assert!(!state.quiet());
+        assert_eq!(state.reconcile_main_key(false, Some(&[])), None);
+        assert!(state.quiet());
+        feed(&mut state, Code::ControlLeft, true);
+        feed(&mut state, Code::AltLeft, true);
+        assert!(state.chord_active && !state.quiet());
+        feed(&mut state, Code::Space, true);
+        assert!(state.hold.pressed && !state.quiet());
+    }
+
+    #[test]
+    fn os_samples_are_taken_only_for_the_main_key_press() {
+        let mut state = registration();
+        let sampled = std::cell::Cell::new(0);
+        let sample = || {
+            sampled.set(sampled.get() + 1);
+            Some([Code::ControlLeft])
+        };
+        let key_down = std::cell::Cell::new(0);
+        let was_down = || {
+            key_down.set(key_down.get() + 1);
+            false
+        };
+        for key in [Code::KeyA, Code::ShiftLeft, Code::ControlLeft] {
+            state.sampled_key_event(key, true, false, was_down, sample);
+            state.sampled_key_event(key, false, false, was_down, sample);
+        }
+        state.sampled_key_event(Code::ControlLeft, true, false, was_down, sample);
+        assert_eq!((key_down.get(), sampled.get()), (0, 0));
+        assert_eq!(
+            state.sampled_key_event(Code::Space, true, false, was_down, sample),
+            [None, Some(HotkeyEvent::Pressed)]
+        );
+        assert_eq!((key_down.get(), sampled.get()), (1, 0));
+        // Missed release: the next fresh press recovers with a snapshot.
+        assert_eq!(
+            state.sampled_key_event(Code::Space, true, false, was_down, sample),
+            [Some(HotkeyEvent::Released), Some(HotkeyEvent::Pressed)]
+        );
+        assert_eq!((key_down.get(), sampled.get()), (2, 1));
     }
 
     #[test]
@@ -824,55 +910,57 @@ mod windows_hook {
         }
     }
 
+    /// One keyboard notification from the hook; true swallows it.
+    fn handle(vk: u32, flags: u32, message: u32) -> bool {
+        if flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) != 0 {
+            return false;
+        }
+        let pressed = match message {
+            WM_KEYDOWN | WM_SYSKEYDOWN => Some(true),
+            WM_KEYUP | WM_SYSKEYUP => Some(false),
+            _ => None,
+        };
+        if vk == u32::from(VK_ESCAPE) && RECORDING.load(std::sync::atomic::Ordering::Acquire) {
+            if pressed == Some(true) {
+                CONTEXT.with(|context| {
+                    if let Some(context) = context.borrow().as_ref() {
+                        let _ = context.events.send(HotkeyEvent::Cancel);
+                    }
+                });
+            }
+            // Swallow both edges so no app sees a half-pressed Escape.
+            return true;
+        }
+        if let (Some(key), Some(pressed)) = (key_code(vk), pressed) {
+            CONTEXT.with(|context| {
+                if let Some(context) = context.borrow().as_ref() {
+                    let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let [recovered, raw] = state.sampled_key_event(
+                        key,
+                        pressed,
+                        false,
+                        // This is the PRE-event logical state, not the new press.
+                        // https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
+                        || unsafe { GetAsyncKeyState(vk as i32) } < 0,
+                        modifier_snapshot,
+                    );
+                    let chord = state.chord_event(key, pressed);
+                    for event in [recovered, raw, chord].into_iter().flatten() {
+                        let _ = context.events.send(event);
+                    }
+                }
+            });
+        }
+        false
+    }
+
     unsafe extern "system" fn callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code == HC_ACTION as i32 {
             // SAFETY: HC_ACTION keyboard notifications provide KBDLLHOOKSTRUCT
             // at lparam, valid for the duration of this callback.
             let input = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-            if input.flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) == 0 {
-                let pressed = match wparam as u32 {
-                    WM_KEYDOWN | WM_SYSKEYDOWN => Some(true),
-                    WM_KEYUP | WM_SYSKEYUP => Some(false),
-                    _ => None,
-                };
-                if input.vkCode == u32::from(VK_ESCAPE)
-                    && RECORDING.load(std::sync::atomic::Ordering::Acquire)
-                {
-                    if pressed == Some(true) {
-                        CONTEXT.with(|context| {
-                            if let Some(context) = context.borrow().as_ref() {
-                                let _ = context.events.send(HotkeyEvent::Cancel);
-                            }
-                        });
-                    }
-                    // Swallow both edges so no app sees a half-pressed Escape.
-                    return 1;
-                }
-                if let (Some(key), Some(pressed)) = (key_code(input.vkCode), pressed) {
-                    // This is the PRE-event logical state, not the new press.
-                    // https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
-                    let was_down = unsafe { GetAsyncKeyState(input.vkCode as i32) } < 0;
-                    CONTEXT.with(|context| {
-                        if let Some(context) = context.borrow().as_ref() {
-                            let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
-                            let mut emitted = state
-                                .key_event(
-                                    key,
-                                    pressed,
-                                    false,
-                                    was_down,
-                                    modifier_snapshot().as_deref(),
-                                )
-                                .into_iter()
-                                .flatten()
-                                .collect::<Vec<_>>();
-                            emitted.extend(state.chord_event(key, pressed));
-                            for event in emitted {
-                                let _ = context.events.send(event);
-                            }
-                        }
-                    });
-                }
+            if handle(input.vkCode, input.flags, wparam as u32) {
+                return 1;
             }
         }
         // SAFETY: every event is forwarded; Tauri's RegisterHotKey reserves the
@@ -923,6 +1011,13 @@ mod windows_hook {
             }
             if message.message == WM_TIMER && message.wParam == timer {
                 ticks = ticks.wrapping_add(1);
+                let refresh_due = ticks.is_multiple_of(50);
+                // A quiet tick would sample nine keys to change nothing. Hook
+                // callbacks run on this thread, so the state cannot change
+                // between this check and a full pass.
+                if !refresh_due && state.lock().unwrap_or_else(|e| e.into_inner()).quiet() {
+                    continue;
+                }
                 let Some(snapshot) = modifier_snapshot() else {
                     continue;
                 };
@@ -944,7 +1039,7 @@ mod windows_hook {
                 // Reinstall after a lost release (possibly timeout removal),
                 // and periodically while idle to recover silent hook removal.
                 // Install first so failure leaves the existing hook intact.
-                if recovered || (!active && ticks.is_multiple_of(50)) {
+                if recovered || (!active && refresh_due) {
                     match Hook::install() {
                         Ok(replacement) => {
                             hook = replacement;
@@ -978,5 +1073,78 @@ mod windows_hook {
         }
         drop(hook);
         Err("keyboard message loop ended".into())
+    }
+
+    #[cfg(test)]
+    mod bench {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        fn percentiles(label: &str, mut micros: Vec<f64>) {
+            micros.sort_by(f64::total_cmp);
+            let at = |q: f64| micros[((micros.len() - 1) as f64 * q) as usize];
+            let mean = micros.iter().sum::<f64>() / micros.len() as f64;
+            println!(
+                "{label}: n={} mean={mean:.2}us p50={:.2} p90={:.2} p99={:.2} max={:.1}",
+                micros.len(),
+                at(0.5),
+                at(0.9),
+                at(0.99),
+                at(1.0)
+            );
+        }
+
+        /// Cost of the hook's per-keystroke work (the real `handle` path).
+        /// `cargo test --release hook_path_cost -- --ignored --nocapture`
+        #[test]
+        #[ignore = "timing benchmark"]
+        fn hook_path_cost() {
+            let (events, received) = mpsc::channel();
+            let state = Arc::new(Mutex::new(Registration {
+                shortcut: Some(parse_shortcut("Ctrl+Alt+Space").unwrap()),
+                ..Default::default()
+            }));
+            CONTEXT.with(|context| {
+                *context.borrow_mut() = Some(Context {
+                    state: state.clone(),
+                    events,
+                })
+            });
+            // Typing: letters, a Shift'd capital, and Space (the main key).
+            let typing: [(u32, bool); 10] = [
+                (0x41, true),
+                (0x41, false),
+                (160, true),
+                (0x42, true),
+                (0x42, false),
+                (160, false),
+                (32, true),
+                (32, false),
+                (0x43, true),
+                (0x43, false),
+            ];
+            let run = |gap: Duration, rounds: usize| {
+                let mut micros = Vec::with_capacity(rounds * typing.len());
+                for _ in 0..rounds {
+                    for (vk, down) in typing {
+                        if !gap.is_zero() {
+                            std::thread::sleep(gap);
+                        }
+                        let message = if down { WM_KEYDOWN } else { WM_KEYUP };
+                        let started = Instant::now();
+                        std::hint::black_box(handle(vk, 0, message));
+                        micros.push(started.elapsed().as_secs_f64() * 1e6);
+                    }
+                }
+                micros
+            };
+            run(Duration::ZERO, 100);
+            percentiles("hot loop", run(Duration::ZERO, 2000));
+            percentiles(
+                "after 30ms idle (typing)",
+                run(Duration::from_millis(30), 40),
+            );
+            while received.try_recv().is_ok() {}
+        }
     }
 }
