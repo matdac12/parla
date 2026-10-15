@@ -14,6 +14,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 
 pub const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Space";
 
+/// True while the microphone is capturing a dictation. Escape cancels (and is
+/// swallowed, so the focused app does not also see it) only during this window.
+pub static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Process-lifetime registration, kept in Tauri managed state. The receiver is
 /// the core flow's seam; callbacks only enqueue events and never do desktop IO.
 pub struct Hotkey {
@@ -404,6 +408,8 @@ pub enum HotkeyEvent {
     ChordPressed,
     /// A modifier of an active chord was released.
     ChordReleased,
+    /// Escape was pressed while recording: discard the clip without transcribing.
+    Cancel,
     /// Another key was pressed during the chord, so it is a different shortcut
     /// (or AltGr typing) rather than a dictation hold.
     ChordCancelled,
@@ -757,7 +763,10 @@ mod windows_hook {
     use windows_sys::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
-        UI::{Input::KeyboardAndMouse::GetAsyncKeyState, WindowsAndMessaging::*},
+        UI::{
+            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE},
+            WindowsAndMessaging::*,
+        },
     };
 
     struct Context {
@@ -826,6 +835,19 @@ mod windows_hook {
                     WM_KEYUP | WM_SYSKEYUP => Some(false),
                     _ => None,
                 };
+                if input.vkCode == u32::from(VK_ESCAPE)
+                    && RECORDING.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    if pressed == Some(true) {
+                        CONTEXT.with(|context| {
+                            if let Some(context) = context.borrow().as_ref() {
+                                let _ = context.events.send(HotkeyEvent::Cancel);
+                            }
+                        });
+                    }
+                    // Swallow both edges so no app sees a half-pressed Escape.
+                    return 1;
+                }
                 if let (Some(key), Some(pressed)) = (key_code(input.vkCode), pressed) {
                     // This is the PRE-event logical state, not the new press.
                     // https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc

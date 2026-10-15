@@ -11,8 +11,8 @@ use std::{
 use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 const LABEL: &str = "overlay";
-const WIDTH: f64 = 168.0;
-const HEIGHT: f64 = 44.0;
+const WIDTH: f64 = 144.0;
+const HEIGHT: f64 = 40.0;
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 
 /// Creates the hidden, non-focusable, click-through overlay window.
@@ -32,6 +32,12 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .build()?;
     window.set_ignore_cursor_events(true)?;
     Ok(())
+}
+
+/// Tells the overlay whether the recording is locked hands-free (true) or held
+/// push-to-talk (false).
+pub fn set_mode(app: &tauri::AppHandle, locked: bool) {
+    let _ = app.emit_to(LABEL, "mode", locked);
 }
 
 fn place(app: &tauri::AppHandle) {
