@@ -122,6 +122,13 @@ invoke and leave runtime/shared settings unchanged. `get_settings` continues to
 return the complete saved settings object. Saves are serialized separately from
 the shared settings lock; neither disk IO nor main-thread rebinding holds that lock.
 
+The settings window (tray **Settings…**) lists every registered provider with its
+availability, lets you pick the active one, and writes API keys and model names into
+`providers.<id>`. Keys are stored as plaintext; the password field has a show/hide
+toggle and never logs or echoes the value. Providers that are not ready are disabled
+with the reason shown inline (for example, a missing key or an undownloaded model), and
+the list refreshes after each save so typing a key enables its provider immediately.
+
 ## Hotkey
 
 Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space also works: the hold ends when Space comes up. Key-down starts microphone capture (including the recorder’s 150 ms pre-roll); Space-up stops it, transcribes with the selected provider, and pastes the raw transcript. New holds during recording finalization, transcription, or clipboard restoration are ignored through their release; nothing is queued. Each accepted hold snapshots settings, so saves affect the next dictation. If no release arrives within 120 seconds after recording starts, Parla stops and transcribes the captured clip as a forced release, records `hold exceeded 120 s`, then frees the session after transcription/paste finishes. A later press can recover the stale hold. A disconnected release channel also forces completion.
@@ -129,6 +136,12 @@ Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space a
 On Windows, a keyboard-only low-level hook observes key-down/key-up events and ignores injected input; Tauri's global-shortcut plugin reserves the accelerator so normal key handling does not consume it. `Hotkey::set_shortcut(&str)` supports runtime rebinding (for example `Ctrl+Shift+F9`); the settings UI comes later. Release the current hold before rebinding; press and release keys normally after app startup. Letters, digits, F1–F12, arrows, navigation, and common punctuation keys are supported; unsupported keys such as numpad and media keys are rejected. A failed registration retains the previous shortcut; if the default is taken at startup, Parla stays running with a disabled-hotkey tray tooltip so it can be rebound later; `Ctrl+V` is reserved for paste.
 
 Paste runs on a background worker: save nonempty clipboard text, publish the transcript, wait 100 ms, reuse an already-held Ctrl (or synthesize it), clear only currently-down conflicting modifiers, send Ctrl+V with a 100 ms modifier hold, then wait **250 ms** (`DEFAULT_RESTORE_DELAY_MS`) before restoring the previous text. The JSON/commands configure that restore delay; settings UI comes later. Timing records capture injection completion before the restoration delay, but the worker remains busy until restoration finishes. Clipboard restore is best effort, retries transient read/write failures up to five times with 100 ms total backoff, and rechecks for different copied text before every write. Empty or non-text clipboards are not restored: the transcript remains and previous non-text formats are lost. Slow apps may require a longer restore delay.
+
+The settings window's **Hotkey** field accepts accelerators such as `Ctrl+Space` or
+`Ctrl+Shift+F9`; **Record keys** captures one by holding the combination you want (Esc
+cancels). Saving rebinds immediately, without a restart. An accelerator that cannot be
+registered (for example the reserved `Ctrl+V`) leaves the previous binding active and is
+reported inline as a warning rather than failing the save.
 
 ## Benchmark
 
