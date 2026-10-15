@@ -41,6 +41,8 @@ interface FieldSpec {
   type: "text" | "password";
   placeholder?: string;
   envHint?: string;
+  /** Used to prefill the field and when the input is left empty. */
+  default?: string;
   /** Store an empty input as JSON null instead of "". */
   nullable?: boolean;
 }
@@ -48,11 +50,11 @@ interface FieldSpec {
 const PROVIDER_FIELDS: Record<string, FieldSpec[]> = {
   openai: [
     { key: "api_key", label: "API key", type: "password", envHint: "OPENAI_API_KEY" },
-    { key: "model", label: "Model", type: "text", placeholder: "gpt-transcribe" },
+    { key: "model", label: "Model", type: "text", default: "gpt-transcribe" },
   ],
   xai: [
     { key: "api_key", label: "API key", type: "password", envHint: "XAI_API_KEY" },
-    { key: "model", label: "Model", type: "text" },
+    { key: "model", label: "Model", type: "text", default: "grok-voice-transcribe-2.0" },
   ],
 };
 
@@ -214,9 +216,13 @@ function buildField(providerId: string, spec: FieldSpec, config: Record<string, 
   input.spellcheck = false;
   if (spec.placeholder) input.placeholder = spec.placeholder;
   const current = config[spec.key];
-  input.value = typeof current === "string" ? current : "";
+  input.value = typeof current === "string" && current.trim() !== "" ? current : (spec.default ?? "");
+  if (spec.default !== undefined && config[spec.key] !== input.value) {
+    config[spec.key] = input.value;
+  }
   input.addEventListener("input", () => {
-    config[spec.key] = spec.nullable && input.value.trim() === "" ? null : input.value;
+    const empty = input.value.trim() === "";
+    config[spec.key] = empty ? (spec.default ?? (spec.nullable ? null : "")) : input.value;
     updateDirty();
   });
 

@@ -1,0 +1,63 @@
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  height: 100%;
+}
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 156px;
+  height: 38px;
+  padding: 0 18px 0 16px;
+  border-radius: 19px;
+  background: linear-gradient(180deg, #2b2b30 0%, #151518 100%);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 4px 14px rgba(0, 0, 0, 0.45);
+  animation: appear 160ms ease-out;
+}
+.dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff453a;
+  box-shadow: 0 0 8px rgba(255, 69, 58, 0.8);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.bars {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  height: 100%;
+}
+.bar {
+  width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #ffffff, #b9c6ff);
+  transition: height 70ms ease-out, opacity 70ms linear;
+}
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+    box-shadow: 0 0 3px rgba(255, 69, 58, 0.4);
+  }
+}

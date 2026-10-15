@@ -6,7 +6,8 @@
     "main",
     "settings",
     "history",
-    "bench"
+    "bench",
+    "overlay"
   ],
   "permissions": [
     "core:default",

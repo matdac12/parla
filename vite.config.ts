@@ -9,6 +9,7 @@ export default defineConfig({
         settings: "settings.html",
         history: "history.html",
         bench: "bench.html",
+        overlay: "overlay.html",
       },
     },
   },
