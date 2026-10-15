@@ -1,5 +1,6 @@
 //! Small synchronous provider interface; callers run it on a blocking worker.
 pub mod openai;
+pub mod parakeet;
 pub mod registry;
 pub mod xai;
 
