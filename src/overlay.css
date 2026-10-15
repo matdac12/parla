@@ -22,7 +22,43 @@ body {
   box-shadow:
     0 0 0 0.5px rgba(255, 255, 255, 0.14),
     0 6px 18px rgba(0, 0, 0, 0.35);
+  position: relative;
+  transition: width 220ms cubic-bezier(0.2, 0, 0, 1);
   animation: appear 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+.pill:not([data-phase="recording"]) {
+  width: 40px;
+}
+.pill:not([data-phase="recording"]) .mode,
+.pill:not([data-phase="recording"]) .bars,
+.pill[data-phase="recording"] .spinner,
+.pill[data-phase="recording"] .result,
+.pill[data-phase="processing"] .result,
+.pill[data-phase="done"] .spinner,
+.pill[data-phase="error"] .spinner {
+  display: none;
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+  animation: spin 700ms linear infinite;
+}
+.result {
+  display: grid;
+  place-items: center;
+  color: #7ee2a8;
+  animation: pop 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+.pill[data-phase="error"] .result {
+  color: #ff8f8a;
+}
+.result .stroke {
+  stroke-dasharray: 20;
+  stroke-dashoffset: 0;
+  animation: draw 260ms cubic-bezier(0.2, 0, 0, 1);
 }
 .mode {
   display: grid;
@@ -60,6 +96,22 @@ body {
   background: #fff;
   transition: height 80ms cubic-bezier(0.2, 0, 0, 1), opacity 120ms linear;
 }
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+@keyframes draw {
+  from {
+    stroke-dashoffset: 20;
+  }
+}
 @keyframes swap {
   from {
     opacity: 0;
@@ -73,5 +125,8 @@ body {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .pill { animation: none; }
+  /* The spinner is a progress indicator, so it keeps rotating. */
+  .pill {
+    animation: none;
+  }
 }

@@ -6,7 +6,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: "index.html",
-        settings: "settings.html",
+        app: "app.html",
         history: "history.html",
         bench: "bench.html",
         overlay: "overlay.html",

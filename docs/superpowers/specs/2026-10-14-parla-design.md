@@ -91,3 +91,25 @@ Licenses and what is actually reusable must be confirmed per repo when each piec
 ## Definition of done for v0
 
 On Windows: hold the hotkey, speak, release, and the text appears in the focused app, using either a local or a cloud provider chosen in settings. The benchmark view shows latency for every configured provider on the same clip.
+
+## Addendum (2026-10-15): changes after the first Windows run
+
+The v0 design above is unchanged except for these decisions, made after the first
+hands-on run on Windows. The README is the source of truth for current behavior.
+
+- **Hotkey model.** Pure hold-to-talk became two modes on one shortcut,
+  `Ctrl+Alt+Space`: hold the modifiers (`Ctrl+Alt`) to talk, or tap the full
+  shortcut to lock a hands-free recording that the next `Ctrl+Alt` press stops.
+  `Esc` cancels a recording without transcribing. Holds under 300 ms are
+  discarded, any other key during a hold cancels it, and only the left Alt counts
+  so AltGr typing is never captured.
+- **Recording pill.** A small non-focusable overlay shows a live level meter,
+  the mode (held dot / locked padlock), a spinner while transcribing, and a brief
+  check or cross. It borrows the idea from Oto's focus-free overlay.
+- **Windows are created in code**, after state is registered, because
+  config-defined webviews load before `setup` and raced the managed state.
+- **Visual pass.** The settings, history and benchmark pages share one light/dark
+  theme (`src/theme.css`).
+- **Findings.** On a mixed English/Italian clip OpenAI and xAI matched and
+  Parakeet slipped at the language switch; Parakeet was fastest on a short
+  single-language clip. Idle memory is dominated by the hidden WebView2 windows.
