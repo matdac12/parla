@@ -87,12 +87,17 @@ impl From<Clip> for RecoveryAudio {
 const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long the worker blocks waiting for a command before draining the ring
-/// again. Commands wake this wait immediately, so draining less often does not
-/// add a polling delay to start/stop. The live meter updates every 40 ms.
+/// again while recording. Commands wake this wait immediately, so draining less
+/// often does not add a polling delay to start/stop. The live meter updates
+/// every 40 ms and streaming forwards audio as it is drained.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// The same wait while idle, when draining only refreshes the pre-roll. `Start`
+/// drains first, so the longer gap never adds stale audio to a clip.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Ring capacity, in seconds of device audio. Generous: the worker only needs
-/// to keep up with a 10 ms drain interval.
+/// to keep up with a 100 ms drain interval.
 const RING_SECONDS: usize = 2;
 
 /// Idle audio kept so `start` does not clip the first syllable.
@@ -432,19 +437,29 @@ fn audio_thread(
 
     loop {
         if let Some(session) = session.as_mut() {
-            drain(session, &mut scratch, &mut capture);
+            drain(&mut session.consumer, &mut scratch, &mut capture);
         }
 
-        match commands.recv_timeout(POLL_INTERVAL) {
+        let interval = if capture.active.is_some() {
+            POLL_INTERVAL
+        } else {
+            IDLE_POLL_INTERVAL
+        };
+        match commands.recv_timeout(interval) {
             Ok(Command::Start { generation, ack }) => {
-                capture.begin(generation);
+                start_capture(
+                    session.as_mut().map(|session| &mut session.consumer),
+                    &mut scratch,
+                    &mut capture,
+                    generation,
+                );
                 let _ = ack.send(());
             }
             Ok(Command::Stop { generation, reply }) => {
                 // Drain anything that arrived since the top of the loop, then
                 // hand back only this generation's audio.
                 if let Some(session) = session.as_mut() {
-                    drain(session, &mut scratch, &mut capture);
+                    drain(&mut session.consumer, &mut scratch, &mut capture);
                 }
                 let samples = capture.finish(generation);
                 let _ = reply.send((generation, samples));
@@ -596,14 +611,28 @@ where
 }
 
 /// Reads everything currently in the ring into the capture state.
-fn drain(session: &mut OpenSession, scratch: &mut [f32], capture: &mut Capture) {
+fn drain(consumer: &mut HeapCons<f32>, scratch: &mut [f32], capture: &mut Capture) {
     loop {
-        let count = session.consumer.pop_slice(scratch);
+        let count = consumer.pop_slice(scratch);
         if count == 0 {
             break;
         }
         capture.feed(&scratch[..count]);
     }
+}
+
+/// Begins session `generation`. Audio still in the ring predates the press, so
+/// it goes through the capped pre-roll first rather than into the clip.
+fn start_capture(
+    consumer: Option<&mut HeapCons<f32>>,
+    scratch: &mut [f32],
+    capture: &mut Capture,
+    generation: u64,
+) {
+    if let Some(consumer) = consumer {
+        drain(consumer, scratch, capture);
+    }
+    capture.begin(generation);
 }
 
 /// The worker's recording state. Keeps the active session's samples and, while
@@ -915,6 +944,38 @@ mod tests {
             capture.feed(&scratch[..count]);
         }
         assert_eq!(capture.finish(1), input);
+    }
+
+    #[test]
+    fn start_moves_undrained_idle_audio_into_the_capped_preroll() {
+        // A full idle interval of audio is still in the ring when Start
+        // arrives. The clip must hold exactly the newest pre-roll, then only
+        // audio captured after the press.
+        let rate = 48_000;
+        let cap = preroll_capacity(rate);
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_capacity(rate)).split();
+        let mut capture = Capture::new();
+        capture.set_preroll_cap(cap);
+        let mut scratch = vec![0.0; DRAIN_SCRATCH];
+        let idle_drain = rate as usize * IDLE_POLL_INTERVAL.as_millis() as usize / 1000;
+        assert!(idle_drain < ring_capacity(rate));
+
+        let drained_earlier = vec![1.0; cap];
+        assert_eq!(producer.push_slice(&drained_earlier), cap);
+        drain(&mut consumer, &mut scratch, &mut capture);
+        let undrained: Vec<f32> = (0..idle_drain).map(|n| 2.0 + n as f32).collect();
+        assert_eq!(producer.push_slice(&undrained), idle_drain);
+
+        start_capture(Some(&mut consumer), &mut scratch, &mut capture, 1);
+        let after = vec![-1.0; 480];
+        assert_eq!(producer.push_slice(&after), after.len());
+        drain(&mut consumer, &mut scratch, &mut capture);
+
+        let clip = capture.finish(1);
+        let before_press: Vec<f32> = drained_earlier.into_iter().chain(undrained).collect();
+        assert_eq!(clip.len(), cap + after.len());
+        assert_eq!(clip[..cap], before_press[before_press.len() - cap..]);
+        assert_eq!(clip[cap..], after[..]);
     }
 
     #[test]
