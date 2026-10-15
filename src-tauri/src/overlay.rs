@@ -16,7 +16,8 @@ const WIDTH: f64 = 144.0;
 const HEIGHT: f64 = 40.0;
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 const DONE_HOLD: Duration = Duration::from_millis(750);
-const ERROR_HOLD: Duration = Duration::from_millis(1400);
+/// A failed dictation keeps its pill (and Retry button) up for a while.
+const ERROR_HOLD: Duration = Duration::from_secs(10);
 
 /// Creates the hidden, non-focusable, click-through overlay window.
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
@@ -76,6 +77,7 @@ pub struct Overlay {
 pub fn begin(app: &tauri::AppHandle) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let metering = Arc::new(AtomicBool::new(true));
+    set_interactive(app, false);
     let _ = app.emit_to(LABEL, "phase", "recording");
     let flag = metering.clone();
     let handle = app.clone();
@@ -108,6 +110,27 @@ pub fn begin(app: &tauri::AppHandle) -> Overlay {
     }
 }
 
+/// The pill is click-through except while it offers Retry.
+fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.set_ignore_cursor_events(!interactive);
+    }
+}
+
+/// Starts a session already in the transcribing phase (used by Retry).
+pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
+    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    set_interactive(app, false);
+    let overlay = Overlay {
+        app: app.clone(),
+        generation,
+        metering: Arc::new(AtomicBool::new(false)),
+        settled: false,
+    };
+    overlay.processing();
+    overlay
+}
+
 fn reveal(app: &tauri::AppHandle) {
     place(app);
     if let Some(window) = app.get_webview_window(LABEL) {
@@ -117,6 +140,7 @@ fn reveal(app: &tauri::AppHandle) {
 }
 
 fn hide(app: &tauri::AppHandle) {
+    set_interactive(app, false);
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.hide();
     }
@@ -136,6 +160,7 @@ impl Overlay {
         self.settled = true;
         self.metering.store(false, Ordering::Release);
         reveal(&self.app);
+        set_interactive(&self.app, !ok);
         let _ = self
             .app
             .emit_to(LABEL, "phase", if ok { "done" } else { "error" });

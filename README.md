@@ -88,7 +88,10 @@ type-checks and bundles them.
 each entry has its time, provider, audio length, word count and full text, with a
 **Copy** button. A search box filters the loaded transcripts, new dictations
 appear at the top as they finish, and **Show older** loads more (200 at a time, up
-to 2000). Failed dictations are listed in red without a Copy button.
+to 2000). Failed dictations are listed in red without a Copy button; the newest one,
+while its recording is still saved, has a **Retry** button that transcribes the
+saved clip and adds the result to the list (nothing is pasted, since the
+focus is Parla itself).
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a
@@ -155,8 +158,11 @@ It never takes focus and ignores the mouse, so pasting still goes to your app.
 - **Transcribing:** the pill shrinks to a spinner from the moment you stop until
   the text is ready.
 - **Done:** a green check for about 0.75 s once the text has been pasted. A red
-  cross for about 1.4 s means the dictation failed (the usual failure
-  notification and red tray icon still apply). A cancelled recording just
+  cross means the dictation failed (the usual failure notification and red tray
+  icon still apply). The failed pill stays for 10 s with a **reload button**:
+  click it to retry the saved clip (spinner, then check or cross again). The
+  pill never takes focus, so the retried text is pasted into the app you were
+  using. The pill is click-through at all other times. A cancelled recording just
   disappears.
 
 Parla opens the default input device once at startup and keeps its stream warm,
@@ -364,9 +370,10 @@ failures notify too, but there is no clip to retry. Clipboard and injection
 failures also report an error; an injection failure can occur after input has
 already reached the destination.
 
-To recover, choose **Retry last failed dictation** in the tray after fixing the
-issue (the tray waits 300 ms for the menu to dismiss; the `retry_last_failed`
-command starts immediately). Retry uses the current settings/provider and pastes
+To recover, click the reload button on the failed pill, press **Retry** on the
+failed entry in the app window, or choose **Retry last failed dictation** in the
+tray after fixing the issue (the tray waits 300 ms for the menu to dismiss; the pill and window
+buttons start immediately). Retry uses the current settings/provider and pastes
 into whichever app has focus when injection runs. Busy retries report
 "Busy, try again" and keep the clip; failed retries keep it as well.
 

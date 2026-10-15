@@ -29,6 +29,27 @@ body {
 .pill:not([data-phase="recording"]) {
   width: 40px;
 }
+.pill[data-phase="error"] {
+  width: 76px;
+}
+.retry {
+  display: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+}
+.retry:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+.pill[data-phase="error"] .retry {
+  display: grid;
+}
 .pill:not([data-phase="recording"]) .mode,
 .pill:not([data-phase="recording"]) .bars,
 .pill[data-phase="recording"] .spinner,

@@ -10,7 +10,7 @@ use std::{
     sync::Mutex,
     time::{Instant, SystemTime},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 pub struct FailedDictation {
@@ -214,6 +214,7 @@ pub fn on_failure(app: &tauri::AppHandle, error: ProviderError, clip: Clip, prov
     });
     set_retry_enabled(app, true);
     notify_error(app, provider_id, &error);
+    let _ = app.emit("failure://changed", true);
     if persisted.is_err() {
         notify_info(
             app,
@@ -222,9 +223,28 @@ pub fn on_failure(app: &tauri::AppHandle, error: ProviderError, clip: Clip, prov
     }
 }
 
+/// True when a failed dictation can still be retried (in memory or on disk).
+pub fn has_failed_clip(app: &tauri::AppHandle) -> bool {
+    app.state::<LastFailedClip>()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+        || clip_path(app).is_ok_and(|path| path.exists())
+}
+
+/// Retry driven from the pill or the tray: shows the spinner, pastes, then the
+/// pill settles on a check or a cross (with another Retry button).
+pub fn retry_with_pill(app: &tauri::AppHandle) -> Result<(), String> {
+    let overlay = crate::overlay::begin_processing(app);
+    let result = retry_last_failed(app, true);
+    overlay.finish(result.is_ok());
+    let _ = app.emit("failure://changed", has_failed_clip(app));
+    result
+}
+
 /// Must run on a blocking worker. No clip/settings mutex is held across provider
 /// work or paste. The admission guard covers clipboard restoration as well.
-pub fn retry_last_failed(app: &tauri::AppHandle) -> Result<(), String> {
+pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), String> {
     let retry_lock = app.state::<RetryLock>();
     let Ok(_retry) = retry_lock.0.try_lock() else {
         notify_info(app, "Busy, try again");
@@ -274,6 +294,7 @@ pub fn retry_last_failed(app: &tauri::AppHandle) -> Result<(), String> {
         &settings,
         SystemTime::now(),
         Instant::now(),
+        paste,
     );
     let error = failed
         .lock()

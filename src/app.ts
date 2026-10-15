@@ -37,6 +37,7 @@ const words = must<HTMLSpanElement>("stat-words");
 const dictations = must<HTMLSpanElement>("stat-dictations");
 
 let records: DictationRecord[] = [];
+let canRetry = false;
 let limit = PAGE;
 
 const number = new Intl.NumberFormat();
@@ -70,7 +71,7 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-function entry(record: DictationRecord): HTMLLIElement {
+function entry(record: DictationRecord, retryable: boolean): HTMLLIElement {
   const item = document.createElement("li");
   item.className = record.error === null ? "entry" : "entry failed";
 
@@ -90,6 +91,28 @@ function entry(record: DictationRecord): HTMLLIElement {
   text.className = "entry-text";
   text.textContent = record.error === null ? record.text : `Failed: ${record.error}`;
   item.append(meta, text);
+
+  if (retryable) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "copy retry";
+    button.textContent = "Retry";
+    button.setAttribute("aria-label", "Retry this dictation");
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      button.classList.add("busy");
+      button.textContent = "Retrying…";
+      invoke("retry_to_history").then(
+        () => void refreshRetry(),
+        () => {
+          button.disabled = false;
+          button.classList.remove("busy");
+          button.textContent = "Retry failed — try again";
+        },
+      );
+    });
+    item.append(button);
+  }
 
   if (record.error === null && record.text.trim() !== "") {
     const button = document.createElement("button");
@@ -122,14 +145,22 @@ function entry(record: DictationRecord): HTMLLIElement {
 function render(): void {
   const query = search.value.trim().toLowerCase();
   const shown = query === "" ? records : records.filter((r) => r.text.toLowerCase().includes(query));
-  list.replaceChildren(...shown.map(entry));
+  // Only the newest failed dictation can be retried (one clip is kept).
+  const newestFailed = records.find((r) => r.error !== null);
+  list.replaceChildren(...shown.map((r) => entry(r, canRetry && r === newestFailed)));
   empty.hidden = shown.length > 0;
   empty.textContent = query === "" ? "No dictations yet. Hold Ctrl+Alt and speak." : "No transcripts match.";
   more.hidden = records.length < limit || limit >= MAX;
 }
 
+async function refreshRetry(): Promise<void> {
+  canRetry = await invoke<boolean>("has_failed_clip");
+  render();
+}
+
 async function load(): Promise<void> {
   records = await invoke<DictationRecord[]>("get_history", { limit });
+  canRetry = await invoke<boolean>("has_failed_clip");
   render();
 }
 
@@ -166,6 +197,10 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open]")
 void listen<DictationRecord>("dictation://recorded", (event) => {
   if (event.payload.kind !== "dictation") return;
   records = [event.payload, ...records].slice(0, limit);
+  render();
+});
+void listen<boolean>("failure://changed", (event) => {
+  canRetry = event.payload;
   render();
 });
 void listen<Stats>("stats://updated", (event) => showStats(event.payload));

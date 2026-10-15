@@ -218,7 +218,7 @@ fn run_session(
     if let Some(overlay) = &overlay {
         overlay.processing();
     }
-    let ok = finish_session_with_error(app, audio, &settings, started_at, key_up, hold_error);
+    let ok = finish_session_with_error(app, audio, &settings, started_at, key_up, hold_error, true);
     if let Some(overlay) = overlay {
         overlay.finish(ok);
     }
@@ -243,15 +243,17 @@ fn wait_for_release(
 
 /// Reusable completion path for PARLA-9: acquire DictationState::try_begin on a
 /// blocking worker, snapshot SharedSettings, then pass Ok(saved_clip) here.
-/// A retry uses its own wall-clock start and Instant::now() as key_up.
+/// A retry uses its own wall-clock start and Instant::now() as key_up. With
+/// `paste` false the transcript is only recorded in history.
 pub fn finish_session(
     app: &tauri::AppHandle,
     audio: Result<crate::clip::Clip, ProviderError>,
     settings: &Settings,
     started_at: SystemTime,
     key_up: Instant,
+    paste: bool,
 ) {
-    finish_session_with_error(app, audio, settings, started_at, key_up, None);
+    finish_session_with_error(app, audio, settings, started_at, key_up, None, paste);
 }
 
 fn finish_session_with_error(
@@ -261,6 +263,7 @@ fn finish_session_with_error(
     started_at: SystemTime,
     key_up: Instant,
     hold_error: Option<String>,
+    paste: bool,
 ) -> bool {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     let result = match audio {
@@ -289,7 +292,14 @@ fn finish_session_with_error(
                             key_up,
                             &mut record,
                             |text, delay| {
-                                inserter::paste_text_timed(text, delay).map_err(|e| e.to_string())
+                                if paste {
+                                    inserter::paste_text_timed(text, delay)
+                                        .map_err(|e| e.to_string())
+                                } else {
+                                    // Retried from the app window: the history entry
+                                    // is the delivery, there is nothing to paste into.
+                                    Ok(Instant::now())
+                                }
                             },
                         )
                     })

@@ -91,3 +91,5 @@ h2 { margin: 0; font-size: 1rem; }
   padding: 0;
   border-radius: 50%;
 }
+.copy.retry { color: var(--danger); border-color: var(--danger); }
+.copy.retry.busy { opacity: 0.6; }

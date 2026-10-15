@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 const BARS = 9;
@@ -33,7 +34,22 @@ const CROSS = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true
   <path class="stroke" d="M4.8 4.8l6.4 6.4M11.2 4.8l-6.4 6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
 </svg>`;
 
-pill.append(mode, container, spinner, result);
+// After a failure: a reload button that retries the saved clip.
+const retry = document.createElement("button");
+retry.type = "button";
+retry.className = "retry";
+retry.title = "Retry transcription";
+retry.setAttribute("aria-label", "Retry transcription");
+retry.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+  <path d="M13 8a5 5 0 1 1-1.6-3.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  <path d="M12.6 1.6v3.3H9.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+retry.addEventListener("click", () => {
+  retry.disabled = true;
+  void invoke("retry_last_failed").catch(() => undefined);
+});
+
+pill.append(mode, container, spinner, result, retry);
 
 const bars: HTMLDivElement[] = [];
 for (let i = 0; i < BARS; i++) {
@@ -63,6 +79,7 @@ function setPhase(phase: string): void {
   } else if (phase === "error") {
     result.innerHTML = CROSS;
   }
+  retry.disabled = false;
   pill.dataset.phase = phase;
 }
 setPhase("recording");

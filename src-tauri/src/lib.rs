@@ -51,6 +51,8 @@ pub fn run() {
             commands::history::get_history,
             commands::history::clear_history,
             commands::failure::retry_last_failed,
+            commands::failure::retry_to_history,
+            commands::failure::has_failed_clip,
             commands::models::model_status,
             commands::models::download_model,
             commands::bench::bench_start_recording,
