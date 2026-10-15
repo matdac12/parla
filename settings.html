@@ -11,7 +11,7 @@
       <header class="page-head">
         <h1>Parla Settings</h1>
         <p class="subtitle">
-          Hold the hotkey, speak, release, and the transcript is pasted into the focused app.
+          Hold Ctrl+Alt to talk, or tap Ctrl+Alt+Space to lock it hands-free (press Ctrl+Alt to stop, Esc to cancel). The transcript is pasted into the focused app.
         </p>
       </header>
 
@@ -35,14 +35,16 @@
                 type="text"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="Ctrl+Space"
+                placeholder="Ctrl+Alt+Space"
                 aria-describedby="hotkey-hint"
               />
               <button type="button" id="capture" class="secondary">Record keys</button>
             </div>
             <p id="capture-hint" class="hint capture-hint" role="status" aria-live="polite" hidden></p>
             <p id="hotkey-hint" class="hint">
-              Examples: <code>Ctrl+Space</code>, <code>Ctrl+Shift+F9</code>. Press “Record keys”, then
+              With two or more modifiers (default <code>Ctrl+Alt+Space</code>), holding just the modifiers is push-to-talk and
+              tapping the full shortcut locks it hands-free (press the modifiers again to stop). A shortcut like <code>Ctrl+Shift+F9</code> is
+              tap to start, tap to stop. Press “Record keys”, then
               hold the combination you want (Esc cancels). Rebinding takes effect immediately on save.
             </p>
           </div>

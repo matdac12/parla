@@ -9,6 +9,7 @@ pub mod history;
 pub mod hotkey;
 pub mod inserter;
 pub mod models;
+mod overlay;
 pub mod provider;
 pub mod recorder;
 pub mod settings;
@@ -19,7 +20,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            tray::setup(app)?;
+            // Webviews can invoke commands as soon as they load, so all state
+            // must be managed before anything that creates or shows a window.
             let config = settings::load(&settings::path(app.handle())?).unwrap_or_else(|error| {
                 eprintln!("{error}; using defaults until settings are repaired");
                 settings::Settings::default()
@@ -33,6 +35,8 @@ pub fn run() {
             if let Err(error) = history::setup(app) {
                 eprintln!("History disabled: {error}");
             }
+            tray::setup(app)?;
+            overlay::setup(app)?;
             flow::setup(app)?;
             Ok(())
         })

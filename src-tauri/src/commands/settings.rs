@@ -136,7 +136,10 @@ mod tests {
             |_| panic!("must not apply after disk failure")
         )
         .is_err());
-        assert_eq!(shared.read().unwrap().hotkey, "Ctrl+Space");
+        assert_eq!(
+            shared.read().unwrap().hotkey,
+            crate::hotkey::DEFAULT_SHORTCUT
+        );
     }
     #[test]
     fn warning_shape_is_documented_json() {

@@ -5,7 +5,7 @@ use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WindowEvent,
+    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
@@ -51,12 +51,40 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
 
     // Closing either window hides it instead of destroying it, so the tray
     // item can show it again.
-    for (label, what) in [
-        ("main", "settings"),
-        ("history", "history"),
-        ("bench", "benchmark"),
+    // Created here, not in tauri.conf.json: config windows load their pages
+    // before `setup`, and their first IPC calls would race the managed state.
+    for (label, what, title, url, width, height) in [
+        (
+            "main",
+            "settings",
+            "Parla Settings",
+            "settings.html",
+            640.0,
+            480.0,
+        ),
+        (
+            "history",
+            "history",
+            "Parla History",
+            "history.html",
+            960.0,
+            600.0,
+        ),
+        (
+            "bench",
+            "benchmark",
+            "Parla Benchmark",
+            "bench.html",
+            960.0,
+            640.0,
+        ),
     ] {
-        if let Some(window) = app.get_webview_window(label) {
+        let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+            .title(title)
+            .inner_size(width, height)
+            .visible(false)
+            .build()?;
+        {
             let hide_target = window.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {

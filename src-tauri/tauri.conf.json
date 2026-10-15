@@ -10,32 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Parla Settings",
-        "url": "settings.html",
-        "width": 640,
-        "height": 480,
-        "visible": false
-      },
-      {
-        "label": "history",
-        "title": "Parla History",
-        "url": "history.html",
-        "width": 960,
-        "height": 600,
-        "visible": false
-      },
-      {
-        "label": "bench",
-        "title": "Parla Benchmark",
-        "url": "bench.html",
-        "width": 960,
-        "height": 640,
-        "visible": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self'; img-src 'self' asset: http://asset.localhost"
     }

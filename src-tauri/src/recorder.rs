@@ -54,6 +54,14 @@ const RING_SECONDS: usize = 2;
 /// Idle audio kept so `start` does not clip the first syllable.
 const PRE_ROLL_MS: usize = 150;
 
+/// RMS of the most recent chunk captured during a recording (f32 bits), read
+/// by the recording overlay.
+static LEVEL: AtomicU32 = AtomicU32::new(0);
+
+pub fn current_level() -> f32 {
+    f32::from_bits(LEVEL.load(Ordering::Relaxed))
+}
+
 /// Samples the worker drains from the ring at a time.
 const DRAIN_SCRATCH: usize = 4096;
 
@@ -520,6 +528,10 @@ impl Capture {
     /// idle.
     fn feed(&mut self, chunk: &[f32]) {
         if self.active.is_some() {
+            if !chunk.is_empty() {
+                let mean_square = chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32;
+                LEVEL.store(mean_square.sqrt().to_bits(), Ordering::Relaxed);
+            }
             self.buffer.extend_from_slice(chunk);
         } else {
             push_preroll(&mut self.preroll, chunk, self.preroll_cap);

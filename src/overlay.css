@@ -1,0 +1,77 @@
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  height: 100%;
+}
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  width: 116px;
+  height: 32px;
+  border-radius: 16px;
+  background: rgba(18, 18, 20, 0.92);
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.14),
+    0 6px 18px rgba(0, 0, 0, 0.35);
+  animation: appear 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+.mode {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  color: #fff;
+}
+.mode > * {
+  animation: swap 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+}
+.pill[data-locked="true"] .bar {
+  background: #b9b6ff;
+}
+.pill[data-locked="true"] .mode {
+  color: #b9b6ff;
+}
+.bars {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 58px;
+  height: 100%;
+}
+.bar {
+  width: 2.5px;
+  height: 3px;
+  border-radius: 2px;
+  background: #fff;
+  transition: height 80ms cubic-bezier(0.2, 0, 0, 1), opacity 120ms linear;
+}
+@keyframes swap {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pill { animation: none; }
+}

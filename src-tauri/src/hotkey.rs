@@ -12,7 +12,11 @@ use std::sync::{
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
-pub const DEFAULT_SHORTCUT: &str = "Ctrl+Space";
+pub const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Space";
+
+/// True while the microphone is capturing a dictation. Escape cancels (and is
+/// swallowed, so the focused app does not also see it) only during this window.
+pub static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Process-lifetime registration, kept in Tauri managed state. The receiver is
 /// the core flow's seam; callbacks only enqueue events and never do desktop IO.
@@ -57,6 +61,7 @@ const MODIFIER_KEYS: [Code; 8] = [
 struct Registration {
     #[cfg(any(windows, test))]
     keys: std::collections::HashSet<Code>,
+    chord_active: bool,
     shortcut: Option<Shortcut>,
     hold: HoldState,
 }
@@ -103,6 +108,52 @@ impl Registration {
 
 #[cfg(any(windows, test))]
 impl Registration {
+    /// The shortcut's modifiers, all down and nothing else modified. Left Alt
+    /// only, so Italian-layout AltGr (Right Alt + synthetic Ctrl) never counts.
+    fn chord_satisfied(&self, shortcut: Shortcut, down: impl Fn(Code) -> bool) -> bool {
+        let wanted = |left: Code, right: Code, modifier: Modifiers| {
+            let want = shortcut.mods.contains(modifier);
+            if modifier == Modifiers::ALT {
+                return want == down(left) && !down(right);
+            }
+            want == (down(left) || down(right))
+        };
+        shortcut.mods.bits().count_ones() >= 2
+            && wanted(Code::ControlLeft, Code::ControlRight, Modifiers::CONTROL)
+            && wanted(Code::ShiftLeft, Code::ShiftRight, Modifiers::SHIFT)
+            && wanted(Code::AltLeft, Code::AltRight, Modifiers::ALT)
+            && wanted(Code::MetaLeft, Code::MetaRight, Modifiers::SUPER)
+    }
+
+    /// Chord transitions for a physical key event, after `key_event` updated
+    /// the key set.
+    fn chord_event(&mut self, key: Code, pressed: bool) -> Option<HotkeyEvent> {
+        let shortcut = self.shortcut?;
+        let satisfied = self.chord_satisfied(shortcut, |code| self.keys.contains(&code));
+        if satisfied && !self.chord_active && pressed && MODIFIER_KEYS.contains(&key) {
+            self.chord_active = true;
+            return Some(HotkeyEvent::ChordPressed);
+        }
+        if self.chord_active && !satisfied {
+            self.chord_active = false;
+            return Some(HotkeyEvent::ChordReleased);
+        }
+        if self.chord_active && pressed && !MODIFIER_KEYS.contains(&key) && key != shortcut.key {
+            return Some(HotkeyEvent::ChordCancelled);
+        }
+        None
+    }
+
+    /// Watchdog: ends a chord whose modifier release was missed.
+    fn chord_reconcile(&mut self, down: &[Code]) -> Option<HotkeyEvent> {
+        let shortcut = self.shortcut?;
+        if self.chord_active && !self.chord_satisfied(shortcut, |code| down.contains(&code)) {
+            self.chord_active = false;
+            return Some(HotkeyEvent::ChordReleased);
+        }
+        None
+    }
+
     fn sync_modifiers(&mut self, down: &[Code]) {
         self.keys.retain(|key| !MODIFIER_KEYS.contains(key));
         self.keys.extend(
@@ -350,8 +401,18 @@ key_map! {
 /// One logical transition per hold, regardless of OS key repeat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
+    /// The full accelerator (modifiers plus main key) went down.
     Pressed,
     Released,
+    /// All of the accelerator's modifiers went down together (needs 2+).
+    ChordPressed,
+    /// A modifier of an active chord was released.
+    ChordReleased,
+    /// Escape was pressed while recording: discard the clip without transcribing.
+    Cancel,
+    /// Another key was pressed during the chord, so it is a different shortcut
+    /// (or AltGr typing) rather than a dictation hold.
+    ChordCancelled,
 }
 
 #[derive(Default)]
@@ -426,6 +487,63 @@ mod tests {
             shortcut: Some(parse_shortcut("Ctrl+Space").unwrap()),
             ..Default::default()
         }
+    }
+
+    fn chord_registration() -> Registration {
+        Registration {
+            shortcut: Some(parse_shortcut("Ctrl+Alt+Space").unwrap()),
+            ..Default::default()
+        }
+    }
+
+    fn feed(state: &mut Registration, key: Code, pressed: bool) -> Option<HotkeyEvent> {
+        state.key_event(key, pressed, false, !pressed, Some(&[]));
+        state.chord_event(key, pressed)
+    }
+
+    #[test]
+    fn ctrl_alt_chord_press_release_and_cancel() {
+        let mut state = chord_registration();
+        assert_eq!(feed(&mut state, Code::ControlLeft, true), None);
+        assert_eq!(
+            feed(&mut state, Code::AltLeft, true),
+            Some(HotkeyEvent::ChordPressed)
+        );
+        assert_eq!(
+            feed(&mut state, Code::AltLeft, false),
+            Some(HotkeyEvent::ChordReleased)
+        );
+        assert_eq!(feed(&mut state, Code::ControlLeft, false), None);
+        feed(&mut state, Code::ControlLeft, true);
+        feed(&mut state, Code::AltLeft, true);
+        assert_eq!(
+            feed(&mut state, Code::KeyA, true),
+            Some(HotkeyEvent::ChordCancelled)
+        );
+    }
+
+    #[test]
+    fn altgr_and_single_modifier_shortcuts_never_form_a_chord() {
+        let mut state = chord_registration();
+        feed(&mut state, Code::ControlLeft, true);
+        assert_eq!(feed(&mut state, Code::AltRight, true), None);
+        let mut single = registration();
+        assert_eq!(feed(&mut single, Code::ControlLeft, true), None);
+    }
+
+    #[test]
+    fn chord_watchdog_ends_a_missed_release() {
+        let mut state = chord_registration();
+        feed(&mut state, Code::ControlLeft, true);
+        feed(&mut state, Code::AltLeft, true);
+        assert_eq!(
+            state.chord_reconcile(&[Code::ControlLeft, Code::AltLeft]),
+            None
+        );
+        assert_eq!(
+            state.chord_reconcile(&[Code::ControlLeft]),
+            Some(HotkeyEvent::ChordReleased)
+        );
     }
 
     #[test]
@@ -645,7 +763,10 @@ mod windows_hook {
     use windows_sys::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
-        UI::{Input::KeyboardAndMouse::GetAsyncKeyState, WindowsAndMessaging::*},
+        UI::{
+            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE},
+            WindowsAndMessaging::*,
+        },
     };
 
     struct Context {
@@ -714,6 +835,19 @@ mod windows_hook {
                     WM_KEYUP | WM_SYSKEYUP => Some(false),
                     _ => None,
                 };
+                if input.vkCode == u32::from(VK_ESCAPE)
+                    && RECORDING.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    if pressed == Some(true) {
+                        CONTEXT.with(|context| {
+                            if let Some(context) = context.borrow().as_ref() {
+                                let _ = context.events.send(HotkeyEvent::Cancel);
+                            }
+                        });
+                    }
+                    // Swallow both edges so no app sees a half-pressed Escape.
+                    return 1;
+                }
                 if let (Some(key), Some(pressed)) = (key_code(input.vkCode), pressed) {
                     // This is the PRE-event logical state, not the new press.
                     // https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
@@ -721,7 +855,7 @@ mod windows_hook {
                     CONTEXT.with(|context| {
                         if let Some(context) = context.borrow().as_ref() {
                             let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
-                            for event in state
+                            let mut emitted = state
                                 .key_event(
                                     key,
                                     pressed,
@@ -731,7 +865,9 @@ mod windows_hook {
                                 )
                                 .into_iter()
                                 .flatten()
-                            {
+                                .collect::<Vec<_>>();
+                            emitted.extend(state.chord_event(key, pressed));
+                            for event in emitted {
                                 let _ = context.events.send(event);
                             }
                         }
@@ -798,6 +934,9 @@ mod windows_hook {
                         .is_some_and(|vk| unsafe { GetAsyncKeyState(vk) } < 0);
                     let recovered = state.reconcile_main_key(down, Some(&snapshot));
                     if let Some(event) = recovered {
+                        let _ = events.send(event);
+                    }
+                    if let Some(event) = state.chord_reconcile(&snapshot) {
                         let _ = events.send(event);
                     }
                     (recovered.is_some(), state.hold.pressed)
