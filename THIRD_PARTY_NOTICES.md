@@ -1,6 +1,6 @@
 # Third-party notices
 
-Adapted third-party source and design patterns are attributed below. The placeholder icon is original to Parla.
+Adapted third-party source and design patterns are attributed below. The Parla app icon is original artwork (see `src-tauri/icons/source.svg`).
 
 Dependencies retain their own licenses; dependency versions are recorded in `package-lock.json` and `src-tauri/Cargo.lock`.
 
