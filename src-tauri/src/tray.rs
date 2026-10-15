@@ -11,9 +11,10 @@ use tauri::{
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let history = MenuItem::with_id(app, "history", "History…", true, None::<&str>)?;
+    let bench = MenuItem::with_id(app, "bench", "Benchmark…", true, None::<&str>)?;
     let test_mic = MenuItem::with_id(app, "test_mic", "Test mic (3 s)", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings, &history, &test_mic, &quit])?;
+    let menu = Menu::with_items(app, &[&settings, &history, &bench, &test_mic, &quit])?;
 
     // Tauri's native tray API: https://v2.tauri.app/learn/system-tray/
     TrayIconBuilder::with_id("parla")
@@ -27,6 +28,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "settings" => show_window(app, "main", "settings"),
             "history" => show_window(app, "history", "history"),
+            "bench" => show_window(app, "bench", "benchmark"),
             "test_mic" => run_test_mic(app),
             "quit" => app.exit(0),
             _ => {}
@@ -35,7 +37,11 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
 
     // Closing either window hides it instead of destroying it, so the tray
     // item can show it again.
-    for (label, what) in [("main", "settings"), ("history", "history")] {
+    for (label, what) in [
+        ("main", "settings"),
+        ("history", "history"),
+        ("bench", "benchmark"),
+    ] {
         if let Some(window) = app.get_webview_window(label) {
             let hide_target = window.clone();
             window.on_window_event(move |event| {

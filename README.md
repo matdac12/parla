@@ -145,7 +145,7 @@ reported inline as a warning rather than failing the save.
 
 ## History
 
-Every completed dictation (success or failure) is appended as one JSON object per line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is append-only; writes happen on a background thread after the paste, so they never block dictation. A `kind` field (`"dictation"`) leaves room for the benchmark rows coming later.
+Every completed dictation (success or failure) is appended as one JSON object per line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is append-only; writes happen on a background thread after the paste, so they never block dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates dictations from benchmark rows.
 
 Open the **History…** tray item to see the newest dictations first. The columns are: the wall-clock time, the provider, the captured audio length, then the latency breakdown — **Ready** (key-up to audio ready), **Transcribe** (audio ready to provider returned), **Paste** (provider returned to input injection), and **Total** (key-up to pasted). A dash means that stage never completed (for example a failed transcription has no paste time). The transcript is truncated with the full text on hover or click; failures are tinted and show the error in red. The view updates live from the `dictation://recorded` event. **Clear history…** truncates the file after a confirmation.
 
@@ -153,7 +153,19 @@ Reads are bounded: the view asks for the newest 200 rows and the backend walks t
 
 ## Benchmark
 
-Provider comparison and history instructions will be added with benchmarking.
+The **Benchmark…** tray item compares providers on your own voice and network.
+
+1. Click **Record clip**, speak, click **Stop recording** (it stops by itself after 30 s). Hotkey dictation is blocked while the benchmark owns the microphone.
+2. Click **Run benchmark**. The clip goes through every provider in turn (the order of the provider list); each row fills in as its provider finishes. **Run again** re-runs the same clip, so you can compare runs on identical audio. Providers that are not configured (no key, no model) appear as rows with the reason and are not called. A provider failing shows its error in its row and does not stop the others.
+
+What the numbers mean:
+- **Request**: time spent in the provider's transcribe call (encoding, upload, server time, download; inference for Parakeet).
+- **Total**: from handing the clip to that provider until its text is ready. A benchmark has no key-up, so "clip ready" stands in for it; expect it to be Request plus a few ms.
+- Providers run sequentially with no warm-up request, so the first cloud request includes TLS setup, like the first dictation after a pause. The fastest successful row is highlighted.
+
+Storage: each provider result is a row in `history.jsonl` with `kind: "benchmark"` and a shared `bench_run_id` (for a benchmark row, `audio_ready` is when the request began and `provider_returned` the total, both relative to that provider's turn). The **Previous runs** list rebuilds runs from those rows. The clip is saved as `clips/bench-<id>.wav` in the app data directory.
+
+Tip: to compare providers, record the same sentence of ~5 s a few times on different days or networks, and compare Request across runs rather than trusting a single run; a single request can be an outlier.
 
 ## Known limitations / untested on Windows
 

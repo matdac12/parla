@@ -26,6 +26,7 @@ pub fn run() {
             models::setup(app.handle(), &config)?;
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
+            app.manage(bench::BenchSession::default());
             app.manage(commands::settings::SaveLock::default());
             if let Err(error) = history::setup(app) {
                 eprintln!("History disabled: {error}");
@@ -41,6 +42,11 @@ pub fn run() {
             commands::history::clear_history,
             commands::models::model_status,
             commands::models::download_model,
+            commands::bench::bench_start_recording,
+            commands::bench::bench_stop_recording,
+            commands::bench::bench_clip,
+            commands::bench::bench_run,
+            commands::bench::bench_runs,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Parla");
