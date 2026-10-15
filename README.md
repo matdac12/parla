@@ -164,7 +164,7 @@ so pressing the hotkey has no device-startup latency.
 
 ## Providers and API keys
 
-The settings window lists every provider, whether it is ready, and lets you pick
+The settings view lists every provider, whether it is ready, and lets you pick
 the active one. Keys and model names are written into `providers.<id>`.
 
 Settings live at **`%APPDATA%\com.matdac6.parla\settings.json`** on Windows
@@ -199,7 +199,7 @@ file's key at request time and are never written to the file or returned by
 `get_settings`: `OPENAI_API_KEY` for OpenAI and `XAI_API_KEY` for xAI (an
 environment value, even an empty one, wins over the file). `language` is `null`
 for automatic detection or an ISO code such as `"it"`. Model names are
-configurable per provider. The settings window prefills each model field with its
+configurable per provider. The settings view prefills each model field with its
 default (`gpt-transcribe`, `grok-voice-transcribe-2.0`) and restores it if you
 clear the field.
 
@@ -256,7 +256,7 @@ rename; a failed download is discarded, not resumed, and can be retried.
 **Download model** also short-circuits when the installed files already match
 their expected sizes (without re-reading 670 MB). An explicit repair — verify
 existing hashes and replace a corrupt installation — is available through the
-`download_model` IPC command with `repair: true`; the settings window exposes
+`download_model` IPC command with `repair: true`; the settings view exposes
 only the normal download. Downloads abort after 30 s with no incoming bytes
 (15 s connect limit, one-hour total cap), and Hugging Face requests identify the
 app with `User-Agent: parla/<version>`.
@@ -282,7 +282,7 @@ available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
 ## Hotkey
 
 The default shortcut is **Ctrl+Alt+Space**; see [Using Parla](#using-parla) for
-what holding, tapping and **Esc** do. Rebind it in the settings window: type an
+what holding, tapping and **Esc** do. Rebind it in the settings view: type an
 accelerator such as `Ctrl+Shift+F9`, or click **Record keys** and hold the
 combination you want (Esc cancels). Saving rebinds immediately, with no restart,
 and requires that no recording is in progress. An accelerator that cannot be
