@@ -45,7 +45,8 @@
 .field label { display: block; font-weight: 550; margin-bottom: 0.35rem; }
 .field input[type="text"],
 .field input[type="password"],
-.field input[type="number"] {
+.field input[type="number"],
+.field textarea {
   width: 100%;
   padding: 0.5rem 0.7rem;
   border: 1px solid var(--border-strong);
@@ -55,7 +56,8 @@
   background: var(--bg);
   transition: border-color 150ms var(--ease), box-shadow 150ms var(--ease);
 }
-.field input:focus {
+.field textarea { resize: vertical; min-height: 5rem; }
+.field input:focus, .field textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);

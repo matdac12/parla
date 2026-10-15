@@ -40,15 +40,59 @@ use rubato::{
 
 use crate::clip::{Clip, SAMPLE_RATE};
 
+/// Full original audio; conversion is cached and performed only when batch needs it.
+pub struct RecoveryAudio {
+    raw: Vec<f32>,
+    rate: u32,
+    clip: OnceLock<Clip>,
+}
+impl RecoveryAudio {
+    pub fn duration(&self) -> Duration {
+        self.clip.get().map_or_else(
+            || Duration::from_secs_f64(self.raw.len() as f64 / self.rate as f64),
+            Clip::duration,
+        )
+    }
+    pub fn is_empty(&self) -> bool {
+        self.clip
+            .get()
+            .map_or(self.raw.is_empty(), |clip| clip.samples.is_empty())
+    }
+    pub fn clip(&self) -> &Clip {
+        self.clip.get_or_init(|| {
+            Clip::new(
+                resample_to_16k(&self.raw, self.rate)
+                    .into_iter()
+                    .map(f32_to_i16)
+                    .collect(),
+            )
+        })
+    }
+    pub fn into_clip(self) -> Clip {
+        let _ = self.clip();
+        self.clip.into_inner().expect("clip materialized")
+    }
+}
+impl From<Clip> for RecoveryAudio {
+    fn from(clip: Clip) -> Self {
+        Self {
+            raw: Vec::new(),
+            rate: clip.sample_rate,
+            clip: OnceLock::from(clip),
+        }
+    }
+}
+
 /// How long a public call waits for the worker before giving up.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long the worker blocks waiting for a command before draining the ring
-/// again. Small enough that the ring never comes close to filling.
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
+/// again. Commands wake this wait immediately, so draining less often does not
+/// add a polling delay to start/stop. The live meter updates every 40 ms.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Ring capacity, in seconds of device audio. Generous: the worker only needs
-/// to keep up with a 1 ms poll.
+/// to keep up with a 10 ms drain interval.
 const RING_SECONDS: usize = 2;
 
 /// Idle audio kept so `start` does not clip the first syllable.
@@ -141,6 +185,10 @@ enum Command {
         generation: u64,
         reply: Sender<(u64, Vec<f32>)>,
     },
+    Subscribe {
+        generation: u64,
+        feed: crate::streaming::audio::AudioFeed,
+    },
     Reopen {
         ack: Sender<Result<(), String>>,
     },
@@ -220,9 +268,13 @@ impl Recorder {
     /// Ends the recording and returns what was captured, resampled to 16 kHz
     /// mono i16. Returns an empty clip when nothing is being recorded.
     pub fn stop(&self) -> Clip {
+        self.stop_raw().into_clip()
+    }
+
+    pub fn stop_raw(&self) -> RecoveryAudio {
         let mut control = self.lock_control();
         if !control.active {
-            return Clip::new(Vec::new());
+            return Clip::new(Vec::new()).into();
         }
         let generation = control.generation;
 
@@ -250,16 +302,30 @@ impl Recorder {
         }
 
         let rate = self.shared.rate.load(Ordering::Acquire);
-        let samples = resample_to_16k(&raw, rate)
-            .into_iter()
-            .map(f32_to_i16)
-            .collect();
-        Clip::new(samples)
+        RecoveryAudio {
+            raw,
+            rate,
+            clip: OnceLock::new(),
+        }
     }
 
     /// Whether audio is currently being buffered.
     pub fn is_recording(&self) -> bool {
         self.lock_control().active
+    }
+
+    /// Attaches after start without reopening the microphone or losing its pre-roll.
+    pub fn subscribe(&self, feed: crate::streaming::audio::AudioFeed) -> Result<()> {
+        let control = self.lock_control();
+        if !control.active {
+            bail!("no active recording to stream");
+        }
+        self.commands
+            .send(Command::Subscribe {
+                generation: control.generation,
+                feed,
+            })
+            .map_err(|_| anyhow!("audio thread is not running"))
     }
 
     /// Samples dropped since the last `stop` because the ring overflowed.
@@ -296,12 +362,51 @@ impl Drop for Recorder {
     }
 }
 
+/// The dedicated WASAPI worker uses MTA, including when a USB device change
+/// makes CPAL activate a new default endpoint. Select it before CPAL's default
+/// STA initialization. Never change the UI thread's apartment.
+#[cfg(windows)]
+struct AudioThreadApartment(std::marker::PhantomData<*mut ()>);
+
+#[cfg(windows)]
+impl AudioThreadApartment {
+    fn initialize() -> Result<Self, String> {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        // SAFETY: called on our dedicated worker before any COM/audio calls.
+        let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
+        if result < 0 {
+            return Err(format!(
+                "initializing the audio worker COM apartment failed: 0x{:08X}",
+                result as u32
+            ));
+        }
+        Ok(Self(std::marker::PhantomData))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AudioThreadApartment {
+    fn drop(&mut self) {
+        // SAFETY: each successful initialization (including S_FALSE) owns one
+        // matching uninitialize. The !Send guard stays on its original thread.
+        unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+    }
+}
+
 /// Owns the cpal stream and the recording buffer.
 fn audio_thread(
     shared: Arc<Shared>,
     commands: Receiver<Command>,
     ready: Sender<Result<(), String>>,
 ) {
+    #[cfg(windows)]
+    let _apartment = match AudioThreadApartment::initialize() {
+        Ok(apartment) => apartment,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
     let mut session = match open_session(&shared) {
         Ok(session) => {
             shared.open.store(true, Ordering::SeqCst);
@@ -343,6 +448,9 @@ fn audio_thread(
                 }
                 let samples = capture.finish(generation);
                 let _ = reply.send((generation, samples));
+            }
+            Ok(Command::Subscribe { generation, feed }) => {
+                capture.subscribe(generation, feed, shared.rate.load(Ordering::Acquire));
             }
             Ok(Command::Reopen { ack }) => {
                 drop(session.take());
@@ -505,6 +613,7 @@ struct Capture {
     buffer: Vec<f32>,
     preroll: VecDeque<f32>,
     preroll_cap: usize,
+    stream: Option<crate::streaming::audio::AudioFeed>,
 }
 
 impl Capture {
@@ -514,6 +623,7 @@ impl Capture {
             buffer: Vec::new(),
             preroll: VecDeque::new(),
             preroll_cap: 0,
+            stream: None,
         }
     }
 
@@ -533,6 +643,10 @@ impl Capture {
                 LEVEL.store(mean_square.sqrt().to_bits(), Ordering::Relaxed);
             }
             self.buffer.extend_from_slice(chunk);
+            if let Some(feed) = &mut self.stream {
+                let rate = feed.sample_rate();
+                feed.push(chunk, rate);
+            }
         } else {
             push_preroll(&mut self.preroll, chunk, self.preroll_cap);
         }
@@ -541,15 +655,29 @@ impl Capture {
     /// Starts a session: clears the previous buffer and seeds it with the
     /// pre-roll, so the clip begins just before `start`.
     fn begin(&mut self, generation: u64) {
+        self.stream = None;
         self.buffer.clear();
         self.buffer.extend(self.preroll.drain(..));
         self.active = Some(generation);
+    }
+
+    fn subscribe(
+        &mut self,
+        generation: u64,
+        mut feed: crate::streaming::audio::AudioFeed,
+        rate: u32,
+    ) {
+        if self.active == Some(generation) && self.stream.is_none() {
+            feed.push(&self.buffer, rate);
+            self.stream = Some(feed);
+        }
     }
 
     /// Ends session `generation`, returning its samples. A mismatched
     /// generation is ignored (nothing is taken).
     fn finish(&mut self, generation: u64) -> Vec<f32> {
         if self.active == Some(generation) {
+            self.stream = None;
             self.active = None;
             self.preroll.clear();
             std::mem::take(&mut self.buffer)
@@ -573,7 +701,7 @@ fn push_preroll(preroll: &mut VecDeque<f32>, chunk: &[f32], cap: usize) {
 }
 
 fn ring_capacity(rate: u32) -> usize {
-    (rate as usize * RING_SECONDS / 1000).max(8192)
+    (rate as usize * RING_SECONDS).max(8192)
 }
 
 fn preroll_capacity(rate: u32) -> usize {
@@ -607,7 +735,7 @@ fn resample_to_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
 
 /// Mono-only subset of Handy's `FrameResampler`, plus trimming of the leading
 /// delay line so the output starts at input sample zero.
-struct MonoResampler {
+pub(crate) struct MonoResampler {
     resampler: Fft<f32>,
     chunks_in: usize,
     out_buf: Vec<f32>,
@@ -622,7 +750,7 @@ struct MonoResampler {
 }
 
 impl MonoResampler {
-    fn new(in_hz: usize, out_hz: usize) -> Result<Self, ResamplerConstructionError> {
+    pub(crate) fn new(in_hz: usize, out_hz: usize) -> Result<Self, ResamplerConstructionError> {
         // One FFT block per chunk and the BlackmanHarris2 window, matching
         // Handy's choice (rubato's `Fft::new` would pick smaller blocks and
         // shift the delay and the anti-aliasing cutoff).
@@ -673,7 +801,11 @@ impl MonoResampler {
         }
     }
 
-    fn push(&mut self, mut input: &[f32], out: &mut Vec<f32>) -> Result<(), ResampleError> {
+    pub(crate) fn push(
+        &mut self,
+        mut input: &[f32],
+        out: &mut Vec<f32>,
+    ) -> Result<(), ResampleError> {
         self.in_count += input.len();
         while !input.is_empty() {
             let take = (self.chunks_in - self.in_buf.len()).min(input.len());
@@ -687,7 +819,7 @@ impl MonoResampler {
         Ok(())
     }
 
-    fn finish(&mut self, out: &mut Vec<f32>) -> Result<(), ResampleError> {
+    pub(crate) fn finish(&mut self, out: &mut Vec<f32>) -> Result<(), ResampleError> {
         if self.in_count == 0 {
             return Ok(());
         }
@@ -730,6 +862,60 @@ impl MonoResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscribing_includes_preroll_and_keeps_the_full_recovery_clip() {
+        let (feed, mut live, failed) = crate::streaming::audio::channel();
+        let mut capture = Capture::new();
+        capture.set_preroll_cap(100);
+        capture.feed(&[0.1; 100]);
+        capture.begin(3);
+        capture.feed(&[0.2; 200]);
+        capture.subscribe(3, feed, 16000);
+        capture.feed(&[0.3; 1701]);
+        let full = capture.finish(3);
+        let mut streamed = Vec::new();
+        while let Ok(packet) = live.try_recv() {
+            streamed.extend(packet.samples);
+        }
+        assert_eq!(full.len(), 2001);
+        assert_eq!(streamed, full);
+        assert!(!failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn overloaded_subscription_never_truncates_recovery_or_leaks_into_next_recording() {
+        let (feed, _live, failed) = crate::streaming::audio::channel();
+        let mut capture = Capture::new();
+        capture.begin(1);
+        capture.subscribe(1, feed, 16000);
+        capture.feed(&vec![0.2; 64000]);
+        assert!(failed.load(Ordering::Acquire));
+        assert_eq!(capture.finish(1).len(), 64000);
+        capture.begin(2);
+        capture.feed(&[0.4; 123]);
+        assert_eq!(capture.finish(2), vec![0.4; 123]);
+    }
+
+    #[test]
+    fn high_rate_audio_survives_a_brief_worker_stall_without_losing_samples() {
+        // A 250 ms scheduling stall at 192 kHz must fit in the promised
+        // two-second ring, even when callbacks continue while the worker waits.
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_capacity(192_000)).split();
+        let input: Vec<f32> = (0..48_000).map(|n| n as f32).collect();
+        assert_eq!(producer.push_slice(&input), input.len());
+        let mut capture = Capture::new();
+        capture.begin(1);
+        let mut scratch = vec![0.0; DRAIN_SCRATCH];
+        loop {
+            let count = consumer.pop_slice(&mut scratch);
+            if count == 0 {
+                break;
+            }
+            capture.feed(&scratch[..count]);
+        }
+        assert_eq!(capture.finish(1), input);
+    }
 
     #[test]
     fn downmix_averages_stereo_frames() {
@@ -848,6 +1034,45 @@ mod tests {
         assert_eq!(resample_to_16k(&input, SAMPLE_RATE), input);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn audio_worker_apartment_stays_mta_after_cpal_initialization() {
+        thread::spawn(|| {
+            use windows_sys::Win32::System::Com::{CoGetApartmentType, APTTYPE_MTA};
+            let _apartment = AudioThreadApartment::initialize().unwrap();
+            // CPAL normally tries STA initialization. It must retain the MTA
+            // already selected for our worker, including subsequent queries.
+            let host = cpal::default_host();
+            let _ = host.default_input_device();
+            let mut apartment = -1;
+            let mut qualifier = 0;
+            assert!(unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) } >= 0);
+            assert_eq!(apartment, APTTYPE_MTA);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Real hardware check. Run with `cargo test -- --ignored --nocapture`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opens the default microphone without saving or uploading audio"]
+    fn default_microphone_opens_and_reopens_on_the_audio_worker() {
+        let recorder = Recorder::new().expect("initial microphone open");
+        for _ in 0..3 {
+            recorder
+                .reopen()
+                .expect("microphone reopen on the same worker");
+            // Device-change callbacks set this flag; the next hotkey start
+            // must recover through the same reopen path without a COM clash.
+            recorder.shared.failed.store(true, Ordering::SeqCst);
+            recorder
+                .start()
+                .expect("recover at the next recording start");
+            let _ = recorder.stop();
+        }
+    }
+
     /// Real hardware check. Run with `cargo test -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs a microphone"]
@@ -894,5 +1119,56 @@ mod tests {
         let second = recorder.stop();
         assert!(second.duration() >= Duration::from_millis(250));
         assert_eq!(second.sample_rate, SAMPLE_RATE);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn raw_recovery_is_lazy_complete_and_cached() {
+        for rate in [16000, 44100, 48000] {
+            let raw: Vec<f32> = (0..rate).map(|i| (i as f32 * 0.02).sin() * 0.25).collect();
+            let expected: Vec<i16> = resample_to_16k(&raw, rate)
+                .into_iter()
+                .map(f32_to_i16)
+                .collect();
+            let recovery = RecoveryAudio {
+                raw,
+                rate,
+                clip: OnceLock::new(),
+            };
+            assert_eq!(recovery.duration(), Duration::from_secs(1));
+            assert!(!recovery.is_empty());
+            assert!(recovery.clip.get().is_none());
+            assert_eq!(recovery.clip().samples, expected);
+            assert!(std::ptr::eq(recovery.clip(), recovery.clip()));
+            assert_eq!(recovery.into_clip().samples, expected);
+        }
+    }
+    #[test]
+    fn existing_batch_clip_is_reused_without_conversion() {
+        let recovery: RecoveryAudio = Clip::new(vec![-1, 0, 1]).into();
+        assert_eq!(recovery.into_clip().samples, [-1, 0, 1]);
+    }
+    #[test]
+    fn synthetic_conversion_measurements() {
+        for seconds in [5, 35, 120] {
+            let raw = vec![0.25; 48000 * seconds];
+            let started = std::time::Instant::now();
+            let recovery = RecoveryAudio {
+                raw,
+                rate: 48000,
+                clip: OnceLock::new(),
+            };
+            let deferred_us = started.elapsed().as_micros();
+            assert!(recovery.clip.get().is_none());
+            let conversion = std::time::Instant::now();
+            assert_eq!(recovery.clip().samples.len(), 16000 * seconds);
+            println!(
+                "synthetic {seconds}s: deferred={deferred_us}us conversion={}us",
+                conversion.elapsed().as_micros()
+            );
+        }
     }
 }

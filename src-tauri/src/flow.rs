@@ -18,7 +18,7 @@ use std::{
 use tauri::Manager;
 
 /// Holds shorter than this (a stray Ctrl+Alt, AltGr typing) are discarded.
-const MIN_HOLD: Duration = Duration::from_millis(300);
+pub(crate) const MIN_HOLD: Duration = Duration::from_millis(300);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -208,17 +208,61 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
-    let overlay = recording.is_ok().then(|| crate::overlay::begin(app));
+    let captions = settings.live_captions
+        && settings.streaming_enabled
+        && matches!(settings.active_provider.as_str(), "openai" | "xai");
+    let overlay = recording
+        .is_ok()
+        .then(|| crate::overlay::begin(app, captions));
+    let stream = recording.as_ref().ok().and_then(|recorder| {
+        let overlay = overlay.as_ref()?;
+        match crate::streaming::Session::start(
+            &settings,
+            overlay.caption_sink(captions),
+            cancelled.clone(),
+        ) {
+            Ok(Some((session, feed))) => {
+                if recorder.subscribe(feed).is_ok() {
+                    Some(session)
+                } else {
+                    None
+                }
+            }
+            Ok(None) => None,
+            Err(error) => {
+                eprintln!("Live dictation unavailable: {error}");
+                None
+            }
+        }
+    });
     let (key_up, hold_error) = wait_for_release(&released, Duration::from_secs(120));
-    let audio = recording.map(|recorder| recorder.stop());
+    let stream = if cancelled.load(Ordering::Acquire) {
+        drop(stream);
+        None
+    } else {
+        stream
+    };
+    let audio = recording.map(|recorder| recorder.stop_raw());
     crate::hotkey::RECORDING.store(false, Ordering::Release);
     if cancelled.load(Ordering::Acquire) {
+        drop(stream);
         return;
     }
     if let Some(overlay) = &overlay {
         overlay.processing();
     }
-    let ok = finish_session_with_error(app, audio, &settings, started_at, key_up, hold_error, true);
+    let ok = finish_session_with_error(
+        app,
+        audio,
+        &settings,
+        started_at,
+        key_up,
+        Completion {
+            hold_error,
+            paste: true,
+            stream,
+        },
+    );
     if let Some(overlay) = overlay {
         overlay.finish(ok);
     }
@@ -253,17 +297,33 @@ pub fn finish_session(
     key_up: Instant,
     paste: bool,
 ) {
-    finish_session_with_error(app, audio, settings, started_at, key_up, None, paste);
+    finish_session_with_error(
+        app,
+        audio.map(Into::into),
+        settings,
+        started_at,
+        key_up,
+        Completion {
+            hold_error: None,
+            paste,
+            stream: None,
+        },
+    );
+}
+
+struct Completion {
+    hold_error: Option<String>,
+    paste: bool,
+    stream: Option<crate::streaming::Session>,
 }
 
 fn finish_session_with_error(
     app: &tauri::AppHandle,
-    audio: Result<crate::clip::Clip, ProviderError>,
+    audio: Result<crate::recorder::RecoveryAudio, ProviderError>,
     settings: &Settings,
     started_at: SystemTime,
     key_up: Instant,
-    hold_error: Option<String>,
-    paste: bool,
+    mut completion: Completion,
 ) -> bool {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     let result = match audio {
@@ -274,7 +334,7 @@ fn finish_session_with_error(
         Ok(clip) => {
             record.audio_ready = Some(timing::elapsed_ms(key_up));
             record.audio_ms = clip.duration().as_millis() as u64;
-            let result = if clip.samples.is_empty() {
+            let result = if clip.is_empty() {
                 Err(ProviderError::Other("No audio captured".into()))
             } else {
                 registry::get(&settings.active_provider)
@@ -291,10 +351,15 @@ fn finish_session_with_error(
                             settings,
                             key_up,
                             &mut record,
+                            completion.stream.take().map(|session| session.finish()),
                             |text, delay| {
-                                if paste {
-                                    inserter::paste_text_timed(text, delay)
-                                        .map_err(|e| e.to_string())
+                                if completion.paste {
+                                    inserter::paste_text_with_options(
+                                        text,
+                                        delay,
+                                        settings.paste_compatibility_mode,
+                                    )
+                                    .map_err(|e| e.to_string())
                                 } else {
                                     // Retried from the app window: the history entry
                                     // is the delivery, there is nothing to paste into.
@@ -305,16 +370,21 @@ fn finish_session_with_error(
                     })
             };
             if let Err(error) = &result {
-                on_failure(app, error.clone(), clip, &settings.active_provider);
+                on_failure(
+                    app,
+                    error.clone(),
+                    clip.into_clip(),
+                    &settings.active_provider,
+                );
             }
             result
         }
     };
-    let ok = result.is_ok() && hold_error.is_none();
+    let ok = result.is_ok() && completion.hold_error.is_none();
     if result.is_ok() {
         crate::failure::on_success(app);
     }
-    record.error = match (hold_error, result.err()) {
+    record.error = match (completion.hold_error, result.err()) {
         (Some(hold), Some(error)) => Some(format!("{hold}; {error}")),
         (Some(hold), None) => Some(hold),
         (None, Some(error)) => Some(error.to_string()),
@@ -325,18 +395,71 @@ fn finish_session_with_error(
     ok
 }
 
+trait RecoverySource {
+    fn batch_clip(&self) -> &crate::clip::Clip;
+}
+impl RecoverySource for crate::clip::Clip {
+    fn batch_clip(&self) -> &crate::clip::Clip {
+        self
+    }
+}
+impl RecoverySource for crate::recorder::RecoveryAudio {
+    fn batch_clip(&self) -> &crate::clip::Clip {
+        self.clip()
+    }
+}
+
 fn transcribe_and_paste(
     provider: &dyn SttProvider,
-    clip: &crate::clip::Clip,
+    clip: &impl RecoverySource,
     settings: &Settings,
     key_up: Instant,
     record: &mut DictationRecord,
+    streamed: Option<Result<crate::streaming::Streamed, ProviderError>>,
     paste: impl FnOnce(&str, Duration) -> Result<Instant, String>,
 ) -> Result<(), ProviderError> {
     if let crate::provider::Availability::Unavailable(reason) = provider.availability(settings) {
         return Err(ProviderError::MissingConfig(reason));
     }
-    let transcript = provider.transcribe(clip, settings);
+    let batch_model = match provider.id() {
+        "openai" => Some(
+            settings
+                .provider_config::<crate::provider::openai::OpenAiConfig>("openai")
+                .model,
+        ),
+        "xai" => Some(
+            settings
+                .provider_config::<crate::provider::xai::XaiConfig>("xai")
+                .model,
+        ),
+        "parakeet" => Some("parakeet-tdt-0.6b-v3".into()),
+        _ => None,
+    };
+    record.model = batch_model;
+    let transcript = match streamed {
+        Some(Ok(result)) if !result.text.trim().is_empty() => {
+            record.transcription_mode = Some("streaming".into());
+            record.model = Some(result.model);
+            record.stream_setup_ms = result.setup_ms;
+            record.first_caption_ms = result.first_caption_ms;
+            Ok(result.text)
+        }
+        attempt => {
+            record.transcription_mode = Some(
+                if attempt.is_some() {
+                    "batch_fallback"
+                } else {
+                    "batch"
+                }
+                .into(),
+            );
+            record.stream_error = attempt.map(|outcome| match outcome {
+                Err(error) => error.to_string(),
+                Ok(_) => "Live transcription returned an empty final transcript".into(),
+            });
+            provider.transcribe(clip.batch_clip(), settings)
+        }
+    };
     record.provider_returned = Some(timing::elapsed_ms(key_up));
     let text = transcript?;
     record.text = text;
@@ -359,6 +482,165 @@ mod pipeline_tests {
     use crate::provider::{Availability, SttProvider};
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct FakeProvider(Result<String, ProviderError>);
+
+    #[tokio::test]
+    async fn rejected_controller_hold_and_escape_close_setup_without_upload() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        for event in [HotkeyEvent::ChordReleased, HotkeyEvent::Cancel] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let t0 = Instant::now();
+            let mut controller = Controller { phase: Phase::Idle };
+            assert_eq!(
+                controller.on_event(HotkeyEvent::ChordPressed, false, t0),
+                Action::Start
+            );
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (session, mut feed) = crate::streaming::Session::test_session(
+                format!("ws://{}", listener.local_addr().unwrap()),
+                cancelled.clone(),
+            );
+            feed.push(&vec![0.25; 1600], 16000);
+            let (tcp, _) = tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket.next().await.unwrap().unwrap(); // setup, never audio
+            socket
+                .send(Message::Text(r#"{"type":"session.updated"}"#.into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                controller.on_event(event, true, t0 + Duration::from_millis(100)),
+                Action::Cancel
+            );
+            cancelled.store(true, Ordering::Release);
+            // Simulate a delayed recorder.stop: cancellation alone must terminate setup.
+            let closed = tokio::time::timeout(Duration::from_millis(200), socket.next())
+                .await
+                .unwrap();
+            assert!(
+                closed.is_none() || closed.unwrap().is_err(),
+                "cancelled controller uploaded a frame"
+            );
+            drop(feed);
+            assert!(session.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn streaming_success_never_materializes_recovery_and_fallback_uses_complete_clip() {
+        struct RecoveryProbe(std::sync::OnceLock<crate::clip::Clip>);
+        impl RecoverySource for RecoveryProbe {
+            fn batch_clip(&self) -> &crate::clip::Clip {
+                self.0
+                    .get_or_init(|| crate::clip::Clip::new(vec![42; 16000]))
+            }
+        }
+        struct FullClipProvider;
+        impl SttProvider for FullClipProvider {
+            fn id(&self) -> &'static str {
+                "fake"
+            }
+            fn display_name(&self) -> &'static str {
+                "Fake"
+            }
+            fn availability(&self, _: &Settings) -> Availability {
+                Availability::Available
+            }
+            fn transcribe(
+                &self,
+                clip: &crate::clip::Clip,
+                _: &Settings,
+            ) -> Result<String, ProviderError> {
+                assert_eq!(clip.samples, vec![42; 16000]);
+                Ok("Recovered".into())
+            }
+        }
+        let probe = RecoveryProbe(std::sync::OnceLock::new());
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        transcribe_and_paste(
+            &FullClipProvider,
+            &probe,
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            Some(Ok(crate::streaming::Streamed {
+                text: "Final".into(),
+                model: "live".into(),
+                setup_ms: Some(20),
+                first_caption_ms: Some(400),
+            })),
+            |_, _| Ok(Instant::now()),
+        )
+        .unwrap();
+        assert!(probe.0.get().is_none());
+        assert_eq!(record.first_caption_ms, Some(400));
+        transcribe_and_paste(
+            &FullClipProvider,
+            &probe,
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            Some(Err(ProviderError::Timeout)),
+            |text, _| {
+                assert_eq!(text, "Recovered");
+                Ok(Instant::now())
+            },
+        )
+        .unwrap();
+        assert!(probe.0.get().is_some());
+    }
+
+    #[test]
+    fn streaming_final_is_pasted_once_without_running_batch() {
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        let mut pastes = Vec::new();
+        transcribe_and_paste(
+            &FakeProvider(Err(ProviderError::Other("batch must not run".into()))),
+            &crate::clip::Clip::new(vec![1]),
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            Some(Ok(crate::streaming::Streamed {
+                text: "Ciao, hello.".into(),
+                model: "live-model".into(),
+                setup_ms: None,
+                first_caption_ms: None,
+            })),
+            |text, _| {
+                pastes.push(text.to_owned());
+                Ok(Instant::now())
+            },
+        )
+        .unwrap();
+        assert_eq!(pastes, ["Ciao, hello."]);
+        assert_eq!(record.transcription_mode.as_deref(), Some("streaming"));
+        assert_eq!(record.model.as_deref(), Some("live-model"));
+    }
+
+    #[test]
+    fn failed_stream_uses_full_clip_batch_and_never_pastes_partial_text() {
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        let mut pastes = Vec::new();
+        transcribe_and_paste(
+            &FakeProvider(Ok("Complete recovered transcript".into())),
+            &crate::clip::Clip::new(vec![1; 16000]),
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            Some(Err(ProviderError::Timeout)),
+            |text, _| {
+                pastes.push(text.to_owned());
+                Ok(Instant::now())
+            },
+        )
+        .unwrap();
+        assert_eq!(pastes, ["Complete recovered transcript"]);
+        assert_eq!(record.transcription_mode.as_deref(), Some("batch_fallback"));
+        assert!(record.stream_error.is_some());
+    }
     impl SttProvider for FakeProvider {
         fn id(&self) -> &'static str {
             "fake"
@@ -401,6 +683,7 @@ mod pipeline_tests {
             &Settings::default(),
             Instant::now(),
             &mut record,
+            None,
             |_, _| panic!("must not paste"),
         );
         assert_eq!(
@@ -527,6 +810,7 @@ mod pipeline_tests {
                 &Settings::default(),
                 key_up,
                 &mut record,
+                None,
                 |text, delay| {
                     assert_eq!(text, "Hello");
                     assert_eq!(delay, Duration::from_millis(250));
@@ -555,6 +839,7 @@ mod pipeline_tests {
             &Settings::default(),
             key_up,
             &mut record,
+            None,
             |_, _| Ok(injected),
         )
         .unwrap();
@@ -570,6 +855,7 @@ mod pipeline_tests {
             &Settings::default(),
             Instant::now(),
             &mut record,
+            None,
             |_, _| Err("clipboard unavailable".into())
         )
         .is_err());

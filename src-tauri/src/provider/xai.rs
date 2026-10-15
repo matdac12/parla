@@ -25,6 +25,8 @@ pub struct XaiConfig {
     pub api_key: String,
     pub model: String,
     pub language: Option<String>,
+    #[serde(skip)]
+    pub vocabulary: Vec<String>,
 }
 impl Default for XaiConfig {
     fn default() -> Self {
@@ -32,12 +34,13 @@ impl Default for XaiConfig {
             api_key: String::new(),
             model: DEFAULT_MODEL.into(),
             language: None,
+            vocabulary: Vec::new(),
         }
     }
 }
 
 impl XaiConfig {
-    fn resolved(settings: &Settings) -> Result<Self, ProviderError> {
+    pub(crate) fn resolved(settings: &Settings) -> Result<Self, ProviderError> {
         // Resolve at use time; never put environment secrets into persisted/UI settings.
         Self::with_key_override(settings, std::env::var("XAI_API_KEY").ok())
     }
@@ -46,6 +49,9 @@ impl XaiConfig {
         if let Some(key) = key {
             config.api_key = key;
         }
+        crate::settings::validate_vocabulary(&settings.vocabulary)
+            .map_err(ProviderError::MissingConfig)?;
+        config.vocabulary = settings.vocabulary.clone();
         config.validate()?;
         Ok(config)
     }
@@ -103,6 +109,8 @@ fn client() -> Result<&'static Client, ProviderError> {
 
 fn request(client: &Client, clip: &Clip, config: &XaiConfig) -> Result<Request, ProviderError> {
     config.validate()?;
+    crate::settings::validate_vocabulary(&config.vocabulary)
+        .map_err(ProviderError::MissingConfig)?;
     if clip.sample_rate != SAMPLE_RATE || clip.samples.is_empty() {
         return Err(ProviderError::Other(
             "Expected nonempty 16 kHz mono audio".into(),
@@ -121,6 +129,9 @@ fn request(client: &Client, clip: &Clip, config: &XaiConfig) -> Result<Request, 
         form = form
             .text("language", language.clone())
             .text("format", "true");
+    }
+    for term in &config.vocabulary {
+        form = form.text("keyterm", term.clone());
     }
     let file = multipart::Part::bytes(wav)
         .file_name("dictation.wav")
@@ -319,5 +330,26 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+    #[test]
+    fn native_vocabulary_request_uses_supported_fields() {
+        let config = XaiConfig {
+            api_key: "test".into(),
+            vocabulary: vec!["Example & product".into(), "API".into()],
+            ..Default::default()
+        };
+        let mut req = request(&Client::new(), &Clip::new(vec![1; 160]), &config).unwrap();
+        let body = String::from_utf8_lossy(req.body_mut().as_mut().unwrap().buffer().unwrap())
+            .into_owned();
+        assert!(body.contains("name=\"keyterm\""));
+        assert!(body.contains("Example & product"));
+        assert_eq!(body.matches("name=\"keyterm\"").count(), 2);
+        assert!(body.rfind("name=\"keyterm\"").unwrap() < body.find("name=\"file\"").unwrap());
+        assert!(!body.contains("name=\"language\""));
     }
 }

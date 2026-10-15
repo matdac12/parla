@@ -8,6 +8,10 @@ interface Settings {
   active_provider: string;
   hotkey: string;
   restore_delay_ms: number;
+  paste_compatibility_mode: boolean;
+  streaming_enabled: boolean;
+  live_captions: boolean;
+  vocabulary: string[];
   providers: Record<string, Record<string, unknown>>;
 }
 
@@ -52,6 +56,7 @@ const PROVIDER_FIELDS: Record<string, FieldSpec[]> = {
   openai: [
     { key: "api_key", label: "API key", type: "password", envHint: "OPENAI_API_KEY" },
     { key: "model", label: "Model", type: "text", default: "gpt-transcribe" },
+    { key: "streaming_model", label: "Live transcription model", type: "text", default: "gpt-live-transcribe" },
   ],
   xai: [
     { key: "api_key", label: "API key", type: "password", envHint: "XAI_API_KEY" },
@@ -104,6 +109,10 @@ const els = {
   capture: byId<HTMLButtonElement>("capture"),
   captureHint: byId<HTMLParagraphElement>("capture-hint"),
   delay: byId<HTMLInputElement>("delay"),
+  pasteCompatibility: byId<HTMLInputElement>("paste-compatibility"),
+  streaming: byId<HTMLInputElement>("streaming-enabled"),
+  vocabulary: byId<HTMLTextAreaElement>("vocabulary"),
+  liveCaptions: byId<HTMLInputElement>("live-captions"),
   status: byId<HTMLSpanElement>("status"),
   save: byId<HTMLButtonElement>("save"),
 };
@@ -115,6 +124,7 @@ const state: { settings: Settings | null; providers: ProviderInfo[]; baseline: s
 };
 
 let saving = false;
+let switchingProvider = false;
 
 function textEl(tag: string, text: string, className?: string): HTMLElement {
   const element = document.createElement(tag);
@@ -132,7 +142,7 @@ function setStatus(text: string, kind: "success" | "warning" | "error" | "dirty"
 function updateDirty(): void {
   if (!state.settings) return;
   const dirty = JSON.stringify(state.settings) !== state.baseline;
-  els.save.disabled = saving || !dirty;
+  els.save.disabled = saving || switchingProvider || !dirty;
   if (dirty) {
     if (els.status.dataset.kind !== "error" && els.status.dataset.kind !== "warning") {
       setStatus("Unsaved changes.", "dirty");
@@ -168,11 +178,10 @@ function renderProviderRadios(): void {
     radio.name = "active_provider";
     radio.value = provider.id;
     radio.checked = settings.active_provider === provider.id;
-    radio.disabled = !provider.available;
+    radio.disabled = !provider.available || saving || switchingProvider;
     radio.addEventListener("change", () => {
       if (!radio.checked || !state.settings) return;
-      state.settings.active_provider = provider.id;
-      updateDirty();
+      void selectProvider(provider.id);
     });
 
     const body = document.createElement("span");
@@ -184,6 +193,30 @@ function renderProviderRadios(): void {
 
     label.append(radio, body);
     els.providers.append(label);
+  }
+}
+
+async function selectProvider(id: string): Promise<void> {
+  if (!state.settings || saving || switchingProvider) return;
+  const previous = state.settings.active_provider;
+  state.settings.active_provider = id;
+  switchingProvider = true;
+  renderProviderRadios();
+  updateDirty();
+  setStatus("Saving provider…");
+  try {
+    await invoke("select_provider", { id });
+    const baseline: Settings = JSON.parse(state.baseline);
+    baseline.active_provider = id;
+    state.baseline = JSON.stringify(baseline);
+    setStatus("Provider saved.", "success");
+  } catch (error) {
+    state.settings.active_provider = previous;
+    setStatus(`Could not save provider: ${String(error)}`, "error");
+  } finally {
+    switchingProvider = false;
+    renderProviderRadios();
+    updateDirty();
   }
 }
 
@@ -498,10 +531,14 @@ function startCapture(): void {
 
 async function save(): Promise<void> {
   const settings = state.settings;
-  if (!settings || saving) return;
+  if (!settings || saving || switchingProvider) return;
   const delay = Number.parseInt(els.delay.value, 10);
   if (!Number.isFinite(delay) || delay < 50 || delay > 2000) {
     setStatus("Restore delay must be between 50 and 2000 ms.", "error");
+    return;
+  }
+  if (settings.vocabulary.length > 100 || settings.vocabulary.some(term => [...term].length > 50 || /[<>\x00-\x1f\x7f-\x9f]/u.test(term))) {
+    setStatus("Use up to 100 entries of 1-50 characters, without control characters or angle brackets.", "error");
     return;
   }
   settings.restore_delay_ms = delay;
@@ -509,6 +546,7 @@ async function save(): Promise<void> {
   // are not part of it, so they stay "unsaved" instead of being marked persisted.
   const submitted: Settings = JSON.parse(JSON.stringify(settings));
   saving = true;
+  renderProviderRadios();
   els.save.disabled = true;
   setStatus("Saving…");
   try {
@@ -525,11 +563,17 @@ async function save(): Promise<void> {
     setStatus(String(error), "error");
   } finally {
     saving = false;
+    renderProviderRadios();
     updateDirty();
   }
 }
 
 function wireForm(): void {
+  els.vocabulary.addEventListener("input", () => {
+    if (!state.settings) return;
+    state.settings.vocabulary = els.vocabulary.value.split("\n").map(term => term.trim()).filter(Boolean);
+    updateDirty();
+  });
   els.hotkey.addEventListener("input", () => {
     if (!state.settings) return;
     state.settings.hotkey = els.hotkey.value.trim();
@@ -542,6 +586,21 @@ function wireForm(): void {
     updateDirty();
   });
   els.capture.addEventListener("click", startCapture);
+  els.pasteCompatibility.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.paste_compatibility_mode = els.pasteCompatibility.checked;
+    updateDirty();
+  });
+  els.streaming.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.streaming_enabled = els.streaming.checked;
+    updateDirty();
+  });
+  els.liveCaptions.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.live_captions = els.liveCaptions.checked;
+    updateDirty();
+  });
   els.form.addEventListener("submit", (event) => {
     event.preventDefault();
     void save();
@@ -555,11 +614,16 @@ async function main(): Promise<void> {
       invoke<Settings>("get_settings"),
       invoke<ProviderInfo[]>("list_providers"),
     ]);
+    settings.vocabulary ??= [];
     state.settings = settings;
     state.providers = providers;
     state.baseline = JSON.stringify(settings);
     els.hotkey.value = settings.hotkey;
     els.delay.value = String(settings.restore_delay_ms);
+    els.pasteCompatibility.checked = settings.paste_compatibility_mode;
+    els.streaming.checked = settings.streaming_enabled;
+    els.liveCaptions.checked = settings.live_captions;
+    els.vocabulary.value = settings.vocabulary.join("\n");
     renderProviderRadios();
     renderProviderConfig();
     updateDirty();

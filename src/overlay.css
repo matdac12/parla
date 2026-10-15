@@ -5,6 +5,38 @@ body {
   overflow: hidden;
   height: 100%;
 }
+.overlay-root {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 116px;
+  height: 32px;
+}
+.captions {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: 330px;
+  max-width: calc(100vw - 36px);
+  padding: 9px 13px;
+  border-radius: 11px;
+  background: rgba(18, 18, 20, 0.88);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 4px 13px rgba(0, 0, 0, 0.17);
+  font: 13px/19px "Segoe UI", sans-serif;
+  pointer-events: none;
+  animation: caption-appear 140ms ease-out;
+}
+.caption-text { max-height: 38px; overflow: hidden; overflow-wrap: anywhere; }
+.caption-stable { color: rgba(255, 255, 255, 0.88); }
+.caption-provisional { color: rgba(255, 255, 255, 0.56); }
+.captions[hidden] { display: none; }
+@keyframes caption-appear { from { opacity: 0; } }
 body {
   display: flex;
   align-items: center;
@@ -150,4 +182,5 @@ body {
   .pill {
     animation: none;
   }
+  .captions { animation: none; }
 }

@@ -48,12 +48,42 @@ pub async fn save_settings(
 }
 
 // Caller holds SaveLock; the settings RwLock is held only to snapshot/commit.
+#[tauri::command]
+pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let serial = app.state::<SaveLock>();
+        let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
+        let shared = app.state::<SharedSettings>();
+        let path = settings::path(&app)?;
+        select_provider_with(&shared, &id, |value| settings::save(&path, value))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// Caller holds SaveLock. Update only the persisted provider choice; unfinished
+// settings-form edits never cross this boundary.
+fn select_provider_with(
+    shared: &std::sync::RwLock<Settings>,
+    id: &str,
+    persist: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<(), String> {
+    if crate::provider::registry::get(id).is_none() {
+        return Err("Unknown transcription provider".into());
+    }
+    let mut requested = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
+    requested.active_provider = id.into();
+    save_with(shared, requested, persist, |_| Ok(())).map(|_| ())
+}
+
+// Caller holds SaveLock; the settings RwLock is held only to snapshot/commit.
 fn save_with(
     shared: &std::sync::RwLock<Settings>,
     requested: Settings,
     persist: impl FnOnce(&Settings) -> Result<(), String>,
     apply: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<SaveResult, String> {
+    settings::validate_vocabulary(&requested.vocabulary)?;
     let previous = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
     persist(&requested)?;
     let warning = if previous.hotkey != requested.hotkey {
@@ -76,6 +106,53 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         RwLock,
     };
+
+    #[test]
+    fn invalid_vocabulary_does_not_persist_or_replace_settings() {
+        let shared = RwLock::new(Settings::default());
+        let requested = Settings {
+            vocabulary: vec!["<unsafe>".into()],
+            ..Default::default()
+        };
+        assert!(save_with(
+            &shared,
+            requested,
+            |_| panic!("invalid hints persisted"),
+            |_| Ok(())
+        )
+        .is_err());
+        assert!(shared.read().unwrap().vocabulary.is_empty());
+    }
+
+    #[test]
+    fn provider_selection_survives_reload_without_changing_other_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut initial = Settings {
+            restore_delay_ms: 777,
+            live_captions: false,
+            ..Settings::default()
+        };
+        initial
+            .providers
+            .insert("future".into(), serde_json::json!({"model":"keep"}));
+        let shared = RwLock::new(initial.clone());
+        select_provider_with(&shared, "xai", |value| settings::save(&path, value)).unwrap();
+        let reloaded = settings::load(&path).unwrap();
+        assert_eq!(reloaded.active_provider, "xai");
+        assert_eq!(shared.read().unwrap().active_provider, "xai");
+        initial.active_provider = "xai".into();
+        assert_eq!(
+            serde_json::to_value(reloaded).unwrap(),
+            serde_json::to_value(initial).unwrap()
+        );
+        assert!(select_provider_with(&shared, "openai", |_| Err("disk full".into())).is_err());
+        assert_eq!(shared.read().unwrap().active_provider, "xai");
+        assert!(select_provider_with(&shared, "unknown", |_| panic!(
+            "must reject unknown providers"
+        ))
+        .is_err());
+    }
 
     #[test]
     fn unchanged_hotkey_saves_without_needing_listener() {

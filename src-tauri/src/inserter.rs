@@ -20,6 +20,16 @@ pub fn paste_text(text: &str, restore_delay: Duration) -> Result<(), String> {
 /// Still waits for restoration before releasing the serialized transaction.
 #[cfg(windows)]
 pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, String> {
+    paste_text_with_options(text, restore_delay, false)
+}
+
+/// Compatibility mode retains the original waits for applications that need them.
+#[cfg(windows)]
+pub fn paste_text_with_options(
+    text: &str,
+    restore_delay: Duration,
+    compatibility_mode: bool,
+) -> Result<Instant, String> {
     // AudioBud also serializes capture/write/paste/restore as one transaction:
     // https://github.com/jamditis/audiobud/blob/main/src-tauri/src/clipboard.rs
     static TRANSACTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -31,6 +41,7 @@ pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, 
         &mut WindowsDesktop { clipboard, input },
         text,
         restore_delay,
+        compatibility_mode,
     )
 }
 
@@ -39,6 +50,15 @@ pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, 
 #[cfg(not(windows))]
 pub fn paste_text_timed(_text: &str, _restore_delay: Duration) -> Result<Instant, String> {
     Err("Text insertion is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn paste_text_with_options(
+    text: &str,
+    restore_delay: Duration,
+    _compatibility_mode: bool,
+) -> Result<Instant, String> {
+    paste_text_timed(text, restore_delay)
 }
 
 #[cfg(any(windows, test))]
@@ -51,7 +71,7 @@ trait Desktop {
     // None means no text format; other clipboard errors abort the transaction.
     fn read_text(&mut self) -> Result<Option<String>, String>;
     fn write_text(&mut self, text: &str) -> Result<(), String>;
-    fn send_paste(&mut self) -> Result<(), String>;
+    fn send_paste(&mut self, key_hold: Duration) -> Result<(), String>;
     fn wait(&mut self, delay: Duration);
 }
 
@@ -60,12 +80,13 @@ fn paste_with_backend(
     desktop: &mut impl Desktop,
     text: &str,
     restore_delay: Duration,
+    compatibility_mode: bool,
 ) -> Result<Instant, String> {
     let saved = restorable_text(desktop.read_text()?);
     desktop.write_text(text)?;
-    // Handy's delay before injection allows clipboard consumers to settle.
-    desktop.wait(Duration::from_millis(100));
-    let result = desktop.send_paste().map(|()| Instant::now());
+    let settle = Duration::from_millis(if compatibility_mode { 100 } else { 25 });
+    desktop.wait(settle);
+    let result = desktop.send_paste(settle).map(|()| Instant::now());
     // Always attempt restoration, even if input injection failed.
     desktop.wait(restore_delay);
     if let Some(saved) = saved {
@@ -116,7 +137,7 @@ impl Desktop for WindowsDesktop {
         self.clipboard.set_text(text).map_err(|e| e.to_string())
     }
 
-    fn send_paste(&mut self) -> Result<(), String> {
+    fn send_paste(&mut self, key_hold: Duration) -> Result<(), String> {
         let _synthetic_input = crate::hotkey::synthetic_input_guard();
         use enigo::{Direction, Key, Keyboard};
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -152,7 +173,7 @@ impl Desktop for WindowsDesktop {
             .key(Key::Other(0x56), Direction::Click)
             .map_err(|e| e.to_string());
         // Handy holds Ctrl after V for applications polling modifier state.
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(key_hold);
         let release_v = self
             .input
             .key(Key::Other(0x56), Direction::Release)
@@ -202,6 +223,7 @@ mod tests {
         read_failures: usize,
         write_failures: usize,
         copy_after_failed_write: Option<String>,
+        key_holds: Vec<Duration>,
     }
 
     impl MemoryDesktop {
@@ -217,6 +239,7 @@ mod tests {
                 read_failures: 0,
                 write_failures: 0,
                 copy_after_failed_write: None,
+                key_holds: Vec::new(),
             }
         }
     }
@@ -241,7 +264,8 @@ mod tests {
             self.writes.push(text.into());
             Ok(())
         }
-        fn send_paste(&mut self) -> Result<(), String> {
+        fn send_paste(&mut self, key_hold: Duration) -> Result<(), String> {
+            self.key_holds.push(key_hold);
             self.restoring = true;
             if self.injection_error {
                 return Err("input failed".into());
@@ -265,7 +289,7 @@ mod tests {
     fn retries_restore_reads_after_transient_clipboard_contention() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.read_failures = 2;
-        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.text.as_deref(), Some("old"));
         assert_eq!(
             &desktop.waits[2..],
@@ -277,7 +301,7 @@ mod tests {
     fn retries_restore_write_after_comparing_again() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.write_failures = 1;
-        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.text.as_deref(), Some("old"));
         assert_eq!(desktop.write_failures, 0);
     }
@@ -287,7 +311,7 @@ mod tests {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.write_failures = 1;
         desktop.copy_after_failed_write = Some("user copy".into());
-        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.text.as_deref(), Some("user copy"));
     }
 
@@ -295,7 +319,7 @@ mod tests {
     fn restore_contention_is_bounded() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.read_failures = 99;
-        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.read_failures, 94);
         assert_eq!(
             desktop.waits.iter().skip(2).sum::<Duration>(),
@@ -306,20 +330,40 @@ mod tests {
     #[test]
     fn pastes_new_text_before_restoring_saved_text_after_requested_delay() {
         let mut desktop = MemoryDesktop::new(Some("old"));
-        paste_with_backend(&mut desktop, "Parla test ✓", Duration::from_millis(275)).unwrap();
+        paste_with_backend(
+            &mut desktop,
+            "Parla test ✓",
+            Duration::from_millis(275),
+            false,
+        )
+        .unwrap();
         assert_eq!(desktop.pasted, ["Parla test ✓"]);
+        assert_eq!(desktop.key_holds, [Duration::from_millis(25)]);
         assert_eq!(desktop.text.as_deref(), Some("old"));
         assert_eq!(
             desktop.waits,
-            [Duration::from_millis(100), Duration::from_millis(275)]
+            [Duration::from_millis(25), Duration::from_millis(275)]
         );
+    }
+
+    #[test]
+    fn compatibility_mode_preserves_original_paste_timing_and_restoration() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        paste_with_backend(&mut desktop, "new", Duration::from_millis(250), true).unwrap();
+        assert_eq!(desktop.pasted, ["new"]);
+        assert_eq!(desktop.text.as_deref(), Some("old"));
+        assert_eq!(
+            desktop.waits,
+            [Duration::from_millis(100), Duration::from_millis(250)]
+        );
+        assert_eq!(desktop.key_holds, [Duration::from_millis(100)]);
     }
 
     #[test]
     fn still_restores_when_input_injection_fails() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.injection_error = true;
-        assert!(paste_with_backend(&mut desktop, "new", Duration::ZERO).is_err());
+        assert!(paste_with_backend(&mut desktop, "new", Duration::ZERO, false).is_err());
         assert_eq!(desktop.text.as_deref(), Some("old"));
     }
 
@@ -327,7 +371,7 @@ mod tests {
     fn does_not_restore_empty_or_non_text_clipboard() {
         for original in [None, Some("")] {
             let mut desktop = MemoryDesktop::new(original);
-            paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+            paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
             assert_eq!(desktop.writes, ["new"]);
         }
     }
@@ -336,7 +380,7 @@ mod tests {
     fn does_not_overwrite_a_new_user_copy() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.user_copy = Some("copied during paste".into());
-        paste_with_backend(&mut desktop, "new", Duration::ZERO).unwrap();
+        paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.text.as_deref(), Some("copied during paste"));
     }
 }

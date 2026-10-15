@@ -9,11 +9,14 @@ use std::{
     time::Duration,
 };
 
-use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 const LABEL: &str = "overlay";
 const WIDTH: f64 = 144.0;
 const HEIGHT: f64 = 40.0;
+const CAPTION_WIDTH: f64 = 366.0;
+const CAPTION_HEIGHT: f64 = 116.0;
+static CAPTIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 const DONE_HOLD: Duration = Duration::from_millis(750);
 /// A failed dictation keeps its pill (and Retry button) up for a while.
@@ -54,9 +57,32 @@ fn place(app: &tauri::AppHandle) {
     let scale = monitor.scale_factor();
     let size = monitor.size();
     let origin = monitor.position();
-    let x = origin.x + ((f64::from(size.width) - WIDTH * scale) / 2.0) as i32;
-    let y = origin.y + (f64::from(size.height) - (HEIGHT + 72.0) * scale) as i32;
+    let (width, height) = dimensions(CAPTIONS_ENABLED.load(Ordering::Acquire));
+    let x = origin.x + ((f64::from(size.width) - width * scale) / 2.0) as i32;
+    let y = origin.y + (f64::from(size.height) - (height + 72.0) * scale) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn dimensions(captions: bool) -> (f64, f64) {
+    if captions {
+        (CAPTION_WIDTH, CAPTION_HEIGHT)
+    } else {
+        (WIDTH, HEIGHT)
+    }
+}
+
+fn configure(app: &tauri::AppHandle, captions: bool, generation: u64) {
+    if CAPTIONS_ENABLED.swap(captions, Ordering::AcqRel) != captions {
+        if let Some(window) = app.get_webview_window(LABEL) {
+            let (width, height) = dimensions(captions);
+            let _ = window.set_size(LogicalSize::new(width, height));
+        }
+    }
+    let _ = app.emit_to(
+        LABEL,
+        "caption-session",
+        serde_json::json!({"generation":generation,"enabled":captions}),
+    );
 }
 
 /// Bumped by every `begin`, so a delayed hide never hides a newer session.
@@ -70,13 +96,15 @@ pub struct Overlay {
     generation: u64,
     metering: Arc<AtomicBool>,
     settled: bool,
+    captions_live: Arc<AtomicBool>,
 }
 
 /// Starts a session. The pill appears after a short delay (so brief or
 /// cancelled holds never flash it) and streams microphone levels.
-pub fn begin(app: &tauri::AppHandle) -> Overlay {
+pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let metering = Arc::new(AtomicBool::new(true));
+    configure(app, captions, generation);
     set_interactive(app, false);
     let _ = app.emit_to(LABEL, "phase", "recording");
     let flag = metering.clone();
@@ -107,6 +135,7 @@ pub fn begin(app: &tauri::AppHandle) -> Overlay {
         generation,
         metering,
         settled: false,
+        captions_live: Arc::new(AtomicBool::new(captions)),
     }
 }
 
@@ -121,11 +150,13 @@ fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
 pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     set_interactive(app, false);
+    configure(app, false, generation);
     let overlay = Overlay {
         app: app.clone(),
         generation,
         metering: Arc::new(AtomicBool::new(false)),
         settled: false,
+        captions_live: Arc::new(AtomicBool::new(false)),
     };
     overlay.processing();
     overlay
@@ -147,6 +178,33 @@ fn hide(app: &tauri::AppHandle) {
 }
 
 impl Overlay {
+    pub fn caption_sink(
+        &self,
+        enabled: bool,
+    ) -> impl FnMut(crate::streaming::Caption) + Send + 'static {
+        let app = self.app.clone();
+        let generation = self.generation;
+        let live = self.captions_live.clone();
+        move |caption| {
+            if enabled
+                && live.load(Ordering::Acquire)
+                && GENERATION.load(Ordering::Acquire) == generation
+            {
+                let _ = app.emit_to(LABEL, "caption", serde_json::json!({
+                    "generation":generation, "stable":caption.stable, "provisional":caption.provisional
+                }));
+            }
+        }
+    }
+
+    fn clear_captions(&self) {
+        self.captions_live.store(false, Ordering::Release);
+        let _ = self.app.emit_to(
+            LABEL,
+            "caption",
+            serde_json::json!({"generation":self.generation,"stable":"","provisional":""}),
+        );
+    }
     /// Recording ended; the clip is being transcribed. Shows a spinner.
     pub fn processing(&self) {
         self.metering.store(false, Ordering::Release);
@@ -157,6 +215,7 @@ impl Overlay {
     /// Shows a short confirmation (check on success, cross on failure), then
     /// hides the pill.
     pub fn finish(mut self, ok: bool) {
+        self.clear_captions();
         self.settled = true;
         self.metering.store(false, Ordering::Release);
         reveal(&self.app);
@@ -180,6 +239,7 @@ impl Overlay {
 
 impl Drop for Overlay {
     fn drop(&mut self) {
+        self.clear_captions();
         self.metering.store(false, Ordering::Release);
         if !self.settled && GENERATION.load(Ordering::Acquire) == self.generation {
             hide(&self.app);

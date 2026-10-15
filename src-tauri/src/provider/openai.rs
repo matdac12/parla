@@ -22,6 +22,9 @@ pub struct OpenAiConfig {
     pub api_key: String,
     pub model: String,
     pub language: Option<String>,
+    #[serde(skip)]
+    pub vocabulary: Vec<String>,
+    pub streaming_model: String,
 }
 impl Default for OpenAiConfig {
     fn default() -> Self {
@@ -29,12 +32,14 @@ impl Default for OpenAiConfig {
             api_key: String::new(),
             model: DEFAULT_MODEL.into(),
             language: None,
+            vocabulary: Vec::new(),
+            streaming_model: "gpt-live-transcribe".into(),
         }
     }
 }
 
 impl OpenAiConfig {
-    fn resolved(settings: &Settings) -> Result<Self, ProviderError> {
+    pub(crate) fn resolved(settings: &Settings) -> Result<Self, ProviderError> {
         // Resolve at use time; never put environment secrets into persisted/UI settings.
         Self::with_key_override(settings, std::env::var("OPENAI_API_KEY").ok())
     }
@@ -43,6 +48,9 @@ impl OpenAiConfig {
         if let Some(key) = key {
             config.api_key = key;
         }
+        crate::settings::validate_vocabulary(&settings.vocabulary)
+            .map_err(ProviderError::MissingConfig)?;
+        config.vocabulary = settings.vocabulary.clone();
         config.validate()?;
         Ok(config)
     }
@@ -100,6 +108,8 @@ fn client() -> Result<&'static Client, ProviderError> {
 
 fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Request, ProviderError> {
     config.validate()?;
+    crate::settings::validate_vocabulary(&config.vocabulary)
+        .map_err(ProviderError::MissingConfig)?;
     if clip.sample_rate != SAMPLE_RATE || clip.samples.is_empty() {
         return Err(ProviderError::Other(
             "Expected nonempty 16 kHz mono audio".into(),
@@ -120,7 +130,14 @@ fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Reques
         .part("file", file)
         .text("model", config.model.clone())
         .text("response_format", "json");
-    if let Some(language) = config.language.as_ref().filter(|v| !v.trim().is_empty()) {
+    if config.model == "gpt-transcribe" {
+        for language in ["it", "en"] {
+            form = form.text("languages[]", language);
+        }
+        for term in &config.vocabulary {
+            form = form.text("keywords[]", term.clone());
+        }
+    } else if let Some(language) = config.language.as_ref().filter(|v| !v.trim().is_empty()) {
         form = form.text("language", language.clone());
     }
     let mut authorization =
@@ -259,6 +276,7 @@ mod tests {
         for language in [None, Some("it".into())] {
             let config = OpenAiConfig {
                 api_key: "test-key".into(),
+                model: "whisper-1".into(),
                 language: language.clone(),
                 ..Default::default()
             };
@@ -278,7 +296,7 @@ mod tests {
                 "audio/wav",
                 "RIFF",
                 "name=\"model\"",
-                DEFAULT_MODEL,
+                "whisper-1",
                 "name=\"response_format\"",
                 "json",
             ] {
@@ -286,5 +304,32 @@ mod tests {
             }
             assert_eq!(body.contains("name=\"language\""), language.is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+    #[test]
+    fn native_vocabulary_request_uses_supported_fields() {
+        let config = OpenAiConfig {
+            api_key: "test".into(),
+            vocabulary: vec!["Example & product".into(), "API".into()],
+            ..Default::default()
+        };
+        let mut req = request(&Client::new(), &Clip::new(vec![1; 160]), &config).unwrap();
+        let body = String::from_utf8_lossy(req.body_mut().as_mut().unwrap().buffer().unwrap())
+            .into_owned();
+        assert!(body.contains("name=\"keywords[]\""));
+        assert!(body.contains("Example & product"));
+        assert_eq!(body.matches("name=\"languages[]\"").count(), 2);
+        assert!(!body.contains("name=\"language\""));
+        let old = OpenAiConfig {
+            model: "whisper-1".into(),
+            ..config
+        };
+        let mut req = request(&Client::new(), &Clip::new(vec![1]), &old).unwrap();
+        let body = String::from_utf8_lossy(req.body_mut().as_mut().unwrap().buffer().unwrap());
+        assert!(!body.contains("keywords[]") && !body.contains("languages[]"));
     }
 }

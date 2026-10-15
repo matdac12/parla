@@ -6,7 +6,12 @@
     <link rel="stylesheet" href="/src/overlay.css" />
   </head>
   <body>
-    <div class="pill" id="pill"></div>
+    <div class="overlay-root">
+      <div class="captions" id="captions" aria-label="Live transcription preview" hidden>
+        <div class="caption-text"><span class="caption-stable"></span><span class="caption-provisional"></span></div>
+      </div>
+      <div class="pill" id="pill"></div>
+    </div>
     <script type="module" src="/src/overlay.ts"></script>
   </body>
 </html>

@@ -39,11 +39,18 @@ async fn blocking<T: Send + 'static>(
 
 #[tauri::command]
 pub async fn bench_start_recording(app: tauri::AppHandle) -> Result<(), String> {
-    blocking(move || start_recording(&app)).await
+    let generation = app
+        .state::<BenchSession>()
+        .window_generation()
+        .ok_or("Benchmark window is closed")?;
+    blocking(move || start_recording(&app, generation)).await
 }
 
-fn start_recording(app: &tauri::AppHandle) -> Result<(), String> {
+fn start_recording(app: &tauri::AppHandle, generation: u64) -> Result<(), String> {
     let session = app.state::<BenchSession>();
+    if session.window_generation() != Some(generation) {
+        return Err("Benchmark window was closed".into());
+    }
     if session.is_recording() {
         return Err("Already recording".into());
     }
@@ -55,7 +62,14 @@ fn start_recording(app: &tauri::AppHandle) -> Result<(), String> {
     recorder
         .start()
         .map_err(|error| format!("Recording failed: {error:#}"))?;
-    let token = session.begin_recording(guard);
+    let token = match session.begin_recording(guard, generation) {
+        Ok(token) => token,
+        Err(guard) => {
+            let _guard = guard;
+            recorder.stop();
+            return Err("Benchmark window was closed".into());
+        }
+    };
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(MAX_RECORDING);
@@ -78,7 +92,10 @@ fn start_recording(app: &tauri::AppHandle) -> Result<(), String> {
 
 /// Stops the recording identified by `token` (any when `None`) and stores the
 /// clip. `None` means there was no such recording to stop.
-fn finish_recording(app: &tauri::AppHandle, token: Option<u64>) -> Option<Result<u64, String>> {
+pub(crate) fn finish_recording(
+    app: &tauri::AppHandle,
+    token: Option<u64>,
+) -> Option<Result<u64, String>> {
     let session = app.state::<BenchSession>();
     // Keep the guard until the recorder has stopped and the clip is stored.
     let _guard = session.take_recording(token)?;

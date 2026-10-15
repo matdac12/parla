@@ -35,10 +35,16 @@ const search = must<HTMLInputElement>("search");
 const more = must<HTMLButtonElement>("more");
 const words = must<HTMLSpanElement>("stat-words");
 const dictations = must<HTMLSpanElement>("stat-dictations");
+const home = must<HTMLElement>("view-home");
+const settingsView = must<HTMLElement>("view-settings");
 
 let records: DictationRecord[] = [];
 let canRetry = false;
 let limit = PAGE;
+let loaded = false;
+let loadSequence = 0;
+let renderFrame: number | undefined;
+const entries = new Map<string, { record: DictationRecord; retryable: boolean; element: HTMLLIElement }>();
 
 const number = new Intl.NumberFormat();
 function showStats(stats: Stats): void {
@@ -143,11 +149,38 @@ function entry(record: DictationRecord, retryable: boolean): HTMLLIElement {
 }
 
 function render(): void {
+  // Keep receiving data while minimized or in Settings, but do no list DOM
+  // work until it is visible. Coalesce bursts/search input into one frame.
+  if (document.hidden || home.hidden || renderFrame !== undefined) return;
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = undefined;
+    if (!document.hidden && !home.hidden) renderRows();
+  });
+}
+
+function renderRows(): void {
   const query = search.value.trim().toLowerCase();
   const shown = query === "" ? records : records.filter((r) => r.text.toLowerCase().includes(query));
   // Only the newest failed dictation can be retried (one clip is kept).
   const newestFailed = records.find((r) => r.error !== null);
-  list.replaceChildren(...shown.map((r) => entry(r, canRetry && r === newestFailed)));
+  const retained = new Set(records.map((record) => record.id));
+  for (const id of entries.keys()) if (!retained.has(id)) entries.delete(id);
+  let cursor = list.firstChild;
+  for (const record of shown) {
+    const retryable = canRetry && record === newestFailed;
+    let cached = entries.get(record.id);
+    if (!cached || cached.record !== record || cached.retryable !== retryable) {
+      cached = { record, retryable, element: entry(record, retryable) };
+      entries.set(record.id, cached);
+    }
+    if (cached.element === cursor) cursor = cursor.nextSibling;
+    else list.insertBefore(cached.element, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
   empty.hidden = shown.length > 0;
   empty.textContent = query === "" ? "No dictations yet. Hold Ctrl+Alt and speak." : "No transcripts match.";
   more.hidden = records.length < limit || limit >= MAX;
@@ -159,8 +192,22 @@ async function refreshRetry(): Promise<void> {
 }
 
 async function load(): Promise<void> {
-  records = await invoke<DictationRecord[]>("get_history", { limit });
-  canRetry = await invoke<boolean>("has_failed_clip");
+  const sequence = ++loadSequence;
+  const before = new Set(records.map((record) => record.id));
+  const fetched = await invoke<DictationRecord[]>("get_history", { limit });
+  const retry = await invoke<boolean>("has_failed_clip");
+  if (sequence !== loadSequence) return;
+  // A history read can race a new dictation. Preserve arrivals since the read
+  // began, and deduplicate rows already included in the persisted snapshot.
+  const arrivals = records.filter((record) => !before.has(record.id));
+  const arrivalIds = new Set(arrivals.map((record) => record.id));
+  const previous = new Map(records.map((record) => [record.id, record]));
+  records = [...arrivals, ...fetched.filter((record) => !arrivalIds.has(record.id)).map((record) => {
+    const old = previous.get(record.id);
+    return old && JSON.stringify(old) === JSON.stringify(record) ? old : record;
+  })].slice(0, limit);
+  canRetry = retry;
+  loaded = true;
   render();
 }
 
@@ -169,13 +216,16 @@ more.addEventListener("click", () => {
   limit = Math.min(MAX, limit + PAGE);
   void load();
 });
-const home = must<HTMLElement>("view-home");
-const settingsView = must<HTMLElement>("view-settings");
 function show(view: "home" | "settings"): void {
   home.hidden = view !== "home";
   settingsView.hidden = view !== "settings";
   window.scrollTo(0, 0);
-  if (view === "home") void load();
+  if (view === "home") {
+    if (loaded) render();
+    // Refresh after returning from Settings/tray navigation as another window
+    // may have cleared history. Unchanged entries keep their cached DOM nodes.
+    void load();
+  }
 }
 must<HTMLButtonElement>("open-settings").addEventListener("click", () => show("settings"));
 must<HTMLButtonElement>("back").addEventListener("click", () => show("home"));
@@ -186,7 +236,7 @@ window.addEventListener("keydown", (event) => {
     if (!capturing) show("home");
   }
 });
-void listen<string>("navigate", (event) => show(event.payload === "settings" ? "settings" : "home"));
+document.addEventListener("visibilitychange", () => render());
 
 for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open]")) {
   button.addEventListener("click", () => {
@@ -194,16 +244,18 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open]")
   });
 }
 
-void listen<DictationRecord>("dictation://recorded", (event) => {
+const listeners = [listen<string>("navigate", (event) => show(event.payload === "settings" ? "settings" : "home")),
+listen<DictationRecord>("dictation://recorded", (event) => {
   if (event.payload.kind !== "dictation") return;
-  records = [event.payload, ...records].slice(0, limit);
+  records = [event.payload, ...records.filter((record) => record.id !== event.payload.id)].slice(0, limit);
   render();
-});
-void listen<boolean>("failure://changed", (event) => {
+}),
+listen<boolean>("failure://changed", (event) => {
   canRetry = event.payload;
   render();
-});
-void listen<Stats>("stats://updated", (event) => showStats(event.payload));
+}),
+listen<Stats>("stats://updated", (event) => showStats(event.payload))];
 
 void invoke<Stats>("get_stats").then(showStats);
-void load();
+// Listeners must be installed before taking the initial history snapshot.
+void Promise.all(listeners).then(() => show(location.hash === "#settings" ? "settings" : "home"));

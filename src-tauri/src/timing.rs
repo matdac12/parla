@@ -28,6 +28,17 @@ pub struct DictationRecord {
     /// dictation rows and on rows written before the benchmark existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bench_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_error: Option<String>,
+    /// Monotonic offsets from streaming session start (not key-up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_setup_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_caption_ms: Option<u64>,
 }
 impl DictationRecord {
     pub fn new(started_at: SystemTime, provider_id: &str) -> Self {
@@ -50,6 +61,11 @@ impl DictationRecord {
             text: String::new(),
             error: None,
             bench_run_id: None,
+            transcription_mode: None,
+            model: None,
+            stream_error: None,
+            stream_setup_ms: None,
+            first_caption_ms: None,
         }
     }
 }

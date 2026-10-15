@@ -10,6 +10,9 @@ fn old_settings_load_defaults_and_preserve_provider_sections() {
     assert_eq!(settings.active_provider, "openai");
     assert_eq!(settings.hotkey, "Ctrl+Alt+Space");
     assert_eq!(settings.restore_delay_ms, 250);
+    assert!(!settings.paste_compatibility_mode);
+    assert!(settings.streaming_enabled);
+    assert!(settings.live_captions);
     let round_trip = serde_json::to_value(settings).unwrap();
     assert_eq!(round_trip["providers"]["future"]["model"], "custom");
 }

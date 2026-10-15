@@ -50,7 +50,7 @@ pub fn setup(app: &tauri::App) -> Result<(), String> {
 }
 
 enum Message {
-    Append(DictationRecord),
+    Append(Box<DictationRecord>),
     Load {
         limit: usize,
         kind: Option<&'static str>,
@@ -78,7 +78,7 @@ impl History {
 
     /// Fire-and-forget append; the caller never waits for disk IO.
     pub fn append(&self, record: DictationRecord) {
-        let _ = self.sender.send(Message::Append(record));
+        let _ = self.sender.send(Message::Append(Box::new(record)));
     }
 
     /// Newest-first records, at most `limit` of them.

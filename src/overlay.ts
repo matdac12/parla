@@ -3,6 +3,46 @@ import { listen } from "@tauri-apps/api/event";
 
 const BARS = 9;
 const pill = document.getElementById("pill") as HTMLDivElement;
+const captions = document.getElementById("captions") as HTMLDivElement;
+const captionText = captions.querySelector(".caption-text") as HTMLDivElement;
+const stable = captions.querySelector(".caption-stable") as HTMLSpanElement;
+const provisional = captions.querySelector(".caption-provisional") as HTMLSpanElement;
+let generation = 0;
+let captionsEnabled = false;
+let captionTimer: number | undefined;
+let pendingCaption: { stable: string; provisional: string } | null = null;
+let phase = "recording";
+
+function clearCaptions(): void {
+  window.clearTimeout(captionTimer);
+  captionTimer = undefined;
+  pendingCaption = null;
+  stable.textContent = "";
+  provisional.textContent = "";
+  captions.hidden = true;
+}
+
+interface CaptionUpdate { generation: number; stable: string; provisional: string }
+function queueCaption(update: CaptionUpdate): void {
+  if (update.generation !== generation || !captionsEnabled || !["recording", "processing"].includes(phase)) return;
+  if (update.stable === "" && update.provisional === "") { clearCaptions(); return; }
+  // Backend payloads are already bounded; retain a defensive Unicode-safe cap.
+  const soft = Array.from(update.provisional).slice(-320).join("");
+  const remaining = 320 - Array.from(soft).length;
+  const settled = remaining > 0 ? Array.from(update.stable).slice(-remaining).join("") : "";
+  pendingCaption = { stable: settled, provisional: soft };
+  if (captionTimer !== undefined) return;
+  captionTimer = window.setTimeout(() => {
+    captionTimer = undefined;
+    if (!pendingCaption) return;
+    stable.textContent = pendingCaption.stable;
+    provisional.textContent = pendingCaption.provisional;
+    pendingCaption = null;
+    captions.hidden = false;
+    // The preview shows the newest two lines, not the start of a long segment.
+    captionText.scrollTop = captionText.scrollHeight;
+  }, 80);
+}
 
 // One small clue for the mode: a dot while the keys are held, a padlock once
 // the recording is locked hands-free.
@@ -69,7 +109,8 @@ function render(): void {
 }
 render();
 
-function setPhase(phase: string): void {
+function setPhase(nextPhase: string): void {
+  phase = nextPhase;
   if (phase === "recording") {
     history.fill(0);
     render();
@@ -81,6 +122,7 @@ function setPhase(phase: string): void {
   }
   retry.disabled = false;
   pill.dataset.phase = phase;
+  if (!["recording", "processing"].includes(phase)) clearCaptions();
 }
 setPhase("recording");
 
@@ -91,3 +133,10 @@ void listen<number>("level", (event) => {
 });
 void listen<boolean>("mode", (event) => setLocked(event.payload));
 void listen<string>("phase", (event) => setPhase(event.payload));
+void listen<{ generation: number; enabled: boolean }>("caption-session", (event) => {
+  if (event.payload.generation < generation) return;
+  generation = event.payload.generation;
+  captionsEnabled = event.payload.enabled;
+  clearCaptions();
+});
+void listen<CaptionUpdate>("caption", (event) => queueCaption(event.payload));

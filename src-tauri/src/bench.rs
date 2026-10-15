@@ -244,6 +244,8 @@ struct Inner {
     recording: Option<(u64, DictationGuard)>,
     next_token: u64,
     clip: Option<Arc<Clip>>,
+    window_generation: u64,
+    window_open: bool,
 }
 
 /// Managed state: the in-flight recording (which holds the dictation guard so
@@ -258,13 +260,34 @@ impl BenchSession {
     pub fn is_recording(&self) -> bool {
         self.lock().recording.is_some()
     }
-    /// Returns a token identifying this recording (for the auto-stop timer).
-    pub fn begin_recording(&self, guard: DictationGuard) -> u64 {
+    pub fn open_window(&self) {
         let mut inner = self.lock();
+        inner.window_generation = inner.window_generation.wrapping_add(1);
+        inner.window_open = true;
+    }
+    pub fn close_window(&self) {
+        self.lock().window_open = false;
+    }
+    pub fn window_generation(&self) -> Option<u64> {
+        let inner = self.lock();
+        inner.window_open.then_some(inner.window_generation)
+    }
+    /// Returns a token identifying this recording (for the auto-stop timer).
+    /// A close/reopen during device startup rejects the old request and returns
+    /// its guard, so the caller can stop capture before releasing admission.
+    pub fn begin_recording(
+        &self,
+        guard: DictationGuard,
+        generation: u64,
+    ) -> Result<u64, DictationGuard> {
+        let mut inner = self.lock();
+        if !inner.window_open || inner.window_generation != generation {
+            return Err(guard);
+        }
         inner.next_token += 1;
         let token = inner.next_token;
         inner.recording = Some((token, guard));
-        token
+        Ok(token)
     }
     /// Takes the active recording's guard. With `Some(token)` only that
     /// recording qualifies, so a stale timer cannot stop a newer recording.
@@ -413,14 +436,48 @@ mod tests {
     fn stale_timer_token_cannot_stop_a_newer_recording() {
         let state = crate::flow::DictationState::default();
         let session = BenchSession::default();
-        let first = session.begin_recording(state.try_begin().unwrap());
+        session.open_window();
+        let generation = session.window_generation().unwrap();
+        let first = session
+            .begin_recording(state.try_begin().unwrap(), generation)
+            .ok()
+            .unwrap();
         assert!(state.try_begin().is_none(), "recording holds the guard");
         assert!(session.take_recording(Some(first)).is_some());
-        let second = session.begin_recording(state.try_begin().unwrap());
+        let second = session
+            .begin_recording(state.try_begin().unwrap(), generation)
+            .ok()
+            .unwrap();
         assert!(session.take_recording(Some(first)).is_none());
         assert!(session.is_recording());
         assert!(session.take_recording(Some(second)).is_some());
         assert!(!session.is_recording());
+        assert!(state.try_begin().is_some());
+    }
+    #[test]
+    fn closing_or_reopening_during_startup_rejects_the_old_recording_request() {
+        let session = BenchSession::default();
+        let state = crate::flow::DictationState::default();
+        session.open_window();
+        let generation = session.window_generation().unwrap();
+        let guard = state.try_begin().unwrap();
+        session.close_window();
+        let rejected = session.begin_recording(guard, generation).err().unwrap();
+        assert!(!session.is_recording());
+        assert!(
+            state.try_begin().is_none(),
+            "guard must stay held until capture stops"
+        );
+        drop(rejected);
+        session.open_window();
+        let guard = state.try_begin().unwrap();
+        assert!(session.begin_recording(guard, generation).is_err());
+        let current = session.window_generation().unwrap();
+        let token = session
+            .begin_recording(state.try_begin().unwrap(), current)
+            .ok()
+            .unwrap();
+        assert!(session.take_recording(Some(token)).is_some());
         assert!(state.try_begin().is_some());
     }
     #[test]

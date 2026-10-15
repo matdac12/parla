@@ -3,8 +3,8 @@
 Parla is a Windows dictation app where speed comes first: hold **Ctrl+Alt** to
 talk, or tap **Ctrl+Alt+Space** to lock hands-free recording, and the raw
 transcript is pasted into the focused app. It records the microphone while you
-talk, transcribes the whole clip when you stop through OpenAI, xAI Grok, or a
-local Parakeet V3 model, shows a small pill on screen (live level meter, spinner
+talk, transcribes during recording through OpenAI or xAI Grok (or processes the
+whole clip locally with Parakeet V3), shows a small pill on screen (live level meter, spinner
 while transcribing, then a check), and appends per-stage latency to a local
 history so providers can be compared on your own voice and network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md).
 
@@ -24,6 +24,34 @@ history so providers can be compared on your own voice and network. See the [v0 
 5. Focus Notepad, hold **Ctrl+Alt**, speak, release. The transcript is pasted
    into the focused app. Or tap **Ctrl+Alt+Space** to lock recording
    hands-free, speak, and press **Ctrl+Alt** to stop (**Esc** cancels).
+
+## Live dictation
+
+Cloud streaming and live captions are enabled by default. The original recording
+pill keeps its appearance and position; a separate, subdued two-line preview
+appears above it once words arrive. Recent words can change as recognition
+settles. Nothing is typed into the focused app during recording: Parla pastes
+the complete final transcript once you stop. Esc cancels while recording.
+
+Settings → Live dictation lets you disable captions independently of streaming,
+or return to whole-clip transcription. OpenAI uses `gpt-live-transcribe` for
+streaming; its batch model remains separately configurable. Language detection
+stays automatic unless you explicitly configured a provider language.
+
+The full recording is retained. If the connection fails, the queue overflows,
+or a usable final result does not arrive within the bounded wait, Parla sends
+the saved clip through the existing batch path. Local Parakeet, benchmarks and
+retries continue using whole clips. Latency records include the model and
+`streaming`, `batch` or `batch_fallback` mode.
+
+Provider smoke tests upload only the bundled `hello.wav` fixture:
+
+```powershell
+cd src-tauri
+$env:PARLA_LIVE_STREAM_SETTINGS = "$env:APPDATA/com.matdac6.parla/settings.json"
+$env:PARLA_LIVE_STREAM_PROVIDER = 'openai' # or xai
+cargo test --locked --lib streaming::transport::tests::live_fixture -- --ignored --nocapture
+```
 
 ## Windows prerequisites
 
@@ -57,10 +85,10 @@ npm run tauri dev
 ```
 
 The dev app starts in the tray. Choose **Open Parla** or **Settings…** in the tray to open its
-window. Closing any window hides it; choose **Quit** to exit. The main,
-history, benchmark and recording-pill windows are created in code at startup
-(not in `tauri.conf.json`), after the app state is registered, so a page can
-never call a command before its state exists.
+window. Closing a secondary window destroys it; choose **Quit** to exit Parla.
+The main, history and benchmark windows are created only when opened and can
+be reopened from the tray. Only the recording pill stays loaded at startup.
+All windows are created after their app state is registered.
 
 For a standalone executable, from the repository root:
 
@@ -98,6 +126,8 @@ history does not reset them. A word is a whitespace-separated token of a
 transcript that was pasted successfully; failures and benchmark rows are not
 counted. On first run the counters start from whatever is already in
 `history.jsonl`.
+Counter updates appear immediately; a dedicated writer persists them in order
+in the background and flushes queued updates when Parla exits normally.
 
 **Settings** opens inside the same window, with a back arrow (or **Esc**) to
 return home. The **Benchmark** and **Latency log** buttons open their own
@@ -145,6 +175,9 @@ arrives within 120 seconds of capture starting, Parla stops and transcribes the
 clip anyway. Before pasting, Parla saves any nonempty text clipboard; after the
 paste and a delay it restores that text (best effort). The transcript is raw: no
 filler removal or rewriting.
+Pasting uses a 25 ms clipboard settle delay and a 25 ms modifier hold.
+Enable **Paste compatibility mode** in Settings to use the original 100 ms
+delays for apps that need them. The separate clipboard restore delay is unchanged.
 
 ### Recording pill
 
@@ -171,7 +204,8 @@ so pressing the hotkey has no device-startup latency.
 ## Providers and API keys
 
 The settings view lists every provider, whether it is ready, and lets you pick
-the active one. Keys and model names are written into `providers.<id>`.
+the active one. Provider selection saves immediately and is remembered after
+restart; other settings still use Save. Keys and model names are written into `providers.<id>`.
 
 Settings live at **`%APPDATA%\com.matdac6.parla\settings.json`** on Windows
 (`~/.config/com.matdac6.parla/settings.json` on Linux). Missing fields use
@@ -182,6 +216,7 @@ defaults. Example:
   "active_provider": "openai",
   "hotkey": "Ctrl+Alt+Space",
   "restore_delay_ms": 250,
+  "paste_compatibility_mode": false,
   "providers": {
     "openai": {
       "api_key": "YOUR_OPENAI_API_KEY",
@@ -335,6 +370,8 @@ Tray **Benchmark…** compares providers on your own voice and network.
 1. Click **Record clip**, speak, click **Stop recording** (it stops by itself
    after 30 s). Hotkey dictation is blocked while the benchmark owns the
    microphone.
+   Closing the benchmark window stops an active recording and keeps the clip
+   available when the window is reopened.
 2. Click **Run benchmark**. The clip goes through every registered provider in
    turn; each row fills in as its provider finishes. **Run again** re-runs the
    same clip, so runs compare identical audio. Providers that are not configured
@@ -391,14 +428,16 @@ tooltip are always set as a fallback.
 
 ## Resource use
 
-Measured once on a Windows 11 machine with the app idle in the tray and OpenAI
+Before windows were made lazy, measured once on a Windows 11 machine with the
+app idle in the tray and OpenAI
 as the active provider: about **610 MB** working set (**270 MB** private) in
 total, of which `parla.exe` itself is only about 40 MB. Nearly all of the rest is
 the WebView2 browser processes behind the four hidden windows (main, history,
 benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
 700 MB (about 1.4 GB working set in total). These are single measurements, not
-benchmarks; creating the windows lazily and unloading the model when idle are
-the obvious reductions and are not built yet.
+benchmarks. Main, history and benchmark windows are now created on demand and
+destroyed on close; the pill stays warm. The recorder drains audio every 10 ms
+while start/stop commands wake it immediately. Model unloading is not implemented.
 
 ## Development
 
@@ -413,6 +452,21 @@ cargo test
 
 and from the repository root, `npm ci && npm run build` if you touched the
 frontend.
+
+Frontend regression checks use the real DOM/modules with Tauri's official IPC
+mocks: run `npm run dev`, then open
+`http://localhost:1420/tests/frontend.html` and the same URL with `?settings`.
+The page reports results for row reuse, hidden rendering, 2,000-row updates,
+history-read races, cross-window history clearing, and compatibility settings.
+These test pages are not included in the production bundle.
+
+An opt-in native Windows/WebView2 lifecycle smoke test verifies lazy creation,
+initial Settings navigation, destruction and reopening. With the dev server
+running, run from `src-tauri/`:
+
+```powershell
+cargo test --locked --features native-smoke --lib secondary_windows_are_lazy_and_can_be_destroyed_and_reopened -- --ignored --nocapture
+```
 
 Linux can compile, format, lint, and unit-test the app, but text insertion is a
 no-op that returns an unsupported error (Windows is the target), and the global
@@ -472,7 +526,30 @@ the failure/retry path.
   languages mid-sentence). Allow ~1.4 GB free while replacing the model.
 - **Settings reload.** Settings are read at startup; editing `settings.json`
   externally requires a restart.
-- **Memory.** Idle use is dominated by the hidden WebView2 windows; see
+- **Memory.** The recording pill keeps WebView2 loaded; secondary windows release
+  their resources on close. The older baseline is in
   [Resource use](#resource-use).
 - **Linux.** Compiles and tests, but insertion is a no-op and Wayland is not a
   supported desktop.
+
+## Recognition hints and latency
+
+Settings includes an optional vocabulary editor (one term per line, at most 100
+terms of 50 characters). The list belongs to the local user profile and ships
+empty. Controls and angle brackets are rejected before requests; terms are
+native recognition hints, with no transcript replacement or rewriting.
+OpenAI `gpt-transcribe` and `gpt-live-transcribe` receive Italian and English
+language hints and vocabulary keywords. Other OpenAI models retain only their
+supported legacy language field. xAI receives repeated keyterms and otherwise
+keeps automatic language detection; local Parakeet is unchanged.
+
+Cloud setup starts during the initial 300 ms hold grace. Audio stays buffered
+locally until the grace expires, and rejected holds or recording cancellation
+close setup without uploading audio. The complete original recording is kept
+for recovery; successful streaming skips full-clip batch conversion. Retry,
+local transcription and benchmarks still receive the complete 16 kHz clip.
+
+History records may include `stream_setup_ms` and `first_caption_ms`, measured
+from streaming session start, unlike release-relative delivery stages. These
+fields are absent in older records. Conversion savings are generally small;
+provider/network finalization remains the main release-to-paste delay.

@@ -62,9 +62,31 @@
         <section class="card">
           <h2>Active provider</h2>
           <div id="providers" class="provider-list" role="radiogroup" aria-label="Active provider"></div>
+          <p class="hint">Your provider choice is saved automatically and remembered after restarting.</p>
         </section>
 
         <div id="provider-config"></div>
+
+        <section class="card">
+          <h2>Live dictation</h2>
+          <div class="field">
+            <label><input id="streaming-enabled" type="checkbox" /> Transcribe while I speak</label>
+            <p class="hint">Stream cloud dictations, then paste the complete transcript when you stop. If streaming fails, Parla uses the saved recording.</p>
+          </div>
+          <div class="field">
+            <label><input id="live-captions" type="checkbox" /> Show live captions above the recording bar</label>
+            <p class="hint">A discreet two-line preview. Your text box stays untouched until the final paste. Captions are available with cloud streaming.</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Vocabulary</h2>
+          <div class="field">
+            <label for="vocabulary">Names and terms</label>
+            <textarea id="vocabulary" rows="5" spellcheck="false" aria-describedby="vocabulary-hint"></textarea>
+            <p id="vocabulary-hint" class="hint">One term per line, up to 100 terms of 50 characters. Optional recognition hints for supported cloud models. Italian and English are recognized automatically; hints do not rewrite your transcript.</p>
+          </div>
+        </section>
 
         <section class="card">
           <h2>Hotkey</h2>
@@ -93,6 +115,10 @@
 
         <section class="card">
           <h2>Clipboard</h2>
+          <div class="field">
+            <label><input id="paste-compatibility" type="checkbox" /> Paste compatibility mode</label>
+            <p class="hint">Use longer paste delays if an app misses or changes pasted text.</p>
+          </div>
           <div class="field">
             <label for="delay">Restore delay (ms)</label>
             <input id="delay" type="number" min="50" max="2000" step="50" inputmode="numeric" />

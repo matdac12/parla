@@ -14,6 +14,7 @@ pub mod provider;
 pub mod recorder;
 pub mod settings;
 pub mod stats;
+pub mod streaming;
 pub mod timing;
 mod tray;
 
@@ -48,6 +49,7 @@ pub fn run() {
             commands::providers::list_providers,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::settings::select_provider,
             commands::history::get_history,
             commands::history::clear_history,
             commands::failure::retry_last_failed,
@@ -63,6 +65,15 @@ pub fn run() {
             commands::app::get_stats,
             commands::app::open_window,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Parla");
+        .build(tauri::generate_context!())
+        .expect("failed to build Parla")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(stats) = app.try_state::<stats::StatsStore>() {
+                    if let Err(error) = stats.flush() {
+                        eprintln!("Stats shutdown flush failed: {error}");
+                    }
+                }
+            }
+        });
 }

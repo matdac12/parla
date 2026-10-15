@@ -13,6 +13,10 @@ pub struct Settings {
     pub active_provider: String,
     pub hotkey: String,
     pub restore_delay_ms: u64,
+    pub paste_compatibility_mode: bool,
+    pub streaming_enabled: bool,
+    pub live_captions: bool,
+    pub vocabulary: Vec<String>,
     pub providers: BTreeMap<String, serde_json::Value>,
 }
 
@@ -22,6 +26,10 @@ impl Default for Settings {
             active_provider: "openai".into(),
             hotkey: crate::hotkey::DEFAULT_SHORTCUT.into(),
             restore_delay_ms: crate::inserter::DEFAULT_RESTORE_DELAY_MS,
+            paste_compatibility_mode: false,
+            streaming_enabled: true,
+            live_captions: true,
+            vocabulary: Vec::new(),
             providers: BTreeMap::new(),
         }
     }
@@ -93,4 +101,48 @@ pub fn apply(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> 
         .try_state::<crate::hotkey::Hotkey>()
         .ok_or("Hotkey listener is unavailable; restart Parla")?;
     hotkey.set_shortcut(&settings.hotkey)
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    use super::*;
+    #[test]
+    fn old_settings_get_empty_user_vocabulary_and_preserve_provider() {
+        let s: Settings =
+            serde_json::from_str(r#"{"providers":{"future":{"api_key":"test"}}}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["vocabulary"],
+            serde_json::json!([])
+        );
+        assert_eq!(s.providers["future"]["api_key"], "test");
+    }
+}
+
+/// Shared conservative native-provider limit. Never include user terms in errors.
+pub fn validate_vocabulary(terms: &[String]) -> Result<(), String> {
+    if terms.len() > 100 {
+        return Err("Vocabulary supports at most 100 entries".into());
+    }
+    if terms.iter().any(|term| {
+        term.trim().is_empty()
+            || term.chars().count() > 50
+            || term.chars().any(|c| c.is_control() || c == '<' || c == '>')
+    }) {
+        return Err("Each vocabulary entry must contain 1-50 characters, without control characters or angle brackets".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    #[test]
+    fn vocabulary_rejects_limits_and_unsafe_characters_without_echoing_terms() {
+        for term in ["", " ", "<unsafe>", "a\rb", "a\nb", "a\0b", "a\tb"] {
+            assert!(validate_vocabulary(&[term.into()]).is_err());
+        }
+        assert!(validate_vocabulary(&vec!["term".into(); 101]).is_err());
+        assert!(validate_vocabulary(&["x".repeat(51)]).is_err());
+        assert!(validate_vocabulary(&["è".repeat(50), "API & tools".into()]).is_ok());
+    }
 }
