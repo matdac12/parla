@@ -32,7 +32,9 @@ npm run tauri build -- --no-bundle
 .\src-tauri\target\release\parla.exe
 ```
 
-The build produces `src-tauri\target\release\parla.exe`. Or download the `parla-windows-x64` artifact from the latest green [GitHub Actions run](https://github.com/matdac6/parla/actions), extract it, and run `parla.exe`. WebView2 is still required; no installer is produced.
+The build leaves `parla.exe` and its required DLLs, including `DirectML.dll`, in
+`src-tauri\target\release\`. Keep the executable and DLLs in the same folder;
+copying only the executable will prevent startup. Or download the `parla-windows-x64` artifact from the latest green [GitHub Actions run](https://github.com/matdac6/parla/actions), extract the whole artifact into one folder, and run `parla.exe`. WebView2 is still required; no installer is produced.
 
 For frontend development alone: `npm run dev`. To type-check and build it: `npm run build`.
 
@@ -127,10 +129,6 @@ toggle and never logs or echoes the value. Providers that are not ready are disa
 with the reason shown inline (for example, a missing key or an undownloaded model), and
 the list refreshes after each save so typing a key enables its provider immediately.
 
-## Local model (Parakeet)
-
-Model setup and download instructions will be added with the local provider.
-
 ## Hotkey
 
 Hold **Ctrl+Space**, then release Space to finish. Releasing Ctrl before Space also works: the hold ends when Space comes up. Key-down starts microphone capture (including the recorder’s 150 ms pre-roll); Space-up stops it, transcribes with the selected provider, and pastes the raw transcript. New holds during recording finalization, transcription, or clipboard restoration are ignored through their release; nothing is queued. Each accepted hold snapshots settings, so saves affect the next dictation. If no release arrives within 120 seconds after recording starts, Parla stops and transcribes the captured clip as a forced release, records `hold exceeded 120 s`, then frees the session after transcription/paste finishes. A later press can recover the stale hold. A disconnected release channel also forces completion.
@@ -177,3 +175,82 @@ Provider comparison and history instructions will be added with benchmarking.
 - Settings are loaded at startup. Editing the JSON externally requires a restart; `save_settings` persists settings first, applies a changed hotkey with a nonfatal warning on failure, and uses the restore delay for the next dictation. A failed persisted hotkey registration leaves the default binding in place if available.
 - Timing emits `dictation://recorded` and logs stage timings, transcript length and failure status only (no transcript or raw provider error body); each record is also appended to `history.jsonl` (see **History**). Stage offsets are monotonic milliseconds from key-up; `started_at` is Unix milliseconds. `pasted` means input injection completed, not acknowledgement by the receiving app.
 - Real API transcription and end-to-end Windows dictation still require a configured key and a manual smoke test. The default model follows the spec; its latency has not been compared on this machine.
+
+## Local model (Parakeet)
+
+Choose **Parakeet V3 (local)** in Settings and use **Download Parakeet model**
+(the settings UI is supplied by PARLA-8). The one-time download requires internet;
+afterwards transcription stays on your CPU and needs no API key or network.
+Until all four files are present with the expected sizes the provider is unavailable.
+Downloads verify exact sizes and SHA-256 hashes in a sibling temporary directory,
+then publish the completed directory by rename. Failed downloads can be retried;
+partial downloads are discarded rather than resumed. The download command also
+uses an expected-size fast path for installed files, without re-reading 670 MB.
+An explicit repair (`download_model` with `repair: true`) verifies existing files'
+hashes and replaces corrupt installations. Normal downloads always verify incoming
+files. Downloads abort after 30 seconds without incoming bytes (15-second connect
+limit, one-hour total request cap); the busy flag clears so you can retry.
+Hugging Face requests identify the app with `User-Agent: parla/<version>`.
+
+The int8 NVIDIA Parakeet TDT 0.6B **V3** ONNX export occupies 670,619,706 bytes
+(about 640 MiB; allow at least 1.4 GB free while replacing an existing model).
+First use loads it into RAM; later dictations reuse the loaded model. When Parakeet
+is active at startup it warms in the background. CPU latency depends on the machine
+and clip length; the first load costs more than later dictations. No GPU is required.
+
+For a manual installation, download these exact files into
+`%LOCALAPPDATA%\com.matdac6.parla\models\parakeet-tdt-0.6b-v3\`:
+
+- [encoder-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.int8.onnx)
+- [decoder_joint-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.int8.onnx)
+- [nemo128.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx)
+- [vocab.txt](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt)
+
+Keep the filenames unchanged. This is Tauri v2 `app_local_data_dir()` for identifier
+`com.matdac6.parla`: Windows LocalAppData, so the model is not copied by roaming profiles.
+`model_status.model_dir` reports this resolved location. Settings and API keys stay
+in roaming `%APPDATA%\com.matdac6.parla\settings.json`. Existing models from the
+previous roaming folder are not moved automatically: move the four files to the
+new folder or set `providers.parakeet.model_dir` to their existing folder. On Linux it is
+`$XDG_DATA_HOME/com.matdac6.parla/models/parakeet-tdt-0.6b-v3` (normally
+`~/.local/share/com.matdac6.parla/models/parakeet-tdt-0.6b-v3`). To use another
+folder, set `providers.parakeet` to `{ "model_dir": "<absolute folder>" }` in
+settings.json; `null` uses the default. Set `active_provider` to `"parakeet"`.
+
+The Windows CI artifact includes `parla.exe` and ONNX Runtime companion DLLs;
+keep them together when extracting it. CI dereferences build-output symlinks into
+real files and refuses to upload an artifact without a `DirectML.dll` larger than
+1 MB. ONNX Runtime itself is statically linked
+using `ort`'s prebuilt CPU binaries. `transcribe-rs` is pinned to a git revision,
+and `ort`/`ort-sys` are pinned to the compatible rc.12 API. No model is bundled,
+committed, or downloaded by CI. The prebuilt Windows runtime links DirectML even
+when Parla uses CPU inference, so `DirectML.dll` is a load-time requirement. Under
+[Windows' standard DLL search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order),
+the application directory precedes System32; keeping the supplied DLL beside
+`parla.exe` selects the matching version rather than System32's DirectML DLL.
+
+For an optional inference smoke test, set `PARLA_PARAKEET_MODEL_DIR` to an installed
+model folder and run `cargo test provider::parakeet::tests::live_fixture` from
+`src-tauri`. Without that variable the test skips inference. An explicit network
+smoke test is available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
+`cargo test models::tests::live_download_only_when_explicitly_requested`; leave this
+variable unset in CI.
+
+Settings IPC (listen before invoking; IDs are provider IDs):
+
+```typescript
+invoke('model_status', { id: 'parakeet' })
+// Promise<{ id: 'parakeet', model_dir: string, available: boolean, downloading: boolean }>
+invoke('download_model', { id: 'parakeet' }) // normal install; fast size check
+invoke('download_model', { id: 'parakeet', repair: true }) // verify hashes; repair if needed
+// Promise<void>, resolves after installation; rejects on error, unknown ID, or busy.
+// model://progress: { id: 'parakeet', downloaded: number, total: number } (aggregate bytes)
+// model://done:     { id: 'parakeet' }
+// model://error:    { id: 'parakeet', error: string }
+```
+
+`model://error` reports an accepted download failing; unknown IDs and concurrent
+invocations reject directly without a terminal event. The settings snapshot fixes
+the destination for the current download; changing `model_dir` during download
+changes what subsequent status checks and dictations see. Query status again after
+a terminal event or settings change. Terminal events see `downloading: false`.

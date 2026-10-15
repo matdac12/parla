@@ -8,6 +8,7 @@ mod flow;
 pub mod history;
 pub mod hotkey;
 pub mod inserter;
+pub mod models;
 pub mod provider;
 pub mod recorder;
 pub mod settings;
@@ -23,6 +24,7 @@ pub fn run() {
                 eprintln!("{error}; using defaults until settings are repaired");
                 settings::Settings::default()
             });
+            models::setup(app.handle(), &config)?;
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
             app.manage(failure::RetryLock::default());
@@ -40,6 +42,8 @@ pub fn run() {
             commands::history::get_history,
             commands::history::clear_history,
             commands::failure::retry_last_failed,
+            commands::models::model_status,
+            commands::models::download_model,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Parla");
