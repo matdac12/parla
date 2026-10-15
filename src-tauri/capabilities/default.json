@@ -9,6 +9,7 @@
     "bench"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "notification:default"
   ]
 }
