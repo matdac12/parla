@@ -3,8 +3,8 @@
 Parla is a Windows dictation app where speed comes first: hold **Ctrl+Alt** to
 talk, or tap **Ctrl+Alt+Space** to lock hands-free recording, and the raw
 transcript is pasted into the focused app. It records the microphone while you
-talk, transcribes during recording through OpenAI or xAI Grok (or processes the
-whole clip locally with Parakeet V3), shows a small pill on screen (live level meter, spinner
+talk, transcribes during recording through OpenAI or xAI Grok (or locally with
+Parakeet V3, phrase by phrase at your pauses), shows a small pill on screen (live level meter, spinner
 while transcribing, then a check), and appends per-stage latency to a local
 history so providers can be compared on your own voice and network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md).
 
@@ -318,7 +318,28 @@ app with `User-Agent: parla/<version>`.
 
 Inference is CPU-only and needs no GPU. The model loads into RAM on first use
 (so the first dictation costs more) and is reused afterwards; when Parakeet is
-the active provider at startup, it warms in the background. To use a different
+the active provider at startup, it warms in the background.
+
+Local speed comes from four measures (measured on an i7-1370P laptop):
+
+- **Wake on key-down.** Pressing the hotkey runs a tiny inference (0.5 s of
+  silence, ~70 ms) while you start talking. After a minute idle a 12.7 s clip
+  otherwise took 1.7-8.3 s (clocks down, model pages cold); with it, ~0.67 s.
+- **Phrase-by-phrase transcription** (with **Transcribe while I speak**). The
+  recording is cut at pauses of about half a second once a phrase has 1.5 s of
+  speech, and each phrase is transcribed while you keep talking, so key-up only
+  waits for the last one: 0.37 s instead of 1.2 s for a 12.7 s clip, 0.86 s
+  instead of 4.5 s for 37 s. Each phrase is decoded with the previous 2 s of
+  audio as context and only its own words are kept, so sentences read the same
+  across cuts. Phrases longer than 20 s are cut at their quietest moment.
+- **Silence trimming.** Leading, trailing and long inner silences are shortened
+  to about a quarter second before inference, on the batch path too.
+- **No power throttling.** Parla opts out of Windows EcoQoS, which otherwise
+  schedules a background app (Parla always is while you dictate into another
+  app) on efficiency cores at low clocks.
+
+Thread counts, P-core pinning, and the GGUF/ggml engine that Handy now uses were
+benchmarked too and were not faster on that machine. To use a different
 folder, set `providers.parakeet.model_dir` to an absolute path (`null` uses the
 default) and set `active_provider` to `"parakeet"`.
 
@@ -333,6 +354,9 @@ model folder and run `cargo test provider::parakeet::tests::live_fixture` from
 `src-tauri`; without the variable the test skips. A network download test is
 available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
 `cargo test models::tests::live_download_only_when_explicitly_requested`.
+To compare whole-clip and phrase-by-phrase transcripts and timings on your own
+recordings, also set `PARLA_LIVE_CLIPS` to a folder of 16 kHz mono WAVs and run
+`cargo test --release --lib live_clips -- --nocapture`.
 
 ## Hotkey
 
@@ -491,6 +515,7 @@ tests are gated by environment variables and skip when absent:
 - `XAI_API_KEY` — `cargo test --test xai_live`
 - `PARLA_PARAKEET_MODEL_DIR` — `cargo test provider::parakeet::tests::live_fixture`
 - `PARLA_PARAKEET_DOWNLOAD_DIR` — `cargo test models::tests::live_download_only_when_explicitly_requested`
+- `PARLA_PARAKEET_MODEL_DIR` + `PARLA_LIVE_CLIPS` — `cargo test --release --lib live_clips -- --nocapture`
 
 CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
 `npx tauri build --no-bundle`, stages `parla.exe` and the ONNX Runtime DLLs

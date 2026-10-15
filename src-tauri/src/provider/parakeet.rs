@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use transcribe_rs::onnx::{
-    parakeet::{ParakeetModel, ParakeetParams},
+    parakeet::{ParakeetModel, ParakeetParams, TimestampGranularity},
     Quantization,
 };
 
@@ -111,6 +111,75 @@ pub fn warm(settings: &Settings) -> Result<(), ProviderError> {
     with_model(settings, |_| Ok(()))
 }
 
+/// Half a second of silence: enough to run every session, ~70 ms of work.
+const WAKE_SAMPLES: usize = SAMPLE_RATE as usize / 2;
+
+/// Runs a tiny inference so the first real one finds the CPU clocked up and the
+/// model's pages resident. Measured on an i7-1370P after 60 s idle, a 12.7 s
+/// clip took 1.7-8.3 s cold and a steady ~0.67 s after this.
+pub fn wake(settings: &Settings) -> Result<(), ProviderError> {
+    transcribe_samples(settings, &[0.0; WAKE_SAMPLES]).map(drop)
+}
+
+/// Wakes the model on a background thread when a recording starts; the user is
+/// still speaking for seconds, which hides the cost.
+pub fn wake_in_background(settings: &Settings) {
+    let settings = settings.clone();
+    let _ = std::thread::Builder::new()
+        .name("parla-parakeet-wake".into())
+        .spawn(move || {
+            if let Err(error) = wake(&settings) {
+                eprintln!("Parakeet wake-up: {error}");
+            }
+        });
+}
+
+/// Transcribes 16 kHz mono samples in [-1, 1].
+pub fn transcribe_samples(settings: &Settings, audio: &[f32]) -> Result<String, ProviderError> {
+    with_model(settings, |model| {
+        model
+            .transcribe_with(audio, &ParakeetParams::default())
+            .map(|r| r.text)
+            .map_err(|e| ProviderError::Other(format!("Parakeet transcription failed: {e}")))
+    })
+}
+
+/// Transcribes `audio` heard right after `context` (audio already transcribed)
+/// and returns only the words spoken in `audio`. The context lets the model
+/// see a sentence continue across a cut, so it neither capitalizes the next
+/// word nor guesses the language from a fragment.
+pub fn transcribe_after(
+    settings: &Settings,
+    context: &[f32],
+    audio: &[f32],
+) -> Result<String, ProviderError> {
+    if context.is_empty() {
+        return transcribe_samples(settings, audio);
+    }
+    let joined = [context, audio].concat();
+    // Cuts sit inside pauses with 240 ms of silence on each side, so context
+    // words end well before the boundary. Onset tokens can be stamped a frame
+    // or two early (80 ms steps), hence the cutoff sits two frames before it.
+    let boundary = context.len() as f32 / SAMPLE_RATE as f32 - 0.16;
+    let params = ParakeetParams {
+        timestamp_granularity: Some(TimestampGranularity::Token),
+        ..Default::default()
+    };
+    with_model(settings, |model| {
+        let result = model
+            .transcribe_with(&joined, &params)
+            .map_err(|e| ProviderError::Other(format!("Parakeet transcription failed: {e}")))?;
+        let text: String = result
+            .segments
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|token| token.start >= boundary)
+            .map(|token| token.text)
+            .collect();
+        Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    })
+}
+
 pub struct Parakeet;
 impl SttProvider for Parakeet {
     fn id(&self) -> &'static str {
@@ -133,12 +202,10 @@ impl SttProvider for Parakeet {
             ));
         }
         let audio: Vec<f32> = clip.samples.iter().map(|&s| s as f32 / 32768.0).collect();
-        with_model(settings, |model| {
-            model
-                .transcribe_with(&audio, &ParakeetParams::default())
-                .map(|r| r.text)
-                .map_err(|e| ProviderError::Other(format!("Parakeet transcription failed: {e}")))
-        })
+        // Inference cost grows with length, so silence is trimmed first. When no
+        // speech is detected (a very quiet mic), the whole clip is used.
+        let speech = crate::segment::compress_silence(&audio);
+        transcribe_samples(settings, speech.as_deref().unwrap_or(&audio))
     }
 }
 #[cfg(test)]

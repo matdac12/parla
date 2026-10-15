@@ -13,13 +13,46 @@ mod overlay;
 mod pricing;
 pub mod provider;
 pub mod recorder;
+pub mod segment;
 pub mod settings;
 pub mod stats;
 pub mod streaming;
 pub mod timing;
 mod tray;
 
+/// Windows 11 runs background processes under EcoQoS, which favours E-cores and
+/// low clocks. Parla is always in the background while dictating (the target
+/// app has focus), and local inference is latency-critical. Idle cost is nil:
+/// this only affects how the process is scheduled while it runs.
+#[cfg(windows)]
+fn opt_out_of_power_throttling() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: a valid pseudo-handle and a correctly sized, initialized struct.
+    let ok = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of_val(&state) as u32,
+        )
+    };
+    if ok == 0 {
+        eprintln!("Could not opt out of power throttling");
+    }
+}
+
 pub fn run() {
+    #[cfg(windows)]
+    opt_out_of_power_throttling();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {

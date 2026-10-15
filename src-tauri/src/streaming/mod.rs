@@ -1,5 +1,6 @@
 //! Backend-only live dictation. The complete recording remains the recovery source.
 pub mod audio;
+mod local;
 pub mod protocol;
 mod transport;
 
@@ -22,8 +23,16 @@ pub struct Streamed {
 
 pub struct Session {
     result: mpsc::Receiver<Result<Streamed, ProviderError>>,
-    task: tauri::async_runtime::JoinHandle<()>,
+    /// The cloud transport task; local sessions run on threads instead.
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
+    stopped: Arc<AtomicBool>,
+    finish_timeout: Duration,
 }
+
+/// A cloud final arrives within moments of key-up or not at all.
+const CLOUD_FINISH: Duration = Duration::from_secs(4);
+/// The local tail is still computing; the batch fallback would only redo it.
+const LOCAL_FINISH: Duration = Duration::from_secs(60);
 
 impl Session {
     pub fn start(
@@ -31,6 +40,9 @@ impl Session {
         caption: impl FnMut(Caption) + Send + 'static,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Option<(Self, audio::AudioFeed)>, ProviderError> {
+        if settings.active_provider == crate::models::ID {
+            return Ok(Self::start_local(settings, caption, cancelled));
+        }
         let Some(config) = transport::Config::from_settings(settings)? else {
             return Ok(None);
         };
@@ -102,27 +114,117 @@ impl Session {
             }
             let _ = send.send(result);
         });
-        (Self { result, task }, feed)
+        let session = Self {
+            result,
+            task: Some(task),
+            stopped: Arc::default(),
+            finish_timeout: CLOUD_FINISH,
+        };
+        (session, feed)
+    }
+
+    fn start_local(
+        settings: &Settings,
+        caption: impl FnMut(Caption) + Send + 'static,
+        cancelled: Arc<AtomicBool>,
+    ) -> Option<(Self, audio::AudioFeed)> {
+        use crate::provider::{parakeet::Parakeet, Availability, SttProvider};
+        // Without live dictation or a model, the batch path reports the reason.
+        if !settings.streaming_enabled || Parakeet.availability(settings) != Availability::Available
+        {
+            return None;
+        }
+        let (feed, receiver, failed) = audio::channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let local = local::Local {
+            settings: settings.clone(),
+            model: crate::flow::batch_model(crate::models::ID, settings).unwrap_or_default(),
+            failed,
+            stopped: stopped.clone(),
+            cancelled,
+        };
+        let result = local::spawn(local, receiver, caption);
+        let session = Self {
+            result,
+            task: None,
+            stopped,
+            finish_timeout: LOCAL_FINISH,
+        };
+        Some((session, feed))
     }
 
     /// Called after recorder.stop has closed the audio feed. A missing final
     /// never holds delivery indefinitely: the caller falls back to batch.
     pub fn finish(self) -> Result<Streamed, ProviderError> {
         self.result
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(self.finish_timeout)
             .unwrap_or(Err(ProviderError::Timeout))
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.task.abort();
+        self.stopped.store(true, Ordering::Release);
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feeds a recording through a real local session at microphone pace (100 ms
+    /// packets at 48 kHz) and reports what key-up costs. Skips without
+    /// PARLA_PARAKEET_MODEL_DIR; PARLA_LIVE_CLIP picks the WAV.
+    #[test]
+    fn local_session_end_to_end_when_model_is_provided() {
+        let Ok(dir) = std::env::var("PARLA_PARAKEET_MODEL_DIR") else {
+            return;
+        };
+        let mut settings = Settings {
+            active_provider: crate::models::ID.into(),
+            ..Default::default()
+        };
+        settings
+            .providers
+            .insert("parakeet".into(), serde_json::json!({"model_dir":dir}));
+        let bytes = match std::env::var("PARLA_LIVE_CLIP") {
+            Ok(path) => std::fs::read(path).unwrap(),
+            Err(_) => include_bytes!("../../tests/fixtures/hello.wav").to_vec(),
+        };
+        let clip = crate::clip::Clip::from_wav_bytes(&bytes).unwrap();
+        // 16 kHz to 48 kHz by repetition is crude but keeps speech intelligible.
+        let device: Vec<f32> = clip
+            .samples
+            .iter()
+            .flat_map(|&s| [s as f32 / 32768.0; 3])
+            .collect();
+        let captions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = captions.clone();
+        let (session, mut feed) = Session::start(
+            &settings,
+            move |caption: Caption| seen.lock().unwrap().push(caption.stable),
+            Arc::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for packet in device.chunks(4_800) {
+            feed.push(packet, 48_000);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let key_up = std::time::Instant::now();
+        drop(feed);
+        let streamed = session.finish().unwrap();
+        println!(
+            "key-up to text: {} ms, {} captions\n{}",
+            key_up.elapsed().as_millis(),
+            captions.lock().unwrap().len(),
+            streamed.text
+        );
+        assert!(!streamed.text.trim().is_empty());
+    }
 
     #[tokio::test]
     async fn cancellation_interrupts_stalled_handshake() {

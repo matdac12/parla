@@ -210,7 +210,10 @@ fn run_session(
         });
     let captions = settings.live_captions
         && settings.streaming_enabled
-        && matches!(settings.active_provider.as_str(), "openai" | "xai");
+        && matches!(
+            settings.active_provider.as_str(),
+            "openai" | "xai" | crate::models::ID
+        );
     let overlay = recording
         .is_ok()
         .then(|| crate::overlay::begin(app, captions));
@@ -235,6 +238,10 @@ fn run_session(
             }
         }
     });
+    if stream.is_none() && recording.is_ok() && settings.active_provider == crate::models::ID {
+        // Batch-only local dictation still gets the key-down warm-up.
+        crate::provider::parakeet::wake_in_background(&settings);
+    }
     let (key_up, hold_error) = wait_for_release(&released, Duration::from_secs(120));
     let stream = if cancelled.load(Ordering::Acquire) {
         drop(stream);

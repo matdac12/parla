@@ -38,6 +38,6 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Com"] }
+windows-sys = { version = "0.60.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_System_Threading"] }
 enigo = "0.6.1"
 arboard = { version = "3", default-features = false }
