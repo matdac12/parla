@@ -99,6 +99,7 @@ const els = {
   form: byId<HTMLFormElement>("settings-form"),
   loadError: byId<HTMLParagraphElement>("load-error"),
   providers: byId<HTMLDivElement>("providers"),
+  providerStatus: byId<HTMLParagraphElement>("provider-status"),
   providerConfig: byId<HTMLDivElement>("provider-config"),
   hotkey: byId<HTMLInputElement>("hotkey"),
   capture: byId<HTMLButtonElement>("capture"),
@@ -134,6 +135,13 @@ function setStatus(text: string, kind: "success" | "warning" | "error" | "dirty"
   els.status.textContent = text;
   els.status.className = kind ? `status status-${kind}` : "status";
   els.status.dataset.kind = kind;
+}
+
+// The provider applies on click (select_provider), not on Save, so its
+// feedback sits in the provider card instead of next to the Save button.
+function setProviderStatus(text: string, kind: "success" | "error" | "" = ""): void {
+  els.providerStatus.textContent = text;
+  els.providerStatus.className = kind ? `status provider-status status-${kind}` : "status provider-status";
 }
 
 function updateDirty(): void {
@@ -200,16 +208,17 @@ async function selectProvider(id: string): Promise<void> {
   switchingProvider = true;
   renderProviderRadios();
   updateDirty();
-  setStatus("Saving provider…");
+  setProviderStatus("Switching provider…");
   try {
     await invoke("select_provider", { id });
     const baseline: Settings = JSON.parse(state.baseline);
     baseline.active_provider = id;
     state.baseline = JSON.stringify(baseline);
-    setStatus("Provider saved.", "success");
+    const name = state.providers.find((p) => p.id === id)?.display_name ?? id;
+    setProviderStatus(`${name} is now active. Saved.`, "success");
   } catch (error) {
     state.settings.active_provider = previous;
-    setStatus(`Could not save provider: ${String(error)}`, "error");
+    setProviderStatus(`Could not switch provider: ${String(error)}`, "error");
   } finally {
     switchingProvider = false;
     renderProviderRadios();
