@@ -94,6 +94,19 @@
         </section>
 
         <section class="card">
+          <h2>Other audio</h2>
+          <div class="field">
+            <label><input id="dim-audio" type="checkbox" /> Dim other audio while dictating</label>
+            <p class="hint">Music and other apps play quieter while you dictate, then return to their volume. Nothing is paused.</p>
+          </div>
+          <div class="field">
+            <label for="dim-level">Their volume while dictating (%)</label>
+            <input id="dim-level" type="number" min="10" max="90" step="10" inputmode="numeric" />
+            <p class="hint">10–90 % of each app's own volume. 50 % is about half as loud as you set it.</p>
+          </div>
+        </section>
+
+        <section class="card">
           <h2>Vocabulary</h2>
           <div class="field">
             <label for="vocabulary">Names and terms</label>

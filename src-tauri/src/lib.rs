@@ -3,6 +3,7 @@ use tauri::Manager;
 mod bench;
 pub mod clip;
 mod commands;
+pub mod dim;
 pub mod failure;
 mod flow;
 pub mod history;
@@ -63,6 +64,10 @@ pub fn run() {
                 settings::Settings::default()
             });
             models::setup(app.handle(), &config)?;
+            // Undoes a dim left by a crash, off the main thread.
+            if let Ok(dir) = app.path().app_config_dir() {
+                dim::setup(&dir);
+            }
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
             app.manage(bench::BenchSession::default());
@@ -105,6 +110,7 @@ pub fn run() {
         .expect("failed to build Parla")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                dim::shutdown();
                 if let Some(stats) = app.try_state::<stats::StatsStore>() {
                     if let Err(error) = stats.flush() {
                         eprintln!("Stats shutdown flush failed: {error}");

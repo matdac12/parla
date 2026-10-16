@@ -13,6 +13,8 @@ interface Settings {
   live_captions: boolean;
   vocabulary: string[];
   local_model: string;
+  dim_other_audio: boolean;
+  dim_audio_level: number;
   providers: Record<string, Record<string, unknown>>;
 }
 
@@ -106,6 +108,8 @@ const els = {
   streaming: byId<HTMLInputElement>("streaming-enabled"),
   vocabulary: byId<HTMLTextAreaElement>("vocabulary"),
   liveCaptions: byId<HTMLInputElement>("live-captions"),
+  dimAudio: byId<HTMLInputElement>("dim-audio"),
+  dimLevel: byId<HTMLInputElement>("dim-level"),
   status: byId<HTMLSpanElement>("status"),
   save: byId<HTMLButtonElement>("save"),
 };
@@ -653,6 +657,18 @@ function wireForm(): void {
     state.settings.live_captions = els.liveCaptions.checked;
     updateDirty();
   });
+  els.dimAudio.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.dim_other_audio = els.dimAudio.checked;
+    els.dimLevel.disabled = !els.dimAudio.checked;
+    updateDirty();
+  });
+  els.dimLevel.addEventListener("input", () => {
+    if (!state.settings) return;
+    const value = Number.parseInt(els.dimLevel.value, 10);
+    if (Number.isFinite(value)) state.settings.dim_audio_level = Math.min(90, Math.max(10, value));
+    updateDirty();
+  });
   els.form.addEventListener("submit", (event) => {
     event.preventDefault();
     void save();
@@ -675,6 +691,9 @@ async function main(): Promise<void> {
     els.pasteCompatibility.checked = settings.paste_compatibility_mode;
     els.streaming.checked = settings.streaming_enabled;
     els.liveCaptions.checked = settings.live_captions;
+    els.dimAudio.checked = settings.dim_other_audio;
+    els.dimLevel.value = String(settings.dim_audio_level);
+    els.dimLevel.disabled = !settings.dim_other_audio;
     els.vocabulary.value = settings.vocabulary.join("\n");
     renderProviderRadios();
     renderProviderConfig();
