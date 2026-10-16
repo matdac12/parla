@@ -1,6 +1,6 @@
 # Parla local-model bench: Parla's current ONNX path vs transcribe-cpp GGUF.
 # Run from this folder:  powershell -ExecutionPolicy Bypass -File .\run-bench.ps1
-# First run downloads ~2.6 GB of models into .\models. Close other heavy apps;
+# First run downloads ~4.6 GB of models into .\models. Close other heavy apps;
 # plug in the charger. Results: .\results\summary.txt
 param([switch]$SkipStream)
 $ErrorActionPreference = 'Continue'
@@ -24,12 +24,21 @@ foreach ($f in 'encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx', 'nemo
 $hc = 'https://huggingface.co/handy-computer'
 Get-Model "$hc/parakeet-ultra-gguf/resolve/main/parakeet-ultra-Q8_0.gguf" "$models\ultra-Q8_0.gguf"
 Get-Model "$hc/parakeet-ultra-gguf/resolve/main/parakeet-ultra-Q4_K_M.gguf" "$models\ultra-Q4_K_M.gguf"
+# English-only candidates (the "English only" option).
+foreach ($f in 'encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx', 'nemo128.onnx', 'vocab.txt') {
+    New-Item -ItemType Directory -Force -Path "$models\onnx-v2" | Out-Null
+    Get-Model "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/$f" "$models\onnx-v2\$f"
+}
+Get-Model "$hc/parakeet-tdt-0.6b-v2-gguf/resolve/main/parakeet-tdt-0.6b-v2-Q8_0.gguf" "$models\v2-Q8_0.gguf"
+Get-Model "$hc/parakeet-unified-en-0.6b-gguf/resolve/main/parakeet-unified-en-0.6b-Q8_0.gguf" "$models\unified-en-Q8_0.gguf"
 if (-not $SkipStream) {
     Get-Model "$hc/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf" "$models\nemo35-Q8_0.gguf"
 }
 
 $static = Join-Path $root 'static\asr-bench.exe'
 $dl = Join-Path $root 'dl\asr-bench.exe'
+$vk = Join-Path $root 'vk\asr-bench.exe'
+$hasVk = Test-Path $vk
 function Run($exe, $name, $mode, $model, $arg, $lang, $tail) {
     $wavs = @((Get-ChildItem "$root\data\$lang\*.wav").FullName)
     $env:OUT = Join-Path $results "$name-$lang.tsv"
@@ -48,13 +57,25 @@ foreach ($lang in 'it', 'en') {
     Run $static 'tail-onnx-v3' onnx "$models\onnx-v3" '-' $lang '4.5'
     Run $dl 'tail-dl-ultra-q8' gguf "$models\ultra-Q8_0.gguf" '-' $lang '4.5'
     Run $dl 'tail-dl-ultra-q4km' gguf "$models\ultra-Q4_K_M.gguf" '-' $lang '4.5'
+    Run $static 'tail-static-ultra-q8' gguf "$models\ultra-Q8_0.gguf" '-' $lang '4.5'
+    if ($hasVk) {
+        Run $vk 'vk-ultra-q8' gguf "$models\ultra-Q8_0.gguf" '-' $lang
+        Run $vk 'tail-vk-ultra-q8' gguf "$models\ultra-Q8_0.gguf" '-' $lang '4.5'
+    }
+    if ($lang -eq 'en') {
+        Run $static 'en-onnx-v2' onnx "$models\onnx-v2" '-' $lang
+        Run $dl 'en-dl-v2-q8' gguf "$models\v2-Q8_0.gguf" '-' $lang
+        Run $dl 'en-dl-unified-q8' gguf "$models\unified-en-Q8_0.gguf" '-' $lang
+        Run $static 'tail-en-onnx-v2' onnx "$models\onnx-v2" '-' $lang '4.5'
+        Run $dl 'tail-en-dl-v2-q8' gguf "$models\v2-Q8_0.gguf" '-' $lang '4.5'
+    }
 }
 Remove-Item Env:OUT, Env:TAIL_S -ErrorAction SilentlyContinue
 $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1)
 $summary = @("CPU: $($cpu.Name) ($($cpu.NumberOfCores) cores, $($cpu.NumberOfLogicalProcessors) threads)")
 foreach ($lang in 'it', 'en') {
     $files = @((Get-ChildItem "$results\*-$lang.tsv").FullName)
-    $summary += "== $lang (WER; p50/p90 = key-up ms per clip, finalize for stream-*)"
+    $summary += "== $lang (WER; p50/p90 = key-up ms per clip, finalize() for stream-*; tail-* rows: latency only, their WER is meaningless)"
     $summary += & $static score "$root\data\$lang\refs.tsv" @files 2>$null
 }
 $summary | Set-Content -Encoding ascii (Join-Path $results 'summary.txt')

@@ -13,11 +13,17 @@ ort = "=2.0.0-rc.12"
 ort-sys = "=2.0.0-rc.12"
 transcribe-cpp = { version = "0.4.0", default-features = false }
 hound = "3.5"
+# `fleurs` mode: fetch FLEURS test clips without Python.
+ureq = "3"
+flate2 = "1"
+tar = "0.4"
 
 [features]
 # Handy's Windows x64 posture: ggml CPU backend as one DLL per ISA tier, picked
 # at runtime (GGML_CPU_ALL_VARIANTS), instead of tuning to the build machine.
 dl = ["transcribe-cpp/dynamic-backends"]
+# dl + the Vulkan GPU backend (Intel Iris Xe etc.); needs the Vulkan SDK to build.
+vk = ["dl", "transcribe-cpp/vulkan"]
 
 [profile.release]
 debug = false

@@ -163,6 +163,38 @@ fn score(refs: &str, results: &[String]) {
     }
 }
 
+/// fleurs <lang> <n> <dir>: first n FLEURS test clips (google/fleurs, CC BY 4.0)
+/// plus refs.tsv ("<file>\t<raw>\t<normalized>"), streamed from the archive.
+fn fleurs(lang: &str, n: usize, dir: &str) {
+    let base = format!("https://huggingface.co/datasets/google/fleurs/resolve/main/data/{lang}");
+    let tsv = ureq::get(&format!("{base}/test.tsv")).call().unwrap().body_mut().read_to_string().unwrap();
+    let refs: std::collections::HashMap<&str, (&str, &str)> = tsv
+        .lines()
+        .filter_map(|l| {
+            let p: Vec<&str> = l.split('\t').collect();
+            (p.len() > 3).then(|| (p[1], (p[2], p[3])))
+        })
+        .collect();
+    std::fs::create_dir_all(dir).unwrap();
+    let archive = ureq::get(&format!("{base}/audio/test.tar.gz")).call().unwrap();
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive.into_body().into_reader()));
+    let mut list = String::new();
+    let mut got = 0;
+    for entry in tar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let file = entry.path().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        let Some((raw, norm)) = refs.get(file.as_str()) else { continue };
+        entry.unpack(Path::new(dir).join(&file)).unwrap();
+        list.push_str(&format!("{file}\t{raw}\t{norm}\n"));
+        got += 1;
+        if got == n {
+            break;
+        }
+    }
+    std::fs::write(Path::new(dir).join("refs.tsv"), list).unwrap();
+    eprintln!("{lang}: {got} clips");
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a[1].as_str() {
@@ -170,6 +202,7 @@ fn main() {
         "gguf" => gguf(&a[2], &a[3], &a[4..], false),
         "stream" => gguf(&a[2], &a[3], &a[4..], true),
         "score" => score(&a[2], &a[3..]),
+        "fleurs" => fleurs(&a[2], a[3].parse().unwrap(), &a[4]),
         other => panic!("unknown mode {other}"),
     }
 }

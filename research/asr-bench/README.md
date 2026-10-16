@@ -9,6 +9,6 @@ latest "ASR bench (research)" run, extract it, and run
 
     powershell -ExecutionPolicy Bypass -File .\run-bench.ps1
 
-The first run downloads about 2.6 GB of models. It takes 10-20 minutes;
+Build it locally with `build-kit.ps1` (see docs/investigations/parla-36/REPORT.md). The first run downloads about 4.6 GB of models. It takes 20-40 minutes;
 `results\summary.txt` has WER and per-clip key-up latency for every config.
 `-SkipStream` skips Nemotron.
