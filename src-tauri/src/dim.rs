@@ -17,9 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Each session plays at this percent of its volume while dictating: 50 %
-/// amplitude is about -6 dB, clearly lower yet still present.
-pub const DEFAULT_LEVEL_PERCENT: u8 = 50;
+/// Each session plays at this percent of its volume while dictating: 30 %
+/// amplitude is about -10 dB, half as loud to the ear yet still present.
+/// Mattia's pick by ear (16/10); 50 % was too little.
+pub const DEFAULT_LEVEL_PERCENT: u8 = 30;
 /// Fade length each way: short enough to finish before the first word, long
 /// enough not to sound like a cut.
 const FADE: Duration = Duration::from_millis(120);
@@ -797,7 +798,7 @@ mod tests {
 
     #[test]
     fn level_is_clamped_and_never_mutes() {
-        assert_eq!(level(DEFAULT_LEVEL_PERCENT), 0.5);
+        assert_eq!(level(DEFAULT_LEVEL_PERCENT), 0.3);
         assert_eq!(level(0), 0.1);
         assert_eq!(level(100), 0.9);
     }
