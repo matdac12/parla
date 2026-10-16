@@ -36,8 +36,13 @@ jobs:
           New-Item -ItemType Directory -Path $staging -Force | Out-Null
           # transcribe-cpp links statically: parla.exe is the whole app.
           Copy-Item (Join-Path $release 'parla.exe') $staging
-          $dlls = @(Get-ChildItem -Path $release -Filter '*.dll' -File)
-          if ($dlls.Count -gt 0) { throw "Unexpected runtime DLLs: $($dlls.Name -join ', ')" }
+          # target/ may hold stale ONNX DLLs restored from main's cache, so check
+          # what the executable actually imports instead of the folder contents.
+          $dumpbin = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter dumpbin.exe |
+            Where-Object FullName -like '*Hostx64\x64*' | Select-Object -First 1
+          $imports = & $dumpbin.FullName /nologo /dependents (Join-Path $staging 'parla.exe') | Out-String
+          $imports
+          if ($imports -match '(?i)onnxruntime|directml') { throw 'parla.exe still imports ONNX Runtime' }
           "parla.exe: {0:N1} MB" -f ((Get-Item (Join-Path $staging 'parla.exe')).Length / 1MB)
       - uses: actions/upload-artifact@v4
         with:
