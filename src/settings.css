@@ -75,6 +75,13 @@ button.capturing { background: var(--warning); color: #fff; border-color: var(--
 .progress { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 0.6rem 0; }
 .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width 150ms ease; }
 .model-status { margin: 0 0 0.5rem; color: var(--text-2); }
+.model-list { margin-bottom: 0.6rem; }
+.model-option { align-items: center; }
+.model-option input { margin-top: 0; }
+.model-option .provider-option-body { flex: 1; }
+.model-meta { color: var(--text-3); font-size: 0.85rem; }
+.model-download { padding: 0.3rem 0.75rem; font-size: 0.85rem; }
+.model-override { margin-top: 1rem; }
 .model-status.error { color: var(--danger); }
 
 .actions {

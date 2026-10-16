@@ -4,7 +4,7 @@ Parla is a Windows dictation app where speed comes first: hold **Ctrl+Alt** to
 talk, or tap **Ctrl+Alt+Space** to lock hands-free recording, and the raw
 transcript is pasted into the focused app. It records the microphone while you
 talk, transcribes during recording through OpenAI or xAI Grok (or locally with
-Parakeet V3, phrase by phrase at your pauses), shows a small pill on screen (live level meter, spinner
+Parakeet v3 or Ultra, phrase by phrase at your pauses), shows a small pill on screen (live level meter, spinner
 while transcribing, then a check), and appends per-stage latency to a local
 history so providers can be compared on your own voice and network. See the [v0 design spec](docs/superpowers/specs/2026-10-14-parla-design.md).
 
@@ -151,7 +151,7 @@ The tray menu contains, in order:
 
 - **Open Parla** — shows or focuses the main window.
 - **Settings…** — opens the main window on its settings view (providers, keys,
-  hotkey, restore delay, Parakeet model).
+  hotkey, restore delay, Parakeet model and local model choice).
 - **History…** — shows the latency log window (per-stage timings; see
   [History](#history)).
 - **Benchmark…** — shows the benchmark window.
@@ -231,6 +231,7 @@ defaults. Example:
   "hotkey": "Ctrl+Alt+Space",
   "restore_delay_ms": 250,
   "paste_compatibility_mode": false,
+  "local_model": "parakeet-v3",
   "providers": {
     "openai": {
       "api_key": "YOUR_OPENAI_API_KEY",
@@ -288,12 +289,37 @@ connect timeout and a 30 s total request timeout, and neither retries
 automatically. There is no local latency comparison yet; set a different model
 to benchmark alternatives (for example `gpt-4o-mini-transcribe`).
 
-## Local model (Parakeet V3)
+## Local model (Parakeet v3 or Parakeet Ultra)
 
-Choose **Parakeet V3 (local)** in Settings and click **Download model**
-(progress is shown inline). The one-time download needs internet; afterwards
-transcription runs on your CPU with no API key or network. The provider is
-unavailable until all four files are present at their expected sizes.
+Choose **Parakeet (local)** in Settings, then pick the **Local model**:
+
+- **Parakeet v3** (default): NVIDIA's Parakeet TDT 0.6B v3, the model Parla
+  has always used.
+- **Parakeet Ultra**: [moondream/parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra),
+  a post-trained v3 (same architecture, tokenizer and 25 languages), as the
+  [Masterx ONNX int8 export](https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/tree/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1)
+  (CC BY 4.0). Same engine, same speed. On 100 FLEURS clips per language
+  (PARLA-36) it was better on English (WER 5.03 vs 5.55) and on Italian
+  sentences without digits (2.78 vs 3.09), slightly worse on Italian overall
+  (3.78 vs 3.39). Like v3's int8 export it can still loop on rare inputs.
+
+Picking a model that is not on disk downloads it first (progress is shown on
+its row, or click **Download**), and Parla switches only once every file is
+verified; until then the previous model keeps working. Switching frees the old
+model and loads the new one in the background, with no restart. Both models
+stay on disk, each in its own folder, so switching back is instant. Missing
+`local_model` in `settings.json` means v3. The one-time download needs
+internet; afterwards transcription runs on your CPU with no API key or network.
+The provider is unavailable until all four files of the selected model are
+present at their expected sizes.
+
+Parakeet Ultra: four files, **670,618,921 bytes** total, stored at
+**`%LOCALAPPDATA%\com.matdac6.parla\models\parakeet-ultra-onnx-int8\`**. The
+encoder, decoder and `vocab.txt` (byte-identical to v3's) come from the Masterx
+revision above; that repo has no preprocessor, so `nemo128.onnx` (a fixed
+mel filterbank, no trained weights) comes from the pinned v3 revision below.
+
+Parakeet v3:
 
 Four files, **670,619,706 bytes** total (about 640 MiB; allow at least 1.4 GB
 free while replacing an existing model), stored at
@@ -340,8 +366,24 @@ Local speed comes from four measures (measured on an i7-1370P laptop):
 
 Thread counts, P-core pinning, and the GGUF/ggml engine that Handy now uses were
 benchmarked too and were not faster on that machine. To use a different
-folder, set `providers.parakeet.model_dir` to an absolute path (`null` uses the
-default) and set `active_provider` to `"parakeet"`.
+folder for v3, set `providers.parakeet.model_dir` to an absolute path (`null`
+uses the default) and set `active_provider` to `"parakeet"`;
+`providers.parakeet.ultra_model_dir` does the same for Ultra. Each override
+applies only to its own model, so an Ultra download never replaces v3 files.
+
+To compare the two models on your own recordings (16 kHz mono WAVs; text, WER
+against an optional reference, ms per clip and ms for the last 4.5 s, which is
+about Parla's key-up cost), run from `src-tauri`:
+
+```powershell
+cargo run --release --example compare_models -- --list refs.tsv more.wav
+```
+
+`refs.tsv` holds `path<TAB>lang<TAB>reference` lines (`lang` is `it`, `en` or
+`mixed`; it picks the language for spelling out digits in the "num" WER).
+`--fleurs <dir>` reads a FLEURS folder with `refs.tsv`, `--runs N` repeats the
+timing, and `--tsv out.tsv` saves every row. Timings need an otherwise idle
+machine.
 
 The Windows CI artifact bundles `parla.exe` and the ONNX Runtime companion DLLs.
 ONNX Runtime is statically linked from `ort`'s prebuilt CPU binaries; the
@@ -349,10 +391,12 @@ prebuilt Windows runtime links DirectML even for CPU inference, so `DirectML.dll
 is a load-time requirement and must sit beside `parla.exe`. No model is bundled,
 committed, or downloaded by CI.
 
-Optional inference smoke test: set `PARLA_PARAKEET_MODEL_DIR` to an installed
-model folder and run `cargo test provider::parakeet::tests::live_fixture` from
-`src-tauri`; without the variable the test skips. A network download test is
-available with `PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` and
+Optional inference smoke test: set `PARLA_PARAKEET_MODEL_DIR` (v3) and/or
+`PARLA_PARAKEET_ULTRA_MODEL_DIR` to an installed model folder and run
+`cargo test provider::parakeet::tests::live_fixture` from `src-tauri`; without
+the variables the test skips. A network download test is available with
+`PARLA_PARAKEET_DOWNLOAD_DIR=<new folder>` (v3) and/or
+`PARLA_PARAKEET_ULTRA_DOWNLOAD_DIR=<new folder>` and
 `cargo test models::tests::live_download_only_when_explicitly_requested`.
 To compare whole-clip and phrase-by-phrase transcripts and timings on your own
 recordings, also set `PARLA_LIVE_CLIPS` to a folder of 16 kHz mono WAVs and run
@@ -513,8 +557,8 @@ tests are gated by environment variables and skip when absent:
 
 - `OPENAI_API_KEY` — `cargo test --test openai_live`
 - `XAI_API_KEY` — `cargo test --test xai_live`
-- `PARLA_PARAKEET_MODEL_DIR` — `cargo test provider::parakeet::tests::live_fixture`
-- `PARLA_PARAKEET_DOWNLOAD_DIR` — `cargo test models::tests::live_download_only_when_explicitly_requested`
+- `PARLA_PARAKEET_MODEL_DIR` / `PARLA_PARAKEET_ULTRA_MODEL_DIR` — `cargo test provider::parakeet::tests::live_fixture`
+- `PARLA_PARAKEET_DOWNLOAD_DIR` / `PARLA_PARAKEET_ULTRA_DOWNLOAD_DIR` — `cargo test models::tests::live_download_only_when_explicitly_requested`
 - `PARLA_PARAKEET_MODEL_DIR` + `PARLA_LIVE_CLIPS` — `cargo test --release --lib live_clips -- --nocapture`
 
 CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and

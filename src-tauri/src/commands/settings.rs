@@ -1,4 +1,4 @@
-use crate::settings::{self, Settings, SharedSettings};
+use crate::settings::{self, LocalModel, Settings, SharedSettings};
 use tauri::Manager;
 
 #[tauri::command]
@@ -36,7 +36,7 @@ pub async fn save_settings(
         let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
         let shared = app.state::<SharedSettings>();
         let path = settings::path(&app)?;
-        let previous = active_provider(&shared)?;
+        let previous = snapshot(&shared)?;
         let saved = save_with(
             &shared,
             settings,
@@ -58,7 +58,7 @@ pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), St
         let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
         let shared = app.state::<SharedSettings>();
         let path = settings::path(&app)?;
-        let previous = active_provider(&shared)?;
+        let previous = snapshot(&shared)?;
         select_provider_with(&shared, &id, |value| settings::save(&path, value))?;
         sync_model_residency(&shared, &previous);
         Ok(())
@@ -67,22 +67,62 @@ pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), St
     .map_err(|e| e.to_string())?
 }
 
-fn active_provider(shared: &SharedSettings) -> Result<String, String> {
-    Ok(shared
-        .read()
-        .map_err(|_| "Settings lock poisoned")?
-        .active_provider
-        .clone())
+/// Picks the local model. A model that is not on disk is downloaded first
+/// (with the usual progress events), so the provider never points at missing
+/// files. Resolves with the model selected afterwards: a later selection made
+/// during the download wins over this one.
+#[tauri::command]
+pub async fn select_model(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let model = LocalModel::from_id(&id).ok_or("Unknown local model")?;
+        let selection = crate::models::begin_selection();
+        let shared = app.state::<SharedSettings>();
+        let current = snapshot(&shared)?;
+        if !crate::models::status(model.id(), &current)?.available {
+            crate::models::download(&app, model.id(), &current, false)?;
+        }
+        // The download ran without SaveLock, so other saves were not blocked.
+        let serial = app.state::<SaveLock>();
+        let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
+        let previous = snapshot(&shared)?;
+        if crate::models::selection_current(selection) {
+            let path = settings::path(&app)?;
+            select_model_with(&shared, model, |value| settings::save(&path, value))?;
+            sync_model_residency(&shared, &previous);
+        }
+        Ok(snapshot(&shared)?.local_model.id().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// Loads or frees the local model when the active provider changes.
-fn sync_model_residency(shared: &SharedSettings, previous: &str) {
+fn snapshot(shared: &SharedSettings) -> Result<Settings, String> {
+    Ok(shared.read().map_err(|_| "Settings lock poisoned")?.clone())
+}
+
+/// Loads or frees the local model when the active provider changes, and
+/// swaps it when the local model changes.
+fn sync_model_residency(shared: &SharedSettings, previous: &Settings) {
     let Ok(current) = shared.read().map(|s| s.clone()) else {
         return;
     };
-    if current.active_provider != previous {
+    if current.local_model != previous.local_model {
+        crate::provider::parakeet::reload(&current);
+    } else if current.active_provider != previous.active_provider {
         crate::provider::parakeet::sync_residency(&current);
     }
+}
+
+// Caller holds SaveLock. Like select_provider_with, only the model choice
+// changes; unfinished settings-form edits never cross this boundary.
+fn select_model_with(
+    shared: &std::sync::RwLock<Settings>,
+    model: LocalModel,
+    persist: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut requested = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
+    requested.local_model = model;
+    save_with(shared, requested, persist, |_| Ok(())).map(|_| ())
 }
 
 // Caller holds SaveLock. Update only the persisted provider choice; unfinished
@@ -176,6 +216,44 @@ mod tests {
             "must reject unknown providers"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn model_selection_persists_only_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let initial = Settings {
+            active_provider: "parakeet".into(),
+            vocabulary: vec!["Traccia".into()],
+            ..Settings::default()
+        };
+        let shared = RwLock::new(initial.clone());
+        select_model_with(&shared, LocalModel::ParakeetUltra, |value| {
+            settings::save(&path, value)
+        })
+        .unwrap();
+        let reloaded = settings::load(&path).unwrap();
+        assert_eq!(reloaded.local_model, LocalModel::ParakeetUltra);
+        assert_eq!(
+            shared.read().unwrap().local_model,
+            LocalModel::ParakeetUltra
+        );
+        let expected = Settings {
+            local_model: LocalModel::ParakeetUltra,
+            ..initial
+        };
+        assert_eq!(
+            serde_json::to_value(reloaded).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert!(
+            select_model_with(&shared, LocalModel::ParakeetV3, |_| Err("disk full".into()))
+                .is_err()
+        );
+        assert_eq!(
+            shared.read().unwrap().local_model,
+            LocalModel::ParakeetUltra
+        );
     }
 
     #[test]

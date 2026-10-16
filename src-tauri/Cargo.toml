@@ -49,3 +49,8 @@ arboard = { version = "3", default-features = false }
 # Already in the tree via wry; used to lower the hidden overlay's memory target.
 webview2-com = "0.39"
 windows-core = "0.62"
+
+[[example]]
+name = "compare_models"
+# Run its WER and number-spelling unit tests with `cargo test`.
+test = true

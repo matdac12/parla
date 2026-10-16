@@ -17,7 +17,40 @@ pub struct Settings {
     pub streaming_enabled: bool,
     pub live_captions: bool,
     pub vocabulary: Vec<String>,
+    /// Which Parakeet export the local provider runs. Missing means v3.
+    pub local_model: LocalModel,
     pub providers: BTreeMap<String, serde_json::Value>,
+}
+
+/// The local Parakeet exports Parla can run on the same engine (see models.rs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocalModel {
+    #[default]
+    ParakeetV3,
+    ParakeetUltra,
+}
+
+/// An unknown value (e.g. written by a newer Parla) means v3, so the rest of
+/// settings.json still loads.
+impl<'de> Deserialize<'de> for LocalModel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().and_then(Self::from_id).unwrap_or_default())
+    }
+}
+
+impl LocalModel {
+    pub const ALL: [Self; 2] = [Self::ParakeetV3, Self::ParakeetUltra];
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::ParakeetV3 => "parakeet-v3",
+            Self::ParakeetUltra => "parakeet-ultra",
+        }
+    }
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|model| model.id() == id)
+    }
 }
 
 impl Default for Settings {
@@ -30,6 +63,7 @@ impl Default for Settings {
             streaming_enabled: true,
             live_captions: true,
             vocabulary: Vec::new(),
+            local_model: LocalModel::default(),
             providers: BTreeMap::new(),
         }
     }
@@ -115,6 +149,30 @@ mod vocabulary_tests {
             serde_json::json!([])
         );
         assert_eq!(s.providers["future"]["api_key"], "test");
+    }
+    #[test]
+    fn local_model_defaults_to_v3_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"active_provider":"parakeet"}"#).unwrap();
+        assert_eq!(old.local_model, LocalModel::ParakeetV3);
+        for unknown in [r#""parakeet-next""#, "null", "3"] {
+            let future: Settings =
+                serde_json::from_str(&format!(r#"{{"local_model":{unknown},"hotkey":"F9"}}"#))
+                    .unwrap();
+            assert_eq!(future.local_model, LocalModel::ParakeetV3);
+            assert_eq!(future.hotkey, "F9");
+        }
+        for model in LocalModel::ALL {
+            let json = serde_json::to_value(Settings {
+                local_model: model,
+                ..Settings::default()
+            })
+            .unwrap();
+            assert_eq!(json["local_model"], model.id());
+            let back: Settings = serde_json::from_value(json).unwrap();
+            assert_eq!(back.local_model, model);
+            assert_eq!(LocalModel::from_id(model.id()), Some(model));
+        }
+        assert_eq!(LocalModel::from_id("parakeet"), None);
     }
 }
 

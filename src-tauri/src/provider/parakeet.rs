@@ -23,7 +23,11 @@ use transcribe_rs::onnx::{
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ParakeetConfig {
+    /// Overrides the Parakeet v3 folder.
     pub model_dir: Option<PathBuf>,
+    /// Overrides the Parakeet Ultra folder (tests and the comparison example).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ultra_model_dir: Option<PathBuf>,
 }
 
 struct CachedModel {
@@ -39,7 +43,7 @@ fn with_model<T>(
     use_model: impl FnOnce(&mut ParakeetModel) -> Result<T, ProviderError>,
 ) -> Result<T, ProviderError> {
     let dir = models::model_dir(settings).map_err(ProviderError::MissingConfig)?;
-    if !models::available(&dir) {
+    if !models::available(settings.local_model, &dir) {
         return Err(ProviderError::MissingConfig("model not downloaded".into()));
     }
     let dir = dir
@@ -49,7 +53,8 @@ fn with_model<T>(
         .lock()
         .map_err(|_| ProviderError::Other("Parakeet model lock poisoned".into()))?;
     // Registry lookups create new provider objects. The engine therefore lives
-    // at process scope, and settings changes reload only when the directory changes.
+    // at process scope, and settings changes reload only when the directory
+    // changes, which includes switching between v3 and Ultra.
     if cached.as_ref().is_none_or(|entry| entry.dir != dir) {
         let model = load(&dir)?;
         *cached = Some(CachedModel { dir, model });
@@ -78,6 +83,13 @@ fn release_when_idle(use_id: u64) {
                 release();
             }
         });
+}
+
+/// Switches models: frees the old one first, so v3 and Ultra (~700 MB each)
+/// are never resident together, then warms the selected one if Parakeet is active.
+pub fn reload(settings: &Settings) {
+    release();
+    sync_residency(settings);
 }
 
 /// Drops the cached model (~700 MB resident) until it is next needed.
@@ -186,10 +198,12 @@ impl SttProvider for Parakeet {
         "parakeet"
     }
     fn display_name(&self) -> &'static str {
-        "Parakeet V3 (local)"
+        "Parakeet (local)"
     }
     fn availability(&self, settings: &Settings) -> Availability {
-        if models::model_dir(settings).is_ok_and(|dir| models::available(&dir)) {
+        if models::model_dir(settings)
+            .is_ok_and(|dir| models::available(settings.local_model, &dir))
+        {
             Availability::Available
         } else {
             Availability::Unavailable("model not downloaded".into())
@@ -232,14 +246,14 @@ mod tests {
             Parakeet.availability(&settings),
             Availability::Unavailable("model not downloaded".into())
         );
-        for file in crate::models::FILES {
+        for file in crate::models::V3.files {
             std::fs::write(dir.path().join(file.name), b"partial").unwrap();
         }
         assert!(matches!(
             Parakeet.availability(&settings),
             Availability::Unavailable(_)
         ));
-        for file in crate::models::FILES {
+        for file in crate::models::V3.files {
             // Sparse files test the size check without allocating a model on disk.
             std::fs::File::create(dir.path().join(file.name))
                 .unwrap()
@@ -247,7 +261,16 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(Parakeet.availability(&settings), Availability::Available);
-        std::fs::write(dir.path().join(crate::models::FILES[0].name), b"").unwrap();
+        // Ultra has its own folder and file sizes, so the v3 files do not count.
+        let ultra = Settings {
+            local_model: crate::settings::LocalModel::ParakeetUltra,
+            ..settings.clone()
+        };
+        assert!(matches!(
+            Parakeet.availability(&ultra),
+            Availability::Unavailable(_)
+        ));
+        std::fs::write(dir.path().join(crate::models::V3.files[0].name), b"").unwrap();
         assert!(matches!(
             Parakeet.availability(&settings),
             Availability::Unavailable(_)
@@ -255,19 +278,36 @@ mod tests {
     }
     #[test]
     fn live_fixture_when_model_dir_is_provided() {
-        let Ok(dir) = std::env::var("PARLA_PARAKEET_MODEL_DIR") else {
-            return;
-        };
-        let mut settings = Settings::default();
-        settings
-            .providers
-            .insert("parakeet".into(), serde_json::json!({"model_dir":dir}));
-        let bytes = include_bytes!("../../tests/fixtures/hello.wav");
-        let clip = Clip::from_wav_bytes(bytes).unwrap();
-        assert!(!Parakeet
-            .transcribe(&clip, &settings)
-            .unwrap()
-            .trim()
-            .is_empty());
+        use crate::settings::LocalModel;
+        for (variable, model, key) in [
+            (
+                "PARLA_PARAKEET_MODEL_DIR",
+                LocalModel::ParakeetV3,
+                "model_dir",
+            ),
+            (
+                "PARLA_PARAKEET_ULTRA_MODEL_DIR",
+                LocalModel::ParakeetUltra,
+                "ultra_model_dir",
+            ),
+        ] {
+            let Ok(dir) = std::env::var(variable) else {
+                continue;
+            };
+            let mut settings = Settings {
+                local_model: model,
+                ..Settings::default()
+            };
+            settings
+                .providers
+                .insert("parakeet".into(), serde_json::json!({ key: dir }));
+            let bytes = include_bytes!("../../tests/fixtures/hello.wav");
+            let clip = Clip::from_wav_bytes(bytes).unwrap();
+            assert!(!Parakeet
+                .transcribe(&clip, &settings)
+                .unwrap()
+                .trim()
+                .is_empty());
+        }
     }
 }
