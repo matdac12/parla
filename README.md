@@ -190,7 +190,7 @@ arrives within 120 seconds of capture starting, Parla stops and transcribes the
 clip anyway. Before pasting, Parla saves any nonempty text clipboard; after the
 paste and a delay it restores that text (best effort). The transcript is raw: no
 filler removal or rewriting.
-Pasting uses a 25 ms clipboard settle delay and a 25 ms modifier hold.
+Pasting uses a 15 ms clipboard settle delay and a 25 ms modifier hold.
 Enable **Paste compatibility mode** in Settings to use the original 100 ms
 delays for apps that need them. The separate clipboard restore delay is unchanged.
 

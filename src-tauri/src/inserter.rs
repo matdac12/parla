@@ -9,6 +9,17 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_RESTORE_DELAY_MS: u64 = 250;
 
+/// Lets clipboard listeners (Win+V, clipboard managers) release the clipboard
+/// before Ctrl+V. 15 ms measured no more contention than 25 ms (PARLA-45).
+#[cfg(any(windows, test))]
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(15);
+/// Ctrl stays down after V; it runs after the paste, off the visible path.
+#[cfg(any(windows, test))]
+const PASTE_KEY_HOLD: Duration = Duration::from_millis(25);
+/// Compatibility mode uses this for both the settle and the key-hold.
+#[cfg(any(windows, test))]
+const COMPATIBILITY_WAIT: Duration = Duration::from_millis(100);
+
 /// Blocking desktop IO: call from the flow worker, never a shortcut callback.
 /// Only nonempty text is saved. Non-text formats are replaced, not restored.
 /// Returns right after the paste; `parla-clipboard-restore` restores the
@@ -147,9 +158,13 @@ fn paste_deferring_restore(
         _ => current,
     };
     desktop.write_text(text)?;
-    let settle = Duration::from_millis(if compatibility_mode { 100 } else { 25 });
+    let (settle, key_hold) = if compatibility_mode {
+        (COMPATIBILITY_WAIT, COMPATIBILITY_WAIT)
+    } else {
+        (CLIPBOARD_SETTLE, PASTE_KEY_HOLD)
+    };
     desktop.wait(settle);
-    let result = desktop.send_paste(settle);
+    let result = desktop.send_paste(key_hold);
     // Always attempt restoration, even if input injection failed.
     *pending = saved.map(|saved| PendingRestore {
         saved,
@@ -400,7 +415,7 @@ mod tests {
         let delay = Duration::from_millis(250);
         let before = Instant::now();
         paste_deferring_restore(&mut desktop, &mut pending, "new", delay, false).unwrap();
-        assert_eq!(desktop.waits, [Duration::from_millis(25)]);
+        assert_eq!(desktop.waits, [Duration::from_millis(15)]);
         assert_eq!(desktop.text.as_deref(), Some("new"));
         let restore = pending.as_ref().unwrap();
         assert_eq!(restore.saved, "old");
@@ -513,7 +528,7 @@ mod tests {
         assert_eq!(desktop.text.as_deref(), Some("old"));
         assert_eq!(
             desktop.waits,
-            [Duration::from_millis(25), Duration::from_millis(275)]
+            [Duration::from_millis(15), Duration::from_millis(275)]
         );
     }
 
