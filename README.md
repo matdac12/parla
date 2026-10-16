@@ -151,7 +151,8 @@ The tray menu contains, in order:
 
 - **Open Parla** — shows or focuses the main window.
 - **Settings…** — opens the main window on its settings view (providers, keys,
-  hotkey, restore delay, Parakeet model and local model choice).
+  hotkey, restore delay, Parakeet model, local model choice and
+  [dimming other audio](#dimming-other-audio)).
 - **History…** — shows the latency log window (per-stage timings; see
   [History](#history)).
 - **Benchmark…** — shows the benchmark window.
@@ -213,7 +214,27 @@ It never takes focus and ignores the mouse, so pasting still goes to your app.
   disappears.
 
 Parla opens the default input device once at startup and keeps its stream warm,
-so pressing the hotkey has no device-startup latency.
+so pressing the hotkey has no device-startup latency. After 60 s without a
+recording the stream is paused (still open); the next key-down resumes it in
+about a millisecond and first re-checks the default input, reopening it if you
+switched devices meanwhile. Audio from before the pause is dropped, never
+added to the clip.
+
+### Dimming other audio
+
+While you dictate, other apps' audio (music, videos) fades over 120 ms to 30 %
+of its own volume by default (about -10 dB). Nothing is paused and the master volume is
+untouched; only playing sessions on the default output device are dimmed, not
+Parla's own or system sounds. On stop or **Esc** each app fades back to the
+volume it had; an app whose volume you change during the dictation keeps your
+change. Quitting Parla restores at once.
+
+Settings → Other audio has **Dim other audio while dictating** (on by default,
+`dim_other_audio`) and **Their volume while dictating (%)** (10–90, default 30,
+`dim_audio_level`). While dimmed, the original volumes are saved to
+**`%APPDATA%\com.matdac6.parla\dimmed-audio.json`**; if Parla crashes or is
+killed, the next start restores them (unless you moved them since) and deletes
+the file. Dimming is Windows-only.
 
 ## Providers and API keys
 
@@ -232,6 +253,8 @@ defaults. Example:
   "restore_delay_ms": 250,
   "paste_compatibility_mode": false,
   "local_model": "parakeet-v3",
+  "dim_other_audio": true,
+  "dim_audio_level": 30,
   "providers": {
     "openai": {
       "api_key": "YOUR_OPENAI_API_KEY",
@@ -520,7 +543,10 @@ benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by abo
 700 MB (about 1.4 GB working set in total). These are single measurements, not
 benchmarks. Main, history and benchmark windows are now created on demand and
 destroyed on close; the pill stays warm. The recorder drains audio every 10 ms
-while start/stop commands wake it immediately. Model unloading is not implemented.
+while recording and every 100 ms while idle, and start/stop commands wake it
+immediately. After 60 s idle the microphone stream is paused and the recorder
+stops polling: the open microphone was about 94 % of Parla's idle CPU, almost
+all of it in Windows' `audiodg`. Model unloading is not implemented.
 
 ## Development
 
