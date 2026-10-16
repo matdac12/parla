@@ -61,6 +61,7 @@ const MODIFIER_KEYS: [Code; 8] = [
 struct Registration {
     #[cfg(any(windows, test))]
     keys: std::collections::HashSet<Code>,
+    #[cfg(any(windows, test))]
     chord_active: bool,
     shortcut: Option<Shortcut>,
     hold: HoldState,
