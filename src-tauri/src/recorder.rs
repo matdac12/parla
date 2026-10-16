@@ -504,13 +504,29 @@ struct OpenSession {
     rate: u32,
 }
 
-/// Opens the default input device at its OS default format and starts the
-/// stream, returning the session that owns it.
+/// Opens the default input device and starts its stream. CPAL's default device
+/// follows the system default but activates through the Windows thread pool,
+/// which fails with RPC_E_CHANGED_MODE once a pool thread was left in an STA
+/// (CPAL's own device-change callbacks do that). The current default endpoint
+/// opened directly activates on this worker instead.
 fn open_session(shared: &Arc<Shared>) -> Result<OpenSession, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
         .ok_or_else(|| "no default input device".to_owned())?;
+    open_device_session(&device, shared).or_else(|error| {
+        let endpoint = device
+            .id()
+            .ok()
+            .and_then(|id| host.device_by_id(&id))
+            .ok_or_else(|| error.clone())?;
+        open_device_session(&endpoint, shared)
+            .map_err(|fallback| format!("{error}; opening the endpoint directly: {fallback}"))
+    })
+}
+
+/// Opens `device` at its OS default format and starts the stream.
+fn open_device_session(device: &cpal::Device, shared: &Arc<Shared>) -> Result<OpenSession, String> {
     let supported = device
         .default_input_config()
         .map_err(|error| format!("fetching the input config failed: {error}"))?;
@@ -524,16 +540,16 @@ fn open_session(shared: &Arc<Shared>) -> Result<OpenSession, String> {
     let (producer, consumer) = HeapRb::<f32>::new(ring_capacity(rate)).split();
 
     let stream = match sample_format {
-        SampleFormat::I8 => build_stream::<i8>(&device, &config, producer, shared, channels),
-        SampleFormat::I16 => build_stream::<i16>(&device, &config, producer, shared, channels),
-        SampleFormat::I32 => build_stream::<i32>(&device, &config, producer, shared, channels),
-        SampleFormat::I64 => build_stream::<i64>(&device, &config, producer, shared, channels),
-        SampleFormat::U8 => build_stream::<u8>(&device, &config, producer, shared, channels),
-        SampleFormat::U16 => build_stream::<u16>(&device, &config, producer, shared, channels),
-        SampleFormat::U32 => build_stream::<u32>(&device, &config, producer, shared, channels),
-        SampleFormat::U64 => build_stream::<u64>(&device, &config, producer, shared, channels),
-        SampleFormat::F32 => build_stream::<f32>(&device, &config, producer, shared, channels),
-        SampleFormat::F64 => build_stream::<f64>(&device, &config, producer, shared, channels),
+        SampleFormat::I8 => build_stream::<i8>(device, &config, producer, shared, channels),
+        SampleFormat::I16 => build_stream::<i16>(device, &config, producer, shared, channels),
+        SampleFormat::I32 => build_stream::<i32>(device, &config, producer, shared, channels),
+        SampleFormat::I64 => build_stream::<i64>(device, &config, producer, shared, channels),
+        SampleFormat::U8 => build_stream::<u8>(device, &config, producer, shared, channels),
+        SampleFormat::U16 => build_stream::<u16>(device, &config, producer, shared, channels),
+        SampleFormat::U32 => build_stream::<u32>(device, &config, producer, shared, channels),
+        SampleFormat::U64 => build_stream::<u64>(device, &config, producer, shared, channels),
+        SampleFormat::F32 => build_stream::<f32>(device, &config, producer, shared, channels),
+        SampleFormat::F64 => build_stream::<f64>(device, &config, producer, shared, channels),
         other => return Err(format!("unsupported input sample format {other}")),
     }?;
 
@@ -582,12 +598,24 @@ where
             },
             move |error: cpal::Error| {
                 eprintln!("microphone stream error: {error}");
-                error_shared.failed.store(true, Ordering::SeqCst);
-                error_shared.open.store(false, Ordering::SeqCst);
+                if stream_error_is_fatal(error.kind()) {
+                    error_shared.failed.store(true, Ordering::SeqCst);
+                    error_shared.open.store(false, Ordering::SeqCst);
+                }
             },
             None,
         )
         .map_err(|error| format!("building the input stream failed: {error}"))
+}
+
+/// Whether a stream error means the microphone must be reopened. A glitch, a
+/// reroute to the new default device or a refused real-time priority leave the
+/// stream running; reopening for them only delays the next dictation.
+fn stream_error_is_fatal(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied
+    )
 }
 
 /// Converts a device-format buffer to mono f32, appending to `out` (no
@@ -1090,6 +1118,26 @@ mod tests {
     }
 
     #[test]
+    fn only_stream_breaking_errors_force_a_reopen() {
+        use cpal::ErrorKind;
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::DeviceChanged,
+            ErrorKind::RealtimeDenied,
+        ] {
+            assert!(!stream_error_is_fatal(kind), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::StreamInvalidated,
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::BackendError,
+            ErrorKind::Other,
+        ] {
+            assert!(stream_error_is_fatal(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn resampling_at_16k_is_a_passthrough() {
         let input = vec![0.25f32, -0.25, 0.5];
         assert_eq!(resample_to_16k(&input, SAMPLE_RATE), input);
@@ -1132,6 +1180,36 @@ mod tests {
                 .expect("recover at the next recording start");
             let _ = recorder.stop();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opens the default microphone without saving or uploading audio"]
+    fn microphone_opens_after_thread_pool_threads_turn_sta() {
+        use std::ffi::c_void;
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows_sys::Win32::System::Threading::{
+            TrySubmitThreadpoolCallback, PTP_CALLBACK_INSTANCE,
+        };
+
+        // cpal's device notification callbacks call CoInitializeEx(STA) on
+        // the Windows thread pool and never undo it. Do the same to every
+        // pool thread, then open and reopen as the app does.
+        unsafe extern "system" fn taint(_: PTP_CALLBACK_INSTANCE, _: *mut c_void) {
+            unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+            thread::sleep(Duration::from_millis(200));
+        }
+        for _ in 0..64 {
+            assert!(
+                unsafe {
+                    TrySubmitThreadpoolCallback(Some(taint), std::ptr::null_mut(), std::ptr::null())
+                } != 0
+            );
+        }
+        thread::sleep(Duration::from_millis(500));
+
+        let recorder = Recorder::new().expect("open with STA pool threads");
+        recorder.reopen().expect("reopen with STA pool threads");
     }
 
     /// Real hardware check. Run with `cargo test -- --ignored --nocapture`.
