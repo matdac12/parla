@@ -1,7 +1,11 @@
 //! Pre-warmed microphone capture.
 //!
 //! The default input device is opened once, at startup, and its stream is kept
-//! running so pressing the hotkey has no device-startup latency.
+//! running so pressing the hotkey has no device-startup latency. After
+//! [`MIC_IDLE_PAUSE`] without a recording the stream is paused but kept open
+//! (`IAudioClient::Stop`), which removes nearly all of the open microphone's
+//! idle cost, most of it in the Windows audio engine; the next `start` resumes
+//! it in about a millisecond.
 //!
 //! The realtime cpal callback does two things only: convert the device samples
 //! to mono f32 into a reused scratch buffer and push them into a lock-free SPSC
@@ -10,7 +14,9 @@
 //! recording boundary is a generation id carried in the [`Capture`] state, so a
 //! clip can never contain audio from before its `start()`. While idle the
 //! worker keeps the most recent [`PRE_ROLL_MS`] of audio as a pre-roll, so the
-//! first syllable is not clipped.
+//! first syllable is not clipped. A resume has no pre-roll: the ring and the
+//! pre-roll then hold audio from before the pause, which is dropped, as is any
+//! packet WASAPI kept across it (see [`StaleFilter`]).
 //!
 //! Overflow policy: the ring holds [`RING_SECONDS`] of audio. If the consumer
 //! stalls and the ring fills, the callback drops the newest samples for the
@@ -99,7 +105,22 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// While idle, how often the worker retries a failed microphone and checks
 /// whether a directly opened endpoint is still the system default, so a
 /// replugged headset is picked up before the next dictation instead of during it.
+/// Paused, the worker does not poll: the same check runs at resume instead.
 const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Idle time after the last recording before the stream is paused. Long enough
+/// to keep the microphone warm through a burst of dictations (PARLA-28).
+const MIC_IDLE_PAUSE: Duration = Duration::from_secs(60);
+
+/// At resume, blocks captured more than this before the resume are stale. Any
+/// stale block is at least [`MIC_IDLE_PAUSE`] old; the margin only absorbs
+/// clock jitter.
+const STALE_MARGIN: Duration = Duration::from_millis(50);
+
+/// Most audio dropped as stale per resume, in ms. WASAPI keeps at most its
+/// unread packets across a pause (none seen on the EarPods); the cap stops a
+/// driver with bogus capture timestamps from losing more than this.
+const STALE_MAX_MS: usize = 100;
 
 /// Ring capacity, in seconds of device audio. Generous: the worker only needs
 /// to keep up with a 100 ms drain interval.
@@ -183,6 +204,22 @@ struct Shared {
     rate: AtomicU32,
     /// Samples the callback could not push because the ring was full.
     dropped: AtomicU64,
+    /// Stream instant (ns, see [`StaleFilter`]) of the last resume while its
+    /// stale audio may still arrive; 0 once the first fresh block came.
+    resume_at: AtomicU64,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            control: Mutex::new(Control::default()),
+            open: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            rate: AtomicU32::new(SAMPLE_RATE),
+            dropped: AtomicU64::new(0),
+            resume_at: AtomicU64::new(0),
+        }
+    }
 }
 
 /// Commands the worker services while it drains the ring.
@@ -216,20 +253,19 @@ impl Recorder {
     /// Opens the default input device and starts its stream on a worker thread.
     /// Errors when no device can be opened.
     pub fn new() -> Result<Recorder> {
-        let shared = Arc::new(Shared {
-            control: Mutex::new(Control::default()),
-            open: AtomicBool::new(false),
-            failed: AtomicBool::new(false),
-            rate: AtomicU32::new(SAMPLE_RATE),
-            dropped: AtomicU64::new(0),
-        });
+        Self::with_idle_pause(MIC_IDLE_PAUSE)
+    }
+
+    /// [`Recorder::new`] pausing the idle stream after `idle_pause`.
+    fn with_idle_pause(idle_pause: Duration) -> Result<Recorder> {
+        let shared = Arc::new(Shared::default());
 
         let (command_tx, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
             .name("parla-audio".into())
-            .spawn(move || audio_thread(worker_shared, command_rx, ready_tx))
+            .spawn(move || audio_thread(worker_shared, command_rx, ready_tx, idle_pause))
             .context("spawning the audio thread")?;
 
         match ready_rx.recv() {
@@ -249,7 +285,8 @@ impl Recorder {
 
     /// Begins a recording. Errors if one is already in progress, so two callers
     /// (hotkey and the tray test) cannot overwrite each other. Reopens the
-    /// device first if it never opened or was lost.
+    /// device first if it never opened or was lost, and resumes it if it was
+    /// paused while idle.
     pub fn start(&self) -> Result<()> {
         let mut control = self.lock_control();
         if control.active {
@@ -408,6 +445,7 @@ fn audio_thread(
     shared: Arc<Shared>,
     commands: Receiver<Command>,
     ready: Sender<Result<(), String>>,
+    idle_pause: Duration,
 ) {
     #[cfg(windows)]
     let _apartment = match AudioThreadApartment::initialize() {
@@ -440,19 +478,24 @@ fn audio_thread(
     }
     let mut scratch = vec![0.0f32; DRAIN_SCRATCH];
     let mut last_device_check = Instant::now();
+    let mut idle = IdleMic::new(idle_pause, Instant::now());
 
     loop {
         if let Some(session) = session.as_mut() {
             drain(&mut session.consumer, &mut scratch, &mut capture);
         }
 
-        let interval = if capture.active.is_some() {
-            POLL_INTERVAL
-        } else {
-            IDLE_POLL_INTERVAL
+        // Paused, nothing arrives to drain: block until the next command.
+        let received = match idle.wait(capture.active.is_some()) {
+            Some(interval) => commands.recv_timeout(interval),
+            None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
-        match commands.recv_timeout(interval) {
+        match received {
             Ok(Command::Start { generation, ack }) => {
+                if idle.paused {
+                    idle.paused = false;
+                    resume_session(&shared, &mut session, &mut capture, &mut scratch);
+                }
                 start_capture(
                     session.as_mut().map(|session| &mut session.consumer),
                     &mut scratch,
@@ -469,11 +512,14 @@ fn audio_thread(
                 }
                 let samples = capture.finish(generation);
                 let _ = reply.send((generation, samples));
+                idle.active(Instant::now());
             }
             Ok(Command::Subscribe { generation, feed }) => {
                 capture.subscribe(generation, feed, shared.rate.load(Ordering::Acquire));
             }
             Ok(Command::Reopen { ack }) => {
+                // A reopened stream is running, whether or not the old one was paused.
+                idle.paused = false;
                 let _ = ack.send(reopen_session(&shared, &mut session, &mut capture));
             }
             Ok(Command::Shutdown) => {
@@ -490,9 +536,160 @@ fn audio_thread(
                         }
                     }
                 }
+                if idle.pause_due(Instant::now(), capture.active.is_some()) {
+                    // A lost microphone keeps the idle poll so it is reopened.
+                    if let Some(open) = session.as_ref().filter(|_| !stream_lost(&shared)) {
+                        match open.stream.pause() {
+                            Ok(()) => {
+                                idle.paused = true;
+                                eprintln!("microphone: paused after {:?} idle", idle.after);
+                            }
+                            Err(error) => {
+                                // Retry after another idle period, not every poll.
+                                idle.active(Instant::now());
+                                eprintln!("microphone: pause failed: {error}");
+                            }
+                        }
+                    }
+                }
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+/// When the idle stream is paused. Idle time counts from the last recording's
+/// end (or from startup) and only while nothing is being recorded.
+struct IdleMic {
+    after: Duration,
+    since: Instant,
+    paused: bool,
+}
+
+impl IdleMic {
+    fn new(after: Duration, now: Instant) -> Self {
+        Self {
+            after,
+            since: now,
+            paused: false,
+        }
+    }
+
+    /// A recording just ended: the idle period starts again.
+    fn active(&mut self, now: Instant) {
+        self.since = now;
+    }
+
+    fn pause_due(&self, now: Instant, recording: bool) -> bool {
+        !self.paused && !recording && now.saturating_duration_since(self.since) >= self.after
+    }
+
+    /// How long the worker waits for a command before draining again; `None`
+    /// blocks until one arrives.
+    fn wait(&self, recording: bool) -> Option<Duration> {
+        if recording {
+            Some(POLL_INTERVAL)
+        } else if self.paused {
+            None
+        } else {
+            Some(IDLE_POLL_INTERVAL)
+        }
+    }
+}
+
+/// Resumes the paused stream for a recording. Nothing polled the default
+/// device while paused, so check it first, as the idle worker would have:
+/// reopen when the stream broke or a directly opened endpoint is no longer
+/// the default. Audio buffered before the pause never reaches the clip.
+fn resume_session(
+    shared: &Arc<Shared>,
+    session: &mut Option<OpenSession>,
+    capture: &mut Capture,
+    scratch: &mut [f32],
+) {
+    let started = Instant::now();
+    if device_needs_reopen(shared, session.as_ref()) {
+        match reopen_session(shared, session, capture) {
+            Ok(()) => eprintln!(
+                "microphone: input changed while paused; reopened in {:.1} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            ),
+            Err(error) => eprintln!("microphone: reopen at resume failed: {error}"),
+        }
+        return;
+    }
+    let Some(open) = session.as_mut() else {
+        return;
+    };
+    discard_buffered(&mut open.consumer, scratch, capture);
+    shared
+        .resume_at
+        .store(stream_nanos(open.stream.now()), Ordering::Release);
+    if let Err(error) = open.stream.play() {
+        shared.resume_at.store(0, Ordering::Release);
+        eprintln!("microphone: resume failed ({error}); reopening");
+        if let Err(error) = reopen_session(shared, session, capture) {
+            eprintln!("microphone: reopen at resume failed: {error}");
+        }
+        return;
+    }
+    eprintln!(
+        "microphone: resumed in {:.2} ms",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+}
+
+/// Drops whatever the ring and the pre-roll hold: after a pause it predates
+/// the press by at least the idle period.
+fn discard_buffered(consumer: &mut HeapCons<f32>, scratch: &mut [f32], capture: &mut Capture) {
+    drain(consumer, scratch, capture);
+    capture.preroll.clear();
+}
+
+/// A stream instant as nonzero nanoseconds, the [`Shared::resume_at`] encoding.
+fn stream_nanos(instant: cpal::StreamInstant) -> u64 {
+    u64::try_from(instant.as_nanos()).unwrap_or(u64::MAX).max(1)
+}
+
+/// Drops, in the callback, the blocks WASAPI buffered before a pause.
+/// `IAudioClient::Stop` keeps packets not yet read and `Start` delivers them
+/// first, captured just before the pause. A block is stale while a resume is
+/// armed and it was captured before that resume; the first fresh block
+/// disarms it. No allocation, no locking.
+#[derive(Default)]
+struct StaleFilter {
+    /// The resume these drops count against.
+    resume: u64,
+    dropped: usize,
+}
+
+impl StaleFilter {
+    /// Whether to drop a block of `frames` captured at `captured` (ns).
+    /// `max_frames` caps the drops per resume.
+    fn drops(
+        &mut self,
+        resume_at: &AtomicU64,
+        captured: u64,
+        frames: usize,
+        max_frames: usize,
+    ) -> bool {
+        let resume = resume_at.load(Ordering::Acquire);
+        if resume == 0 {
+            return false;
+        }
+        if resume != self.resume {
+            self.resume = resume;
+            self.dropped = 0;
+        }
+        let margin = STALE_MARGIN.as_nanos() as u64;
+        let stale = captured.saturating_add(margin) < resume && self.dropped + frames <= max_frames;
+        if stale {
+            self.dropped += frames;
+        } else {
+            // Fresh audio (or the cap): stop checking until the next resume.
+            let _ = resume_at.compare_exchange(resume, 0, Ordering::AcqRel, Ordering::Relaxed);
+        }
+        stale
     }
 }
 
@@ -523,23 +720,35 @@ fn reopen_session(
 /// opened directly and Windows has since switched the default input. A stream
 /// on CPAL's default device follows the default by itself.
 fn device_needs_reopen(shared: &Shared, session: Option<&OpenSession>) -> bool {
-    if shared.failed.load(Ordering::SeqCst) || !shared.open.load(Ordering::SeqCst) {
-        return true;
-    }
-    let Some(direct) = session.and_then(|session| session.direct.as_ref()) else {
+    stream_lost(shared)
+        || default_moved(session.and_then(|session| session.direct.as_ref()), || {
+            cpal::default_host()
+                .default_input_device()
+                .and_then(|device| device.id().ok())
+        })
+}
+
+/// The stream failed or never opened.
+fn stream_lost(shared: &Shared) -> bool {
+    shared.failed.load(Ordering::SeqCst) || !shared.open.load(Ordering::SeqCst)
+}
+
+/// Whether Windows switched the default input away from the endpoint opened
+/// directly as `direct`. Queries `current_default` only for a direct stream.
+fn default_moved<T: PartialEq>(
+    direct: Option<&T>,
+    current_default: impl FnOnce() -> Option<T>,
+) -> bool {
+    let Some(direct) = direct else {
         return false;
     };
-    cpal::default_host()
-        .default_input_device()
-        .and_then(|device| device.id().ok())
-        .is_some_and(|default| &default != direct)
+    current_default().is_some_and(|default| &default != direct)
 }
 
 /// An open microphone owned by the worker thread. `stream` keeps the device
 /// running; `consumer` is the read end of its sample ring.
 struct OpenSession {
-    /// Held only to keep the device running; dropping it closes the stream.
-    #[allow(dead_code)]
+    /// Keeps the device running (paused while idle); dropping it closes the stream.
     stream: cpal::Stream,
     consumer: HeapCons<f32>,
     rate: u32,
@@ -630,6 +839,8 @@ where
     T: SizedSample,
     f32: FromSample<T>,
 {
+    let max_stale = config.sample_rate as usize * STALE_MAX_MS / 1000;
+    let mut stale = StaleFilter::default();
     let frames_hint = match config.buffer_size {
         cpal::BufferSize::Fixed(frames) => frames as usize,
         _ => CALLBACK_FRAMES_HINT,
@@ -642,7 +853,12 @@ where
     device
         .build_input_stream::<T, _, _>(
             *config,
-            move |data: &[T], _: &cpal::InputCallbackInfo| {
+            move |data: &[T], info: &cpal::InputCallbackInfo| {
+                let captured = stream_nanos(info.timestamp().capture);
+                let frames = data.len() / channels.max(1);
+                if stale.drops(&data_shared.resume_at, captured, frames, max_stale) {
+                    return;
+                }
                 scratch.clear();
                 downmix_into(data, channels, &mut scratch);
                 let pushed = producer.push_iter(scratch.iter().copied());
@@ -1175,19 +1391,117 @@ mod tests {
 
     #[test]
     fn idle_worker_reopens_a_failed_microphone_only() {
-        let shared = Shared {
-            control: Mutex::new(Control::default()),
-            open: AtomicBool::new(true),
-            failed: AtomicBool::new(false),
-            rate: AtomicU32::new(SAMPLE_RATE),
-            dropped: AtomicU64::new(0),
-        };
+        let shared = Shared::default();
+        shared.open.store(true, Ordering::SeqCst);
         assert!(!device_needs_reopen(&shared, None));
         shared.failed.store(true, Ordering::SeqCst);
         assert!(device_needs_reopen(&shared, None));
         shared.failed.store(false, Ordering::SeqCst);
         shared.open.store(false, Ordering::SeqCst);
         assert!(device_needs_reopen(&shared, None));
+    }
+
+    #[test]
+    fn resume_rechecks_the_default_only_for_a_direct_stream() {
+        // The default route is never queried: cpal invalidates it on a switch.
+        assert!(!default_moved::<u8>(None, || panic!("queried")));
+        assert!(!default_moved(Some(&1), || Some(1)));
+        assert!(default_moved(Some(&1), || Some(2)));
+        // No default input at all: keep the stream; a failure reopens it.
+        assert!(!default_moved(Some(&1), || None));
+    }
+
+    #[test]
+    fn idle_mic_pauses_only_after_the_idle_period_without_a_recording() {
+        let t0 = Instant::now();
+        let after = Duration::from_secs(60);
+        let mut idle = IdleMic::new(after, t0);
+        assert!(!idle.pause_due(t0 + Duration::from_secs(59), false));
+        assert!(idle.pause_due(t0 + after, false));
+        // Never while recording, however long it lasts.
+        assert!(!idle.pause_due(t0 + Duration::from_secs(600), true));
+
+        // A recording ending restarts the count.
+        idle.active(t0 + Duration::from_secs(50));
+        assert!(!idle.pause_due(t0 + Duration::from_secs(100), false));
+        assert!(idle.pause_due(t0 + Duration::from_secs(110), false));
+
+        // Paused once, not again until resumed.
+        idle.paused = true;
+        assert!(!idle.pause_due(t0 + Duration::from_secs(600), false));
+        idle.paused = false;
+        idle.active(t0 + Duration::from_secs(600));
+        assert!(!idle.pause_due(t0 + Duration::from_secs(601), false));
+    }
+
+    #[test]
+    fn worker_blocks_while_paused_and_polls_otherwise() {
+        let mut idle = IdleMic::new(MIC_IDLE_PAUSE, Instant::now());
+        assert_eq!(idle.wait(false), Some(IDLE_POLL_INTERVAL));
+        assert_eq!(idle.wait(true), Some(POLL_INTERVAL));
+        idle.paused = true;
+        assert_eq!(idle.wait(false), None);
+    }
+
+    #[test]
+    fn resume_drops_the_audio_buffered_before_the_pause() {
+        // At the pause the pre-roll is full and the ring holds a last undrained
+        // chunk. After the resume the clip must hold only post-resume audio.
+        let rate = 48_000;
+        let cap = preroll_capacity(rate);
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_capacity(rate)).split();
+        let mut capture = Capture::new();
+        capture.set_preroll_cap(cap);
+        let mut scratch = vec![0.0; DRAIN_SCRATCH];
+        assert_eq!(producer.push_slice(&vec![1.0; cap]), cap);
+        drain(&mut consumer, &mut scratch, &mut capture);
+        assert_eq!(producer.push_slice(&[2.0; 480]), 480);
+
+        discard_buffered(&mut consumer, &mut scratch, &mut capture);
+        let fresh: Vec<f32> = (0..960).map(|n| -(n as f32)).collect();
+        assert_eq!(producer.push_slice(&fresh), fresh.len());
+        start_capture(Some(&mut consumer), &mut scratch, &mut capture, 1);
+        drain(&mut consumer, &mut scratch, &mut capture);
+        assert_eq!(capture.finish(1), fresh);
+    }
+
+    #[test]
+    fn stale_filter_drops_blocks_captured_before_the_resume() {
+        let ms = |n: u64| n * 1_000_000;
+        let resume_at = AtomicU64::new(0);
+        let mut filter = StaleFilter::default();
+        // Nothing armed: every block passes, however old.
+        assert!(!filter.drops(&resume_at, ms(1), 480, 4800));
+
+        // Resumed at t = 70 s after a pause at t = 10 s.
+        resume_at.store(ms(70_000), Ordering::Release);
+        assert!(filter.drops(&resume_at, ms(9_990), 480, 4800));
+        assert!(filter.drops(&resume_at, ms(10_000), 480, 4800));
+        // The first fresh block passes and disarms the filter.
+        assert!(!filter.drops(&resume_at, ms(70_001), 480, 4800));
+        assert_eq!(resume_at.load(Ordering::Acquire), 0);
+        assert!(!filter.drops(&resume_at, ms(10_000), 480, 4800));
+    }
+
+    #[test]
+    fn stale_filter_keeps_audio_within_the_margin_and_caps_its_drops() {
+        let ms = |n: u64| n * 1_000_000;
+        let resume_at = AtomicU64::new(ms(70_000));
+        let mut filter = StaleFilter::default();
+        // Captured just before the resume instant: clock jitter, not stale.
+        assert!(!filter.drops(&resume_at, ms(69_990), 480, 4800));
+
+        // Bogus timestamps (always 0) lose at most the cap, then pass.
+        resume_at.store(ms(130_000), Ordering::Release);
+        let dropped = (0..20)
+            .filter(|_| filter.drops(&resume_at, 0, 480, 960))
+            .count();
+        assert_eq!(dropped, 2);
+        assert_eq!(resume_at.load(Ordering::Acquire), 0);
+
+        // The next resume starts its own count.
+        resume_at.store(ms(190_000), Ordering::Release);
+        assert!(filter.drops(&resume_at, 0, 960, 960));
     }
 
     #[test]
@@ -1283,6 +1597,38 @@ mod tests {
 
         let recorder = Recorder::new().expect("open with STA pool threads");
         recorder.reopen().expect("reopen with STA pool threads");
+    }
+
+    /// Real hardware check. Run with `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs a microphone"]
+    fn records_after_an_idle_pause_without_preroll() {
+        let recorder =
+            Recorder::with_idle_pause(Duration::from_millis(300)).expect("a default input device");
+        for round in 0..3 {
+            // Paused after 300 ms (polled every 100 ms).
+            thread::sleep(Duration::from_millis(800));
+            let started = Instant::now();
+            recorder.start().expect("resume and start");
+            let start_ms = started.elapsed().as_secs_f64() * 1e3;
+            thread::sleep(Duration::from_millis(500));
+            let clip = recorder.stop();
+            println!(
+                "round {round}: start {start_ms:.2} ms, clip {:?}",
+                clip.duration()
+            );
+            // Resumed, so no 150 ms pre-roll: about the hold alone.
+            assert!(
+                clip.duration() >= Duration::from_millis(400),
+                "{:?}",
+                clip.duration()
+            );
+            assert!(
+                clip.duration() <= Duration::from_millis(560),
+                "{:?}",
+                clip.duration()
+            );
+        }
     }
 
     /// Real hardware check. Run with `cargo test -- --ignored --nocapture`.
