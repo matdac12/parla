@@ -12,6 +12,7 @@ interface Settings {
   streaming_enabled: boolean;
   live_captions: boolean;
   vocabulary: string[];
+  local_model: string;
   providers: Record<string, Record<string, unknown>>;
 }
 
@@ -30,14 +31,6 @@ interface ModelProgress {
   id?: string;
   downloaded?: number;
   total?: number;
-}
-
-/** Shape of `model_status` from PARLA-7. */
-interface ModelStatus {
-  id: string;
-  model_dir: string;
-  available: boolean;
-  downloading: boolean;
 }
 
 interface FieldSpec {
@@ -275,125 +268,185 @@ function buildField(providerId: string, spec: FieldSpec, config: Record<string, 
   return wrapper;
 }
 
+/** Shape of `list_models` (PARLA-37): one entry per local Parakeet export. */
+interface LocalModelStatus {
+  id: string;
+  name: string;
+  size: number;
+  model_dir: string;
+  available: boolean;
+  downloading: boolean;
+  selected: boolean;
+}
+
 interface ParakeetUi {
+  list: HTMLDivElement;
   status: HTMLParagraphElement;
   dir: HTMLParagraphElement;
   bar: HTMLDivElement;
   fill: HTMLDivElement;
-  button: HTMLButtonElement;
 }
 
-/** Missing-command rejection: the command exists only once PARLA-7 is merged. */
-function isMissingCommand(error: unknown): boolean {
-  const text = String(error).toLowerCase();
-  return (
-    text.includes("not found") || text.includes("unknown command") || text.includes("command_not_found")
-  );
+function formatSize(bytes: number): string {
+  return `${Math.round(bytes / 1_000_000)} MB`;
 }
 
 // Set by setupParakeet so a successful save can re-check the model status.
 let refreshParakeetStatus: (() => Promise<void>) | null = null;
 
-async function setupParakeet(providerId: string, ui: ParakeetUi): Promise<void> {
-  let unavailable = false;
-  // Invalidate in-flight status reads when a click or a terminal event starts,
-  // so a slow initial model_status cannot clobber the download state.
+async function setupParakeet(ui: ParakeetUi): Promise<void> {
+  let models: LocalModelStatus[] = [];
+  /** The model a click in this window is switching to (download included). */
+  let switching: string | null = null;
+  const percents = new Map<string, number>();
+  // Invalidate in-flight list reads when a click or a terminal event starts,
+  // so a slow initial list_models cannot clobber the download state.
   let statusToken = 0;
   const setMessage = (text: string, isError = false): void => {
     ui.status.textContent = text;
     ui.status.classList.toggle("error", isError);
   };
-  const setDir = (dir: unknown): void => {
-    ui.dir.textContent = typeof dir === "string" && dir ? `Model directory: ${dir}` : "";
-  };
   const showProgress = (visible: boolean): void => {
     ui.bar.hidden = !visible;
   };
+  const busy = (): boolean => switching !== null || models.some((m) => m.downloading);
+  const selectedId = (): string => state.settings?.local_model ?? "parakeet-v3";
 
-  const refresh = async (): Promise<void> => {
+  const render = (): void => {
+    ui.list.replaceChildren();
+    for (const model of models) {
+      const label = document.createElement("label");
+      label.className = "provider-option model-option";
+
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "local_model";
+      radio.value = model.id;
+      radio.checked = selectedId() === model.id;
+      radio.disabled = busy();
+      radio.addEventListener("change", () => {
+        if (radio.checked) void select(model.id);
+      });
+
+      const body = document.createElement("span");
+      body.className = "provider-option-body";
+      body.append(textEl("span", model.name, "provider-name"));
+      const percent = percents.get(model.id);
+      const progress = model.downloading || (switching === model.id && !model.available)
+        ? `Downloading${percent === undefined ? "…" : ` ${percent}%`}`
+        : model.available
+          ? "Downloaded"
+          : "Not downloaded";
+      body.append(textEl("span", `${formatSize(model.size)} · ${progress}`, "model-meta"));
+      label.append(radio, body);
+
+      if (!model.available && !model.downloading && switching !== model.id) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary model-download";
+        button.textContent = "Download";
+        button.disabled = busy();
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          void select(model.id);
+        });
+        label.append(button);
+      }
+      ui.list.append(label);
+    }
+    const selected = models.find((m) => m.id === selectedId());
+    ui.dir.textContent = selected ? `Model directory: ${selected.model_dir}` : "";
+  };
+
+  const refresh = async (report = true): Promise<void> => {
     const token = ++statusToken;
     try {
-      const info = await invoke<ModelStatus>("model_status", { id: providerId });
+      const next = await invoke<LocalModelStatus[]>("list_models");
       if (token !== statusToken) return;
-      setDir(info.model_dir);
-      showProgress(Boolean(info.downloading));
-      if (info.downloading) {
-        setMessage("Downloading…");
-        ui.button.disabled = true;
-      } else if (info.available) {
-        setMessage("Model ready.");
-        ui.fill.style.width = "100%";
-        ui.button.disabled = true;
-      } else {
-        setMessage("Model not downloaded yet.");
-        ui.button.disabled = false;
+      models = next;
+      const downloading = models.find((m) => m.downloading);
+      showProgress(Boolean(downloading));
+      if (report && !switching) {
+        const selected = models.find((m) => m.id === selectedId());
+        if (downloading) setMessage(`Downloading ${downloading.name}…`);
+        else if (selected?.available) setMessage(`${selected.name} is ready.`);
+        else if (selected) setMessage(`${selected.name} is not downloaded yet.`);
       }
+      render();
     } catch (error) {
       if (token !== statusToken) return;
-      if (isMissingCommand(error)) {
-        unavailable = true;
-        setMessage("Model download is not available in this build.", true);
-        ui.button.disabled = true;
-      } else {
-        setMessage(String(error), true);
-      }
+      setMessage(String(error), true);
     }
   };
 
-  ui.button.addEventListener("click", async () => {
-    if (unavailable) return;
-    statusToken += 1;
-    ui.button.disabled = true;
-    showProgress(true);
-    ui.fill.style.width = "0%";
-    setMessage("Downloading…");
-    try {
-      // Resolves after completion, rejects on failure / already downloading / unknown id.
-      await invoke("download_model", { id: providerId });
-      await refresh();
-      await refreshProviders();
-    } catch (error) {
-      if (isMissingCommand(error)) {
-        unavailable = true;
-        setMessage("Model download is not available in this build.", true);
-      } else {
-        setMessage(String(error), true);
-        ui.button.disabled = false;
-      }
-      showProgress(false);
+  // Selecting a model that is not on disk downloads it first; the backend
+  // switches only once every file is verified.
+  const select = async (id: string): Promise<void> => {
+    const model = models.find((m) => m.id === id);
+    if (!model || busy()) {
+      render();
+      return;
     }
-  });
+    statusToken += 1;
+    switching = id;
+    percents.delete(id);
+    if (!model.available) {
+      showProgress(true);
+      ui.fill.style.width = "0%";
+      setMessage(`Downloading ${model.name}…`);
+    } else {
+      setMessage(`Switching to ${model.name}…`);
+    }
+    render();
+    try {
+      const selected = await invoke<string>("select_model", { id });
+      if (state.settings) state.settings.local_model = selected;
+      const baseline: Settings = JSON.parse(state.baseline);
+      baseline.local_model = selected;
+      state.baseline = JSON.stringify(baseline);
+      const name = models.find((m) => m.id === selected)?.name ?? selected;
+      setMessage(selected === id ? `${name} selected.` : `${model.name} downloaded; ${name} stays selected.`);
+    } catch (error) {
+      setMessage(String(error), true);
+    } finally {
+      switching = null;
+      showProgress(false);
+      await refresh(false);
+      await refreshProviders();
+      updateDirty();
+    }
+  };
 
   // Attach listeners before the first status read so no event is missed.
   await Promise.all([
     listen<ModelProgress>("model://progress", (event) => {
-      if (event.payload?.id !== providerId) return;
+      const id = event.payload?.id;
+      if (!id) return;
       showProgress(true);
       const { downloaded, total } = event.payload;
       if (typeof downloaded === "number" && typeof total === "number" && total > 0) {
         const percent = Math.min(100, Math.round((downloaded / total) * 100));
         ui.fill.style.width = `${percent}%`;
-        setMessage(`Downloading… ${percent}%`);
-      } else {
-        setMessage("Downloading…");
+        if (percents.get(id) !== percent) {
+          percents.set(id, percent);
+          const model = models.find((m) => m.id === id);
+          if (model) {
+            model.downloading = true;
+            setMessage(`Downloading ${model.name}… ${percent}%`);
+          }
+          render();
+        }
       }
     }),
-    listen<{ id?: string }>("model://done", (event) => {
-      if (event.payload?.id && event.payload.id !== providerId) return;
-      statusToken += 1;
+    listen<{ id?: string }>("model://done", () => {
       ui.fill.style.width = "100%";
-      setMessage("Model downloaded.");
-      showProgress(false);
-      ui.button.disabled = true;
-      void refresh();
-      void refreshProviders();
+      if (!switching) void refresh();
     }),
     listen<{ id?: string; error?: string }>("model://error", (event) => {
-      if (event.payload?.id && event.payload.id !== providerId) return;
-      statusToken += 1;
+      if (switching) return; // select() reports its own failure.
       setMessage(event.payload?.error ?? "Model download failed.", true);
       showProgress(false);
-      ui.button.disabled = false;
+      void refresh();
     }),
   ]);
 
@@ -405,22 +458,10 @@ function buildParakeet(providerId: string, settings: Settings): HTMLElement {
   const wrapper = document.createElement("div");
   wrapper.className = "field";
 
-  const config = providerSection(settings, providerId);
-  wrapper.append(
-    buildField(
-      providerId,
-      {
-        key: "model_dir",
-        label: "Model directory",
-        type: "text",
-        placeholder: "Default location",
-        nullable: true,
-      },
-      config,
-    ),
-  );
-
-  const status = textEl("p", "Checking model…", "model-status") as HTMLParagraphElement;
+  wrapper.append(textEl("label", "Local model"));
+  const list = document.createElement("div");
+  list.className = "provider-list model-list";
+  const status = textEl("p", "Checking models…", "model-status") as HTMLParagraphElement;
   const dir = textEl("p", "", "hint") as HTMLParagraphElement;
   const bar = document.createElement("div");
   bar.className = "progress";
@@ -428,15 +469,26 @@ function buildParakeet(providerId: string, settings: Settings): HTMLElement {
   const fill = document.createElement("div");
   fill.className = "progress-fill";
   bar.append(fill);
+  wrapper.append(list, bar, status, dir);
 
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary";
-  button.textContent = "Download model";
+  const config = providerSection(settings, providerId);
+  const override = buildField(
+    providerId,
+    {
+      key: "model_dir",
+      label: "Parakeet v3 directory",
+      type: "text",
+      placeholder: "Default location",
+      nullable: true,
+    },
+    config,
+  );
+  override.classList.add("model-override");
 
-  wrapper.append(status, dir, bar, button);
-  void setupParakeet(providerId, { status, dir, bar, fill, button });
-  return wrapper;
+  const container = document.createElement("div");
+  container.append(wrapper, override);
+  void setupParakeet({ list, status, dir, bar, fill });
+  return container;
 }
 
 function renderProviderConfig(): void {

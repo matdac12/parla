@@ -429,7 +429,11 @@ pub fn batch_model(provider_id: &str, settings: &Settings) -> Option<String> {
                 .provider_config::<crate::provider::xai::XaiConfig>("xai")
                 .model,
         ),
-        "parakeet" => Some("parakeet-tdt-0.6b-v3".into()),
+        "parakeet" => Some(
+            crate::models::spec(settings.local_model)
+                .history_name
+                .into(),
+        ),
         _ => None,
     }
 }
