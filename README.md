@@ -577,6 +577,12 @@ CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
 - Expected times on the maintainer's machine: a dev incremental rebuild takes
   about 5–9 s, a `cargo test --lib` run about 5 s, and a clean dev build about
   3 minutes.
+- [sccache](https://github.com/mozilla/sccache) caches dependency builds across
+  worktrees. Set it up per user, never in the repo: put the prebuilt `sccache.exe`
+  in a user folder and add `[build] rustc-wrapper = '<path to sccache.exe>'` to
+  `%USERPROFILE%\.cargo\config.toml`. Pick a target dir with `--target-dir`, not
+  the `CARGO_TARGET_DIR` variable: sccache hashes every `CARGO_*` variable, so
+  setting it causes cache misses.
 - Add Microsoft Defender exclusions for `%USERPROFILE%\.cargo`,
   `%USERPROFILE%\.rustup`, the `target` folders (`src-tauri\target` in each
   checkout) and `%USERPROFILE%\.t3\worktrees`, and exclude code folders from
