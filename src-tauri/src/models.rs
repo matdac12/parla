@@ -1,6 +1,7 @@
-//! Parakeet V3 int8 export used by transcribe-rs/Handy, verified 2026-10-15:
-//! https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
-//! https://github.com/cjpais/transcribe-rs#model-downloads
+//! Parakeet Ultra (Moondream's post-trained Parakeet TDT 0.6B v3, CC BY 4.0) as
+//! the transcribe.cpp Q8_0 GGUF, verified 2026-10-16:
+//! https://huggingface.co/moondream/parakeet-ultra
+//! https://huggingface.co/handy-computer/parakeet-ultra-gguf
 //! Downloads never become visible to the provider until every file is verified.
 use crate::{provider::parakeet::ParakeetConfig, settings::Settings};
 use reqwest::Client;
@@ -19,35 +20,22 @@ use std::{
 use tauri::Emitter;
 
 pub const ID: &str = "parakeet";
-pub const DIRECTORY: &str = "parakeet-tdt-0.6b-v3";
-pub const SOURCE: &str = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce";
+pub const DIRECTORY: &str = "parakeet-ultra-q8_0";
+pub const SOURCE: &str = "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9";
 pub struct ModelFile {
     pub name: &'static str,
     pub size: u64,
     pub sha256: &'static str,
 }
-pub const FILES: &[ModelFile] = &[
-    ModelFile {
-        name: "encoder-model.int8.onnx",
-        size: 652_183_999,
-        sha256: "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09",
-    },
-    ModelFile {
-        name: "decoder_joint-model.int8.onnx",
-        size: 18_202_004,
-        sha256: "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70",
-    },
-    ModelFile {
-        name: "nemo128.onnx",
-        size: 139_764,
-        sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f",
-    },
-    ModelFile {
-        name: "vocab.txt",
-        size: 93_939,
-        sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
-    },
-];
+pub const FILES: &[ModelFile] = &[ModelFile {
+    name: "parakeet-ultra-Q8_0.gguf",
+    size: 740_363_168,
+    sha256: "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
+}];
+/// The single GGUF that holds weights, preprocessor and vocabulary.
+pub fn model_file(dir: &Path) -> PathBuf {
+    dir.join(FILES[0].name)
+}
 static DEFAULT_DIR: OnceLock<PathBuf> = OnceLock::new();
 static DOWNLOADING: AtomicBool = AtomicBool::new(false);
 

@@ -20,10 +20,9 @@ native-smoke = []
 
 [dependencies]
 anyhow = "1"
-transcribe-rs = { git = "https://github.com/cjpais/transcribe-rs", rev = "abc6f582967c40839c1d05ec5acc98d1068d9d58", default-features = false, features = ["onnx"] }
-# transcribe-rs uses the rc.12 API; prerelease caret ranges otherwise select incompatible rc.14.
-ort = "=2.0.0-rc.12"
-ort-sys = "=2.0.0-rc.12"
+# GGUF/ggml speech-to-text, CPU only and statically linked: no runtime DLLs.
+# Handy moved every model to it (2026-10-14) and dropped ONNX Runtime.
+transcribe-cpp = { version = "=0.4.0", default-features = false }
 tempfile = "3"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

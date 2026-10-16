@@ -216,3 +216,18 @@ ort: https://github.com/pykeio/ort (MIT OR Apache-2.0), pinned to 2.0.0-rc.12.
 Default CPU binary download and static-link/copy-dylibs strategy; the Windows CI
 artifact retains companion DLLs (including DirectML.dll in the upstream CPU
 archive). No DirectML execution-provider feature is enabled in Parla.
+
+## transcribe-cpp prototype (research branch, 2026-10-16)
+
+### handy-computer/transcribe.cpp (MIT)
+
+Dependency: `transcribe-cpp` 0.4.0 (crates.io), which builds transcribe.cpp and
+its vendored ggml (MIT) from source and links them statically. Replaces
+transcribe-rs and ONNX Runtime for the local model.
+
+### Moondream Parakeet Ultra (CC BY 4.0)
+
+Model: https://huggingface.co/moondream/parakeet-ultra, Moondream's post-trained
+NVIDIA Parakeet TDT 0.6B v3 (CC BY 4.0). GGUF conversion:
+https://huggingface.co/handy-computer/parakeet-ultra-gguf/tree/a1539be1b849ea7463b88343e5277b373d0c4ea9
+(`parakeet-ultra-Q8_0.gguf`). Downloaded at runtime, not bundled.

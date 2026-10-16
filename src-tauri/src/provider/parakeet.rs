@@ -15,10 +15,7 @@ use std::{
     },
     time::Duration,
 };
-use transcribe_rs::onnx::{
-    parakeet::{ParakeetModel, ParakeetParams, TimestampGranularity},
-    Quantization,
-};
+use transcribe_cpp::{Model, RunOptions, Session, TimestampKind};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -28,7 +25,7 @@ pub struct ParakeetConfig {
 
 struct CachedModel {
     dir: PathBuf,
-    model: ParakeetModel,
+    model: Session,
 }
 fn engine() -> &'static Mutex<Option<CachedModel>> {
     static ENGINE: OnceLock<Mutex<Option<CachedModel>>> = OnceLock::new();
@@ -36,7 +33,7 @@ fn engine() -> &'static Mutex<Option<CachedModel>> {
 }
 fn with_model<T>(
     settings: &Settings,
-    use_model: impl FnOnce(&mut ParakeetModel) -> Result<T, ProviderError>,
+    use_model: impl FnOnce(&mut Session) -> Result<T, ProviderError>,
 ) -> Result<T, ProviderError> {
     let dir = models::model_dir(settings).map_err(ProviderError::MissingConfig)?;
     if !models::available(&dir) {
@@ -103,9 +100,13 @@ pub fn sync_residency(settings: &Settings) {
         release();
     }
 }
-fn load(dir: &Path) -> Result<ParakeetModel, ProviderError> {
-    ParakeetModel::load(dir, &Quantization::Int8)
+fn load(dir: &Path) -> Result<Session, ProviderError> {
+    Model::load(models::model_file(dir))
+        .and_then(|model| model.session())
         .map_err(|e| ProviderError::Other(format!("Loading Parakeet failed: {e}")))
+}
+fn failed(error: transcribe_cpp::Error) -> ProviderError {
+    ProviderError::Other(format!("Parakeet transcription failed: {error}"))
 }
 pub fn warm(settings: &Settings) -> Result<(), ProviderError> {
     with_model(settings, |_| Ok(()))
@@ -138,9 +139,9 @@ pub fn wake_in_background(settings: &Settings) {
 pub fn transcribe_samples(settings: &Settings, audio: &[f32]) -> Result<String, ProviderError> {
     with_model(settings, |model| {
         model
-            .transcribe_with(audio, &ParakeetParams::default())
-            .map(|r| r.text)
-            .map_err(|e| ProviderError::Other(format!("Parakeet transcription failed: {e}")))
+            .run(audio, &RunOptions::default())
+            .map(|r| r.text.trim().to_string())
+            .map_err(failed)
     })
 }
 
@@ -158,25 +159,23 @@ pub fn transcribe_after(
     }
     let joined = [context, audio].concat();
     // Cuts sit inside pauses with 240 ms of silence on each side, so context
-    // words end well before the boundary. Onset tokens can be stamped a frame
-    // or two early (80 ms steps), hence the cutoff sits two frames before it.
-    let boundary = context.len() as f32 / SAMPLE_RATE as f32 - 0.16;
-    let params = ParakeetParams {
-        timestamp_granularity: Some(TimestampGranularity::Token),
+    // words end well before the boundary. Onsets can be stamped a frame or two
+    // early (80 ms steps), hence the cutoff sits two frames before it.
+    let boundary_ms = (context.len() as i64 * 1000) / SAMPLE_RATE as i64 - 160;
+    let params = RunOptions {
+        timestamps: TimestampKind::Word,
         ..Default::default()
     };
     with_model(settings, |model| {
-        let result = model
-            .transcribe_with(&joined, &params)
-            .map_err(|e| ProviderError::Other(format!("Parakeet transcription failed: {e}")))?;
-        let text: String = result
-            .segments
-            .unwrap_or_default()
+        let result = model.run(&joined, &params).map_err(failed)?;
+        let words: Vec<String> = result
+            .words
             .into_iter()
-            .filter(|token| token.start >= boundary)
-            .map(|token| token.text)
+            .filter(|word| word.t0_ms >= boundary_ms)
+            .map(|word| word.text.trim().to_string())
+            .filter(|word| !word.is_empty())
             .collect();
-        Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+        Ok(words.join(" "))
     })
 }
 
@@ -186,7 +185,7 @@ impl SttProvider for Parakeet {
         "parakeet"
     }
     fn display_name(&self) -> &'static str {
-        "Parakeet V3 (local)"
+        "Parakeet Ultra (local)"
     }
     fn availability(&self, settings: &Settings) -> Availability {
         if models::model_dir(settings).is_ok_and(|dir| models::available(&dir)) {
@@ -252,6 +251,28 @@ mod tests {
             Parakeet.availability(&settings),
             Availability::Unavailable(_)
         ));
+    }
+    #[test]
+    fn live_context_cut_returns_only_the_new_words() {
+        let Ok(dir) = std::env::var("PARLA_PARAKEET_MODEL_DIR") else {
+            return;
+        };
+        let mut settings = Settings::default();
+        settings
+            .providers
+            .insert("parakeet".into(), serde_json::json!({"model_dir":dir}));
+        let bytes = include_bytes!("../../tests/fixtures/hello.wav");
+        let clip = Clip::from_wav_bytes(bytes).unwrap();
+        let audio: Vec<f32> = clip.samples.iter().map(|&s| s as f32 / 32768.0).collect();
+        let silence = vec![0.0; SAMPLE_RATE as usize / 2];
+        let context = [audio.as_slice(), &silence].concat();
+        let full = transcribe_samples(&settings, &audio).unwrap();
+        let tail = transcribe_after(&settings, &context, &audio).unwrap();
+        eprintln!("full={full:?} tail={tail:?}");
+        assert_eq!(
+            tail.to_lowercase().split_whitespace().count(),
+            full.to_lowercase().split_whitespace().count()
+        );
     }
     #[test]
     fn live_fixture_when_model_dir_is_provided() {
