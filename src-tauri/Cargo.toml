@@ -6,7 +6,11 @@ edition = "2021"
 
 [lib]
 name = "parla_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only (no mobile entry point). staticlib/cdylib made every build write
+# a 0.4-1.5 GB parla_lib.lib and link an extra full parla_lib.dll (PARLA-23).
+crate-type = ["rlib"]
+# No doc examples in the crate; skips an empty rustdoc pass on every `cargo test`.
+doctest = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -33,7 +37,8 @@ cpal = "0.18"
 hound = "3.5"
 ringbuf = "0.5"
 rubato = "5.0"
-tauri = { version = "2", features = ["tray-icon"] }
+# Tauri defaults minus "compression": the ~90 KB frontend does not need brotli.
+tauri = { version = "2", default-features = false, features = ["wry", "common-controls-v6", "dynamic-acl", "x11", "dbus", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 

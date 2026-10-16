@@ -1,0 +1,5 @@
+# rust-lld ships with the Rust toolchain. Measured in PARLA-23: building all test
+# targets drops from ~34 s to ~24 s after a one-file change. Keep it pinned here:
+# changing the linker re-links every build script and forces a near-clean rebuild.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

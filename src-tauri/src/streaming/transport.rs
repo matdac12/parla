@@ -444,7 +444,8 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_handshake_and_session_readiness_have_setup_deadlines() {
-        for handshake_complete in [false, true] {
+        // Both cases wait out the real SETUP_TIMEOUT; run them side by side.
+        futures_util::future::join_all([false, true].map(|handshake_complete| async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("ws://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -469,7 +470,8 @@ mod tests {
             assert!(matches!(result, Err(ProviderError::Timeout)));
             drop(feed);
             server.abort();
-        }
+        }))
+        .await;
     }
 
     #[tokio::test]

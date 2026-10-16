@@ -1364,6 +1364,18 @@ mod recovery_tests {
         assert_eq!(recovery.into_clip().samples, [-1, 0, 1]);
     }
     #[test]
+    fn multi_second_recovery_converts_to_exact_16k_length() {
+        let recovery = RecoveryAudio {
+            raw: vec![0.25; 48000 * 5],
+            rate: 48000,
+            clip: OnceLock::new(),
+        };
+        assert_eq!(recovery.clip().samples.len(), 16000 * 5);
+    }
+    /// Timing printout, not a check: 160 s of audio resampled in an unoptimized
+    /// build dominates `cargo test` wall time. Run with `-- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement only; slow in debug builds"]
     fn synthetic_conversion_measurements() {
         for seconds in [5, 35, 120] {
             let raw = vec![0.25; 48000 * seconds];
