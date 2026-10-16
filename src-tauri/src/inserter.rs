@@ -16,7 +16,8 @@ pub fn paste_text(text: &str, restore_delay: Duration) -> Result<(), String> {
     paste_text_timed(text, restore_delay).map(|_| ())
 }
 
-/// Returns the injection completion time, excluding clipboard restoration.
+/// Returns when the V click was injected, excluding the Ctrl key-hold and
+/// clipboard restoration.
 /// Still waits for restoration before releasing the serialized transaction.
 #[cfg(windows)]
 pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, String> {
@@ -71,7 +72,8 @@ trait Desktop {
     // None means no text format; other clipboard errors abort the transaction.
     fn read_text(&mut self) -> Result<Option<String>, String>;
     fn write_text(&mut self, text: &str) -> Result<(), String>;
-    fn send_paste(&mut self, key_hold: Duration) -> Result<(), String>;
+    /// Returns the instant the V click was injected, before the key-hold.
+    fn send_paste(&mut self, key_hold: Duration) -> Result<Instant, String>;
     fn wait(&mut self, delay: Duration);
 }
 
@@ -86,7 +88,7 @@ fn paste_with_backend(
     desktop.write_text(text)?;
     let settle = Duration::from_millis(if compatibility_mode { 100 } else { 25 });
     desktop.wait(settle);
-    let result = desktop.send_paste(settle).map(|()| Instant::now());
+    let result = desktop.send_paste(settle);
     // Always attempt restoration, even if input injection failed.
     desktop.wait(restore_delay);
     if let Some(saved) = saved {
@@ -137,7 +139,7 @@ impl Desktop for WindowsDesktop {
         self.clipboard.set_text(text).map_err(|e| e.to_string())
     }
 
-    fn send_paste(&mut self, key_hold: Duration) -> Result<(), String> {
+    fn send_paste(&mut self, key_hold: Duration) -> Result<Instant, String> {
         let _synthetic_input = crate::hotkey::synthetic_input_guard();
         use enigo::{Direction, Key, Keyboard};
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -172,6 +174,7 @@ impl Desktop for WindowsDesktop {
             .input
             .key(Key::Other(0x56), Direction::Click)
             .map_err(|e| e.to_string());
+        let pasted = Instant::now();
         // Handy holds Ctrl after V for applications polling modifier state.
         std::thread::sleep(key_hold);
         let release_v = self
@@ -185,7 +188,7 @@ impl Desktop for WindowsDesktop {
                 .key(Key::Control, Direction::Release)
                 .map_err(|e| e.to_string())
         };
-        paste.and(release_v).and(release_ctrl)
+        paste.and(release_v).and(release_ctrl).map(|()| pasted)
     }
 
     fn wait(&mut self, delay: Duration) {
@@ -224,6 +227,7 @@ mod tests {
         write_failures: usize,
         copy_after_failed_write: Option<String>,
         key_holds: Vec<Duration>,
+        paste_stamp: Option<Instant>,
     }
 
     impl MemoryDesktop {
@@ -240,6 +244,7 @@ mod tests {
                 write_failures: 0,
                 copy_after_failed_write: None,
                 key_holds: Vec::new(),
+                paste_stamp: None,
             }
         }
     }
@@ -264,7 +269,7 @@ mod tests {
             self.writes.push(text.into());
             Ok(())
         }
-        fn send_paste(&mut self, key_hold: Duration) -> Result<(), String> {
+        fn send_paste(&mut self, key_hold: Duration) -> Result<Instant, String> {
             self.key_holds.push(key_hold);
             self.restoring = true;
             if self.injection_error {
@@ -278,7 +283,9 @@ mod tests {
             if let Some(copy) = self.user_copy.take() {
                 self.text = Some(copy);
             }
-            Ok(())
+            let stamp = Instant::now();
+            self.paste_stamp = Some(stamp);
+            Ok(stamp)
         }
         fn wait(&mut self, delay: Duration) {
             self.waits.push(delay);
@@ -357,6 +364,13 @@ mod tests {
             [Duration::from_millis(100), Duration::from_millis(250)]
         );
         assert_eq!(desktop.key_holds, [Duration::from_millis(100)]);
+    }
+
+    #[test]
+    fn pasted_instant_is_the_v_injection_stamp_not_the_return_time() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        let pasted = paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
+        assert_eq!(Some(pasted), desktop.paste_stamp);
     }
 
     #[test]
