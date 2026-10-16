@@ -4,7 +4,7 @@ use super::{Availability, ProviderError, SttProvider};
 use crate::{
     clip::{Clip, SAMPLE_RATE},
     models,
-    settings::Settings,
+    settings::{LocalModel, Settings},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,6 +31,9 @@ pub struct ParakeetConfig {
 }
 
 struct CachedModel {
+    /// The model and directory as configured, so a phrase with unchanged
+    /// settings skips the file checks and `canonicalize` below.
+    requested: (LocalModel, PathBuf),
     dir: PathBuf,
     model: ParakeetModel,
 }
@@ -42,22 +45,37 @@ fn with_model<T>(
     settings: &Settings,
     use_model: impl FnOnce(&mut ParakeetModel) -> Result<T, ProviderError>,
 ) -> Result<T, ProviderError> {
-    let dir = models::model_dir(settings).map_err(ProviderError::MissingConfig)?;
-    if !models::available(settings.local_model, &dir) {
-        return Err(ProviderError::MissingConfig("model not downloaded".into()));
-    }
-    let dir = dir
-        .canonicalize()
-        .map_err(|e| ProviderError::Other(e.to_string()))?;
+    let requested = (
+        settings.local_model,
+        models::model_dir(settings).map_err(ProviderError::MissingConfig)?,
+    );
     let mut cached = engine()
         .lock()
         .map_err(|_| ProviderError::Other("Parakeet model lock poisoned".into()))?;
     // Registry lookups create new provider objects. The engine therefore lives
     // at process scope, and settings changes reload only when the directory
     // changes, which includes switching between v3 and Ultra.
-    if cached.as_ref().is_none_or(|entry| entry.dir != dir) {
-        let model = load(&dir)?;
-        *cached = Some(CachedModel { dir, model });
+    if cached
+        .as_ref()
+        .is_none_or(|entry| entry.requested != requested)
+    {
+        let (model_kind, dir) = &requested;
+        if !models::available(*model_kind, dir) {
+            return Err(ProviderError::MissingConfig("model not downloaded".into()));
+        }
+        let dir = dir
+            .canonicalize()
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        if cached.as_ref().is_none_or(|entry| entry.dir != dir) {
+            let model = load(&dir)?;
+            *cached = Some(CachedModel {
+                requested,
+                dir,
+                model,
+            });
+        } else if let Some(entry) = cached.as_mut() {
+            entry.requested = requested;
+        }
     }
     let result = use_model(&mut cached.as_mut().expect("loaded model").model);
     drop(cached);
@@ -274,6 +292,19 @@ mod tests {
         assert!(matches!(
             Parakeet.availability(&settings),
             Availability::Unavailable(_)
+        ));
+    }
+    #[test]
+    fn missing_model_is_reported_before_any_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.providers.insert(
+            "parakeet".into(),
+            serde_json::json!({"model_dir":dir.path()}),
+        );
+        assert!(matches!(
+            warm(&settings),
+            Err(ProviderError::MissingConfig(_))
         ));
     }
     #[test]
