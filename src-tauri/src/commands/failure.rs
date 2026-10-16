@@ -7,6 +7,12 @@ pub async fn retry_last_failed(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|_| "Retry worker could not complete".to_string())?
 }
 
+/// Dismiss from the failed pill: hides it at once instead of after 10 s.
+#[tauri::command]
+pub fn dismiss_failure_pill(app: tauri::AppHandle) {
+    crate::overlay::dismiss(&app);
+}
+
 /// Retry from the app window: the transcript lands in history (with a Copy
 /// button) instead of being pasted into Parla itself.
 #[tauri::command]

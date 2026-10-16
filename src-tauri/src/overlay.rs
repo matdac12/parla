@@ -19,7 +19,7 @@ const CAPTION_HEIGHT: f64 = 116.0;
 static CAPTIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 const DONE_HOLD: Duration = Duration::from_millis(750);
-/// A failed dictation keeps its pill (and Retry button) up for a while.
+/// A failed dictation keeps its pill (Dismiss and Retry buttons) up for a while.
 const ERROR_HOLD: Duration = Duration::from_secs(10);
 
 /// Creates the hidden, non-focusable, click-through overlay window.
@@ -120,6 +120,26 @@ fn configure(app: &tauri::AppHandle, captions: bool, generation: u64) {
 
 /// Bumped by every `begin`, so a delayed hide never hides a newer session.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The generation whose failed pill (cross and Retry) is on screen, 0 if none.
+static FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// A dismissal only applies to the failed pill it was clicked on.
+fn dismissable(current: u64, failed: u64) -> bool {
+    failed != 0 && current == failed
+}
+
+/// Dismiss (the cross on a failed pill): hides it before `ERROR_HOLD` runs out.
+/// A click that lands after a new dictation began is ignored.
+pub fn dismiss(app: &tauri::AppHandle) {
+    let current = GENERATION.load(Ordering::Acquire);
+    if dismissable(current, FAILED.load(Ordering::Acquire))
+        && FAILED
+            .compare_exchange(current, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        hide(app);
+    }
+}
 
 /// One dictation's pill: recording (live meter) -> processing (spinner) -> a
 /// brief done/error confirmation. Dropping it without `finish` hides the pill
@@ -176,7 +196,7 @@ pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
     }
 }
 
-/// The pill is click-through except while it offers Retry.
+/// The pill is click-through except while it offers Dismiss and Retry.
 fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.set_ignore_cursor_events(!interactive);
@@ -265,6 +285,9 @@ impl Overlay {
         self.settled = true;
         self.metering.store(false, Ordering::Release);
         reveal(&self.app);
+        if !ok {
+            FAILED.store(self.generation, Ordering::Release);
+        }
         set_interactive(&self.app, !ok);
         let _ = self
             .app
@@ -290,5 +313,151 @@ impl Drop for Overlay {
         if !self.settled && GENERATION.load(Ordering::Acquire) == self.generation {
             hide(&self.app);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dismissable;
+
+    #[test]
+    fn dismiss_only_hides_the_failed_pill_it_was_clicked_on() {
+        assert!(dismissable(4, 4));
+        // No failed pill, or a newer dictation already took the overlay.
+        assert!(!dismissable(4, 0));
+        assert!(!dismissable(5, 4));
+    }
+}
+
+#[cfg(all(test, windows, feature = "native-smoke"))]
+mod native_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static RETRIES: Mutex<u32> = Mutex::new(0);
+
+    /// Stands in for the real command, which would transcribe and paste.
+    #[tauri::command]
+    fn retry_last_failed() {
+        *RETRIES.lock().unwrap() += 1;
+    }
+    #[tauri::command]
+    fn dismiss_failure_pill(app: tauri::AppHandle) {
+        dismiss(&app);
+    }
+    #[tauri::command]
+    fn report_point(x: f64, y: f64) {
+        *POINT.lock().unwrap() = Some((x, y));
+    }
+    static POINT: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn SetCursorPos(x: i32, y: i32) -> i32;
+        fn GetCursorPos(point: *mut Point) -> i32;
+        fn mouse_event(flags: u32, dx: i32, dy: i32, data: i32, extra: usize);
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Real left click at the centre of `selector` in the overlay.
+    fn click(window: &tauri::WebviewWindow, selector: &str) {
+        *POINT.lock().unwrap() = None;
+        window
+            .eval(format!(
+                "{{const r=document.querySelector('{selector}').getBoundingClientRect();\
+                 window.__TAURI_INTERNALS__.invoke('report_point',{{x:r.x+r.width/2,y:r.y+r.height/2}});}}"
+            ))
+            .unwrap();
+        wait_until("button position never reported", || {
+            POINT.lock().unwrap().is_some()
+        });
+        let (x, y) = POINT.lock().unwrap().unwrap();
+        let scale = window.scale_factor().unwrap();
+        let origin = window.inner_position().unwrap();
+        let mut saved = Point::default();
+        // SAFETY: plain user32 calls on this desktop; the cursor is put back.
+        unsafe {
+            GetCursorPos(&mut saved);
+            SetCursorPos(origin.x + (x * scale) as i32, origin.y + (y * scale) as i32);
+            std::thread::sleep(Duration::from_millis(200));
+            mouse_event(0x0002, 0, 0, 0, 0); // MOUSEEVENTF_LEFTDOWN
+            std::thread::sleep(Duration::from_millis(50));
+            mouse_event(0x0004, 0, 0, 0, 0); // MOUSEEVENTF_LEFTUP
+            std::thread::sleep(Duration::from_millis(200));
+            SetCursorPos(saved.x, saved.y);
+        }
+    }
+
+    /// PARLA-50: both buttons on a failed pill take clicks without moving focus.
+    /// Moves the mouse and clicks; run explicitly with the dev server up.
+    #[test]
+    #[ignore = "moves the mouse and clicks on a real overlay; needs a Windows desktop"]
+    fn failed_pill_buttons_take_clicks_without_stealing_focus() {
+        let mut context = tauri::generate_context!();
+        context.set_default_window_icon(Some(tauri::image::Image::new_owned(vec![0; 4], 1, 1)));
+        let app = tauri::Builder::default()
+            .any_thread()
+            .invoke_handler(tauri::generate_handler![
+                retry_last_failed,
+                dismiss_failure_pill,
+                report_point
+            ])
+            .setup(|app| {
+                setup(app)?;
+                Ok(())
+            })
+            .build(context)
+            .unwrap();
+        let handle = app.handle().clone();
+        let (result, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Let the overlay page load.
+                std::thread::sleep(Duration::from_secs(3));
+                let window = handle.get_webview_window(LABEL).unwrap();
+                let hwnd = window.hwnd().unwrap().0 as isize;
+                // SAFETY: read-only user32 queries.
+                let focused = unsafe { GetForegroundWindow() };
+                let failed_pill = || {
+                    let overlay = begin(&handle, false);
+                    std::thread::sleep(Duration::from_millis(400));
+                    overlay.processing();
+                    overlay.finish(false);
+                    std::thread::sleep(Duration::from_millis(500));
+                };
+
+                failed_pill();
+                click(&window, ".retry");
+                wait_until("Retry click never reached the command", || {
+                    *RETRIES.lock().unwrap() == 1
+                });
+
+                failed_pill();
+                click(&window, ".result");
+                wait_until("Dismiss did not hide the pill", || unsafe {
+                    IsWindowVisible(hwnd) == 0
+                });
+                assert_eq!(unsafe { GetForegroundWindow() }, focused);
+            }));
+            result.send(check.is_ok()).unwrap();
+            handle.exit(0);
+        });
+        app.run_return(|_, _| {});
+        assert!(outcome.recv().unwrap());
     }
 }

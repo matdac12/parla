@@ -102,11 +102,25 @@ body {
 .result {
   display: grid;
   place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: 0 -5px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
   color: #7ee2a8;
   animation: pop 220ms cubic-bezier(0.2, 0, 0, 1);
 }
+.result:disabled {
+  cursor: default;
+}
 .pill[data-phase="error"] .result {
   color: #ff8f8a;
+  cursor: pointer;
+}
+.pill[data-phase="error"] .result:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 .result .stroke {
   stroke-dasharray: 20;

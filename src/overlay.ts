@@ -62,11 +62,16 @@ setLocked(false);
 const container = document.createElement("div");
 container.className = "bars";
 
-// After recording: a spinner while transcribing, then a check or cross.
+// After recording: a spinner while transcribing, then a check or cross. The
+// cross is a button: it dismisses the failed pill.
 const spinner = document.createElement("div");
 spinner.className = "spinner";
-const result = document.createElement("div");
+const result = document.createElement("button");
+result.type = "button";
 result.className = "result";
+result.addEventListener("click", () => {
+  if (phase === "error") void invoke("dismiss_failure_pill").catch(() => undefined);
+});
 const CHECK = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
   <path class="stroke" d="M3.6 8.4l3 3 5.8-6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
@@ -121,6 +126,11 @@ function setPhase(nextPhase: string): void {
     result.innerHTML = CROSS;
   }
   retry.disabled = false;
+  const failed = phase === "error";
+  result.disabled = !failed;
+  result.title = failed ? "Dismiss" : "";
+  if (failed) result.setAttribute("aria-label", "Dismiss");
+  else result.removeAttribute("aria-label");
   pill.dataset.phase = phase;
   if (!["recording", "processing"].includes(phase)) clearCaptions();
 }
