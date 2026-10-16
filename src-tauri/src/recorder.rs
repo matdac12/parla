@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -95,6 +95,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// The same wait while idle, when draining only refreshes the pre-roll. `Start`
 /// drains first, so the longer gap never adds stale audio to a clip.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// While idle, how often the worker retries a failed microphone and checks
+/// whether a directly opened endpoint is still the system default, so a
+/// replugged headset is picked up before the next dictation instead of during it.
+const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Ring capacity, in seconds of device audio. Generous: the worker only needs
 /// to keep up with a 100 ms drain interval.
@@ -434,6 +439,7 @@ fn audio_thread(
         capture.set_preroll_cap(preroll_capacity(session.rate));
     }
     let mut scratch = vec![0.0f32; DRAIN_SCRATCH];
+    let mut last_device_check = Instant::now();
 
     loop {
         if let Some(session) = session.as_mut() {
@@ -468,30 +474,65 @@ fn audio_thread(
                 capture.subscribe(generation, feed, shared.rate.load(Ordering::Acquire));
             }
             Ok(Command::Reopen { ack }) => {
-                drop(session.take());
-                shared.open.store(false, Ordering::SeqCst);
-                match open_session(&shared) {
-                    Ok(new) => {
-                        shared.failed.store(false, Ordering::SeqCst);
-                        shared.open.store(true, Ordering::SeqCst);
-                        capture.set_preroll_cap(preroll_capacity(new.rate));
-                        session = Some(new);
-                        let _ = ack.send(Ok(()));
-                    }
-                    Err(error) => {
-                        shared.failed.store(true, Ordering::SeqCst);
-                        let _ = ack.send(Err(error));
-                    }
-                }
+                let _ = ack.send(reopen_session(&shared, &mut session, &mut capture));
             }
             Ok(Command::Shutdown) => {
                 shared.open.store(false, Ordering::SeqCst);
                 return;
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                if capture.active.is_none() && last_device_check.elapsed() >= DEVICE_CHECK_INTERVAL
+                {
+                    last_device_check = Instant::now();
+                    if device_needs_reopen(&shared, session.as_ref()) {
+                        if let Err(error) = reopen_session(&shared, &mut session, &mut capture) {
+                            eprintln!("microphone: background reopen failed: {error}");
+                        }
+                    }
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
+}
+
+/// Replaces the session with a freshly opened default microphone.
+fn reopen_session(
+    shared: &Arc<Shared>,
+    session: &mut Option<OpenSession>,
+    capture: &mut Capture,
+) -> Result<(), String> {
+    drop(session.take());
+    shared.open.store(false, Ordering::SeqCst);
+    match open_session(shared) {
+        Ok(new) => {
+            shared.failed.store(false, Ordering::SeqCst);
+            shared.open.store(true, Ordering::SeqCst);
+            capture.set_preroll_cap(preroll_capacity(new.rate));
+            *session = Some(new);
+            Ok(())
+        }
+        Err(error) => {
+            shared.failed.store(true, Ordering::SeqCst);
+            Err(error)
+        }
+    }
+}
+
+/// Whether the idle worker should reopen now: the stream failed, or it was
+/// opened directly and Windows has since switched the default input. A stream
+/// on CPAL's default device follows the default by itself.
+fn device_needs_reopen(shared: &Shared, session: Option<&OpenSession>) -> bool {
+    if shared.failed.load(Ordering::SeqCst) || !shared.open.load(Ordering::SeqCst) {
+        return true;
+    }
+    let Some(direct) = session.and_then(|session| session.direct.as_ref()) else {
+        return false;
+    };
+    cpal::default_host()
+        .default_input_device()
+        .and_then(|device| device.id().ok())
+        .is_some_and(|default| &default != direct)
 }
 
 /// An open microphone owned by the worker thread. `stream` keeps the device
@@ -502,6 +543,9 @@ struct OpenSession {
     stream: cpal::Stream,
     consumer: HeapCons<f32>,
     rate: u32,
+    /// The endpoint when opened directly rather than through CPAL's default
+    /// device, which does not follow the system default.
+    direct: Option<cpal::DeviceId>,
 }
 
 /// Opens the default input device and starts its stream. CPAL's default device
@@ -514,19 +558,24 @@ fn open_session(shared: &Arc<Shared>) -> Result<OpenSession, String> {
     let device = host
         .default_input_device()
         .ok_or_else(|| "no default input device".to_owned())?;
-    open_device_session(&device, shared).or_else(|error| {
+    open_device_session(&device, shared, false).or_else(|error| {
         let endpoint = device
             .id()
             .ok()
             .and_then(|id| host.device_by_id(&id))
             .ok_or_else(|| error.clone())?;
-        open_device_session(&endpoint, shared)
+        open_device_session(&endpoint, shared, true)
             .map_err(|fallback| format!("{error}; opening the endpoint directly: {fallback}"))
     })
 }
 
-/// Opens `device` at its OS default format and starts the stream.
-fn open_device_session(device: &cpal::Device, shared: &Arc<Shared>) -> Result<OpenSession, String> {
+/// Opens `device` at its OS default format and starts the stream. `direct`
+/// marks a specific endpoint rather than CPAL's default device.
+fn open_device_session(
+    device: &cpal::Device,
+    shared: &Arc<Shared>,
+    direct: bool,
+) -> Result<OpenSession, String> {
     let supported = device
         .default_input_config()
         .map_err(|error| format!("fetching the input config failed: {error}"))?;
@@ -556,10 +605,17 @@ fn open_device_session(device: &cpal::Device, shared: &Arc<Shared>) -> Result<Op
     stream
         .play()
         .map_err(|error| format!("starting the microphone stream failed: {error}"))?;
+    let id = device.id().ok();
+    eprintln!(
+        "microphone: opened {} {} at {rate} Hz, {channels} ch",
+        if direct { "direct" } else { "default" },
+        id.as_ref().map(ToString::to_string).unwrap_or_default()
+    );
     Ok(OpenSession {
         stream,
         consumer,
         rate,
+        direct: id.filter(|_| direct),
     })
 }
 
@@ -1115,6 +1171,23 @@ mod tests {
             crossed.abs_diff(expected) <= 4,
             "onset crossed at {crossed}, expected ~{expected}"
         );
+    }
+
+    #[test]
+    fn idle_worker_reopens_a_failed_microphone_only() {
+        let shared = Shared {
+            control: Mutex::new(Control::default()),
+            open: AtomicBool::new(true),
+            failed: AtomicBool::new(false),
+            rate: AtomicU32::new(SAMPLE_RATE),
+            dropped: AtomicU64::new(0),
+        };
+        assert!(!device_needs_reopen(&shared, None));
+        shared.failed.store(true, Ordering::SeqCst);
+        assert!(device_needs_reopen(&shared, None));
+        shared.failed.store(false, Ordering::SeqCst);
+        shared.open.store(false, Ordering::SeqCst);
+        assert!(device_needs_reopen(&shared, None));
     }
 
     #[test]
