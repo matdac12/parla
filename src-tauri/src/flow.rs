@@ -88,7 +88,8 @@ impl Controller {
     }
 }
 /// Shared admission gate for hotkey sessions and PARLA-9 retries. Keep the
-/// returned guard alive through finish_session (including clipboard restore).
+/// returned guard alive through finish_session. The clipboard restore runs
+/// after it, off the guard, so the next press is admitted once the text lands.
 #[derive(Default)]
 pub struct DictationState(Arc<AtomicBool>);
 impl DictationState {
