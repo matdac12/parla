@@ -524,6 +524,27 @@ CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
 `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and
 `npm ci && npm run build`.
 
+## Developing on Windows
+
+- `rust-lld` is pinned as the linker in `src-tauri/.cargo/config.toml`. Never
+  override the linker per command (for example `-C linker=`): switching it
+  re-links every build script and forces a near-clean rebuild.
+- Expected times on the maintainer's machine: a dev incremental rebuild takes
+  about 5–9 s, a `cargo test --lib` run about 5 s, and a clean dev build about
+  3 minutes.
+- Add Microsoft Defender exclusions for `%USERPROFILE%\.cargo`,
+  `%USERPROFILE%\.rustup`, the `target` folders (`src-tauri\target` in each
+  checkout) and `%USERPROFILE%\.t3\worktrees`, and exclude code folders from
+  Windows Search indexing. Before the exclusions, Defender used about 344 CPU-seconds
+  during a single clean build.
+- Builds are what slow Parla's local transcription. If you dictate while a long
+  build runs, start it at below-normal priority (rustc and the linker inherit it),
+  for example in PowerShell:
+
+  ```powershell
+  cmd /c start "" /belownormal /b /wait cargo test --locked
+  ```
+
 ## Known limitations / untested on Windows
 
 CI compiles and unit-tests on Linux and on the Windows runner. On a real Windows
