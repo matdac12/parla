@@ -96,6 +96,8 @@ button.capturing { background: var(--warning); color: #fff; border-color: var(--
 .status-warning { color: var(--warning); }
 .status-error { color: var(--danger); }
 .status-dirty { color: var(--text-3); }
+.provider-status { display: block; margin: 0.6rem 0 0; }
+.provider-status:empty { display: none; }
 
 .banner { padding: 0.75rem 1rem; border-radius: var(--radius-sm); }
 .banner-error { background: var(--danger-bg); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger); }
