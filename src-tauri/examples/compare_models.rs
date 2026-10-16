@@ -10,6 +10,7 @@
 //!   --v3 DIR        v3 model folder (default: Parla's models folder)
 //!   --ultra DIR     Ultra model folder (default: Parla's models folder)
 //!   --runs N        timed runs per clip; ms are medians (default 1)
+//!   --no-trim       skip the batch path's silence trim (raw clip to the model)
 //!   --tsv FILE      also write one row per model and clip
 //!   --quiet         print only the summary
 //! ```
@@ -56,6 +57,7 @@ struct Options {
     v3: Option<PathBuf>,
     ultra: Option<PathBuf>,
     runs: usize,
+    no_trim: bool,
     tsv: Option<PathBuf>,
     quiet: bool,
 }
@@ -101,7 +103,7 @@ fn main() {
             .items
             .iter()
             .zip(&clips)
-            .map(|(item, clip)| measure(&settings, item, clip, options.runs))
+            .map(|(item, clip)| measure(&settings, item, clip, &options))
             .collect();
         results.push((model, rows));
         parakeet::release();
@@ -142,17 +144,20 @@ fn load(path: &Path) -> Result<Clip, String> {
     Ok(clip)
 }
 
-fn measure(settings: &Settings, item: &Item, clip: &Clip, runs: usize) -> Row {
+fn measure(settings: &Settings, item: &Item, clip: &Clip, options: &Options) -> Row {
     let audio: Vec<f32> = clip.samples.iter().map(|&s| s as f32 / 32768.0).collect();
     let mut text = String::new();
     let mut full = Vec::new();
     let mut tail = Vec::new();
     let last = &audio[audio.len().saturating_sub(TAIL_SAMPLES)..];
-    for run in 0..runs.max(1) {
+    for run in 0..options.runs.max(1) {
         let started = Instant::now();
-        let result = Parakeet
-            .transcribe(clip, settings)
-            .unwrap_or_else(|e| format!("<error: {e}>"));
+        let result = if options.no_trim {
+            parakeet::transcribe_samples(settings, &audio)
+        } else {
+            Parakeet.transcribe(clip, settings)
+        }
+        .unwrap_or_else(|e| format!("<error: {e}>"));
         full.push(started.elapsed().as_secs_f64() * 1000.0);
         if run == 0 {
             text = result;
@@ -262,6 +267,7 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
         v3: None,
         ultra: None,
         runs: 1,
+        no_trim: false,
         tsv: None,
         quiet: false,
     };
@@ -295,6 +301,7 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
             "--ultra" => options.ultra = Some(value()?.into()),
             "--tsv" => options.tsv = Some(value()?.into()),
             "--quiet" => options.quiet = true,
+            "--no-trim" => options.no_trim = true,
             "--models" => {
                 options.models = value()?
                     .split(',')

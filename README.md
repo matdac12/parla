@@ -382,7 +382,8 @@ cargo run --release --example compare_models -- --list refs.tsv more.wav
 `refs.tsv` holds `path<TAB>lang<TAB>reference` lines (`lang` is `it`, `en` or
 `mixed`; it picks the language for spelling out digits in the "num" WER).
 `--fleurs <dir>` reads a FLEURS folder with `refs.tsv`, `--runs N` repeats the
-timing, and `--tsv out.tsv` saves every row. Timings need an otherwise idle
+timing, `--no-trim` skips the silence trim (very quiet recordings lose words
+to it), and `--tsv out.tsv` saves every row. Timings need an otherwise idle
 machine.
 
 The Windows CI artifact bundles `parla.exe` and the ONNX Runtime companion DLLs.
