@@ -243,7 +243,7 @@ pub fn retry_with_pill(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Must run on a blocking worker. No clip/settings mutex is held across provider
-/// work or paste. The admission guard covers clipboard restoration as well.
+/// work or paste. The clipboard restore runs later, outside the admission guard.
 pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), String> {
     let retry_lock = app.state::<RetryLock>();
     let Ok(_retry) = retry_lock.0.try_lock() else {

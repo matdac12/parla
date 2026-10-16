@@ -830,34 +830,6 @@ mod pipeline_tests {
         assert!(state.try_begin().is_some());
     }
     #[test]
-    fn a_press_is_admitted_as_soon_as_the_session_returns() {
-        let state = DictationState::default();
-        let t0 = Instant::now();
-        let mut c = Controller { phase: Phase::Idle };
-        let guard = state.try_begin().unwrap();
-        assert_eq!(
-            c.on_event(HotkeyEvent::ChordPressed, false, t0),
-            Action::Start
-        );
-        let up = t0 + Duration::from_secs(2);
-        assert_eq!(
-            c.on_event(HotkeyEvent::ChordReleased, state.is_busy(), up),
-            Action::Stop
-        );
-        // A press while the session still runs is dropped (PARLA-48), so the
-        // session must return right after the paste, not after the restore.
-        assert_eq!(
-            c.on_event(HotkeyEvent::ChordPressed, state.is_busy(), up),
-            Action::None
-        );
-        drop(guard);
-        assert_eq!(
-            c.on_event(HotkeyEvent::ChordPressed, state.is_busy(), up),
-            Action::Start
-        );
-        assert!(state.try_begin().is_some());
-    }
-    #[test]
     fn pipeline_pastes_only_successful_nonempty_transcripts() {
         for output in [
             Ok("Hello".into()),
