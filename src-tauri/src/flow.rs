@@ -208,6 +208,8 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
+    // After the mic started, so it never delays the first syllable.
+    let dimmed = recording.is_ok().then(|| crate::dim::dim(&settings));
     let captions = settings.live_captions
         && settings.streaming_enabled
         && matches!(
@@ -251,6 +253,8 @@ fn run_session(
     };
     let audio = recording.map(|recorder| recorder.stop_raw());
     crate::hotkey::RECORDING.store(false, Ordering::Release);
+    // On stop or cancel, not after the paste.
+    drop(dimmed);
     if cancelled.load(Ordering::Acquire) {
         drop(stream);
         return;

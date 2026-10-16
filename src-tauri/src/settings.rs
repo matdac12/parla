@@ -19,6 +19,10 @@ pub struct Settings {
     pub vocabulary: Vec<String>,
     /// Which Parakeet export the local provider runs. Missing means v3.
     pub local_model: LocalModel,
+    /// Lower other apps' audio (music) while dictating (PARLA-42).
+    pub dim_other_audio: bool,
+    /// Percent of each app's volume kept while dimmed.
+    pub dim_audio_level: u8,
     pub providers: BTreeMap<String, serde_json::Value>,
 }
 
@@ -64,6 +68,8 @@ impl Default for Settings {
             live_captions: true,
             vocabulary: Vec::new(),
             local_model: LocalModel::default(),
+            dim_other_audio: true,
+            dim_audio_level: crate::dim::DEFAULT_LEVEL_PERCENT,
             providers: BTreeMap::new(),
         }
     }
@@ -149,6 +155,8 @@ mod vocabulary_tests {
             serde_json::json!([])
         );
         assert_eq!(s.providers["future"]["api_key"], "test");
+        assert!(s.dim_other_audio, "dimming is on for existing users");
+        assert_eq!(s.dim_audio_level, crate::dim::DEFAULT_LEVEL_PERCENT);
     }
     #[test]
     fn local_model_defaults_to_v3_and_round_trips() {
