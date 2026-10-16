@@ -1,0 +1,109 @@
+name: ASR bench (research)
+
+# Windows x64 comparison of Parla's current local model path (transcribe-rs +
+# ONNX Runtime int8) against transcribe-cpp GGUF models (Parakeet v3/Ultra,
+# Nemotron 3.5 streaming) on FLEURS it/en. Research only; nothing ships.
+on:
+  push:
+    branches: ['research/**']
+    paths: ['research/asr-bench/**', '.github/workflows/asr-bench.yml']
+  workflow_dispatch:
+    inputs:
+      clips:
+        description: FLEURS test clips per language
+        default: '100'
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: research/asr-bench
+    env:
+      CLIPS: ${{ inputs.clips || '100' }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: research/asr-bench
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Machine
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List
+          "RAM GB: " + [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+      - name: Build (MSVC, transcribe-rs + transcribe-cpp in one binary)
+        run: |
+          start=$(date +%s)
+          cargo build --release
+          echo "build_s=$(( $(date +%s) - start ))" | tee build.txt
+          ls -la target/release/ | grep -i -E "asr-bench|\.dll" || true
+      - uses: actions/cache@v4
+        with:
+          path: research/asr-bench/models
+          key: asr-models-v1
+      - name: Models
+        run: |
+          mkdir -p models/onnx-v3 models/onnx-ultra
+          get() { [ -s "$2" ] || curl -fsSL --retry 3 -o "$2" "$1"; }
+          V3=https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce
+          U=https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/main
+          for f in encoder-model.int8.onnx decoder_joint-model.int8.onnx nemo128.onnx vocab.txt; do get $V3/$f models/onnx-v3/$f; done
+          for f in encoder-model.int8.onnx decoder_joint-model.int8.onnx vocab.txt; do get $U/$f models/onnx-ultra/$f; done
+          cp models/onnx-v3/nemo128.onnx models/onnx-ultra/
+          H=https://huggingface.co/handy-computer
+          get $H/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf models/v3-Q8_0.gguf
+          get $H/parakeet-ultra-gguf/resolve/main/parakeet-ultra-Q8_0.gguf models/ultra-Q8_0.gguf
+          get $H/parakeet-ultra-gguf/resolve/main/parakeet-ultra-Q4_K_M.gguf models/ultra-Q4_K_M.gguf
+          get $H/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf models/nemo35-Q8_0.gguf
+          ls -la models models/*/
+      - name: FLEURS clips
+        run: |
+          python -I fleurs.py it_it $CLIPS data/it &
+          python -I fleurs.py en_us $CLIPS data/en &
+          wait
+      - name: Run
+        run: |
+          B=target/release/asr-bench.exe; mkdir -p out
+          for d in it en; do
+            W=$(ls data/$d/*.wav)
+            $B onnx models/onnx-v3 - $W > out/onnx-v3-$d.tsv 2>> out/log.txt
+            $B onnx models/onnx-ultra - $W > out/onnx-ultra-$d.tsv 2>> out/log.txt
+            $B gguf models/v3-Q8_0.gguf - $W > out/gguf-v3-q8-$d.tsv 2>> out/log.txt
+            $B gguf models/ultra-Q8_0.gguf - $W > out/gguf-ultra-q8-$d.tsv 2>> out/log.txt
+            $B gguf models/ultra-Q4_K_M.gguf - $W > out/gguf-ultra-q4km-$d.tsv 2>> out/log.txt
+            $B stream models/nemo35-Q8_0.gguf 6 $W > out/stream-nemo35-r6-$d.tsv 2>> out/log.txt
+            # Parla's key-up cost today: the last phrase (~2.5 s) plus 2 s of left context.
+            TAIL_S=4.5 $B onnx models/onnx-v3 - $W > out/tail-onnx-v3-$d.tsv 2>> out/log.txt
+            TAIL_S=4.5 $B gguf models/ultra-Q8_0.gguf - $W > out/tail-gguf-ultra-q8-$d.tsv 2>> out/log.txt
+          done
+      - name: Score
+        if: always()
+        run: |
+          {
+            echo '## ASR bench (Windows x64)'; cat build.txt; echo
+            for d in it en; do
+              echo "### $d"; echo '```'
+              python -I wer.py data/$d/refs.tsv out/onnx-*-$d.tsv out/gguf-*-$d.tsv out/stream-*-$d.tsv
+              echo '```'
+            done
+            echo '### streaming'; echo '```'; python -I stream_stats.py out/stream-*.tsv; echo '```'
+            echo '### key-up tail (4.5 s clips)'; echo '```'
+            python -I tail_stats.py out/tail-*.tsv; echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asr-bench-results
+          path: |
+            research/asr-bench/out/
+            research/asr-bench/build.txt

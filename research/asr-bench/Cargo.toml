@@ -1,0 +1,18 @@
+[package]
+name = "asr-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Research harness (not part of the app): runs Parla's current local path
+# (transcribe-rs + ONNX Runtime, same pins as src-tauri) next to transcribe-cpp
+# (GGUF/ggml) in ONE binary, so the Windows build also proves the two link together.
+[dependencies]
+transcribe-rs = { git = "https://github.com/cjpais/transcribe-rs", rev = "abc6f582967c40839c1d05ec5acc98d1068d9d58", default-features = false, features = ["onnx"] }
+ort = "=2.0.0-rc.12"
+ort-sys = "=2.0.0-rc.12"
+transcribe-cpp = { version = "0.4.0", default-features = false }
+hound = "3.5"
+
+[profile.release]
+debug = false
