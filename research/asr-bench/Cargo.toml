@@ -14,5 +14,10 @@ ort-sys = "=2.0.0-rc.12"
 transcribe-cpp = { version = "0.4.0", default-features = false }
 hound = "3.5"
 
+[features]
+# Handy's Windows x64 posture: ggml CPU backend as one DLL per ISA tier, picked
+# at runtime (GGML_CPU_ALL_VARIANTS), instead of tuning to the build machine.
+dl = ["transcribe-cpp/dynamic-backends"]
+
 [profile.release]
 debug = false
