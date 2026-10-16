@@ -11,13 +11,14 @@ pub const DEFAULT_RESTORE_DELAY_MS: u64 = 250;
 
 /// Blocking desktop IO: call from the flow worker, never a shortcut callback.
 /// Only nonempty text is saved. Non-text formats are replaced, not restored.
-/// Restore is best effort and skipped if somebody copied different content.
+/// Returns right after the paste; `parla-clipboard-restore` restores the
+/// clipboard `restore_delay` later (or the next paste does, first). Restore
+/// is best effort and skipped if somebody copied different content.
 pub fn paste_text(text: &str, restore_delay: Duration) -> Result<(), String> {
     paste_text_timed(text, restore_delay).map(|_| ())
 }
 
 /// Returns the injection completion time, excluding clipboard restoration.
-/// Still waits for restoration before releasing the serialized transaction.
 #[cfg(windows)]
 pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, String> {
     paste_text_with_options(text, restore_delay, false)
@@ -32,17 +33,74 @@ pub fn paste_text_with_options(
 ) -> Result<Instant, String> {
     // AudioBud also serializes capture/write/paste/restore as one transaction:
     // https://github.com/jamditis/audiobud/blob/main/src-tauri/src/clipboard.rs
-    static TRANSACTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _transaction = TRANSACTION.lock().map_err(|e| e.to_string())?;
-    let clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    // Initialize input before touching the clipboard so setup failure is inert.
-    let input = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| e.to_string())?;
-    paste_with_backend(
-        &mut WindowsDesktop { clipboard, input },
+    let mut pending = pending_restore();
+    let result = paste_deferring_restore(
+        &mut WindowsDesktop::new()?,
+        &mut pending,
         text,
         restore_delay,
         compatibility_mode,
-    )
+    );
+    if let Some(restore) = pending.as_ref() {
+        schedule_restore(restore.due);
+    }
+    result
+}
+
+/// The paste transaction: at most one restore is pending at a time.
+#[cfg(windows)]
+fn pending_restore() -> std::sync::MutexGuard<'static, Option<PendingRestore>> {
+    static PENDING: std::sync::Mutex<Option<PendingRestore>> = std::sync::Mutex::new(None);
+    PENDING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Wakes the long-lived restore thread. If it cannot start, the next paste
+/// still restores the pending clipboard before saving its own.
+#[cfg(windows)]
+fn schedule_restore(due: Instant) {
+    use std::sync::{mpsc, OnceLock};
+    static TIMER: OnceLock<Option<mpsc::Sender<Instant>>> = OnceLock::new();
+    let timer = TIMER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Instant>();
+        std::thread::Builder::new()
+            .name("parla-clipboard-restore".into())
+            .spawn(move || {
+                for due in receiver {
+                    std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                    restore_when_due();
+                }
+            })
+            .map_err(|error| eprintln!("Parla clipboard restore thread failed: {error}"))
+            .ok()
+            .map(|_| sender)
+    });
+    if let Some(sender) = timer {
+        let _ = sender.send(due);
+    }
+}
+
+#[cfg(windows)]
+fn restore_when_due() {
+    loop {
+        let mut pending = pending_restore();
+        if pending.is_none() {
+            return;
+        }
+        let mut desktop = match WindowsDesktop::new() {
+            Ok(desktop) => desktop,
+            // Left pending: the next paste restores it first.
+            Err(error) => return eprintln!("Parla clipboard restore deferred: {error}"),
+        };
+        let now = desktop.now();
+        match restore_if_due(&mut desktop, &mut pending, now) {
+            // A newer paste replaced the restore this wake-up was for.
+            Some(remaining) => {
+                drop(pending);
+                std::thread::sleep(remaining);
+            }
+            None => return,
+        }
+    }
 }
 
 /// Windows is the target. Linux deliberately fails before changing clipboard
@@ -73,28 +131,73 @@ trait Desktop {
     fn write_text(&mut self, text: &str) -> Result<(), String>;
     fn send_paste(&mut self, key_hold: Duration) -> Result<(), String>;
     fn wait(&mut self, delay: Duration);
+    fn now(&self) -> Instant;
 }
 
+/// The user's clipboard text, owed back once `due` passes.
 #[cfg(any(windows, test))]
-fn paste_with_backend(
+struct PendingRestore {
+    saved: String,
+    pasted: String,
+    due: Instant,
+}
+
+/// Pastes and returns without waiting for the restore, which is left in
+/// `pending`. Keeping the dictation busy through the restore delay dropped a
+/// dictation started right after a paste (PARLA-48).
+#[cfg(any(windows, test))]
+fn paste_deferring_restore(
     desktop: &mut impl Desktop,
+    pending: &mut Option<PendingRestore>,
     text: &str,
     restore_delay: Duration,
     compatibility_mode: bool,
 ) -> Result<Instant, String> {
+    // Otherwise our previous transcript would be saved as the user's clipboard.
+    restore_pending(desktop, pending);
     let saved = restorable_text(desktop.read_text()?);
     desktop.write_text(text)?;
     let settle = Duration::from_millis(if compatibility_mode { 100 } else { 25 });
     desktop.wait(settle);
     let result = desktop.send_paste(settle).map(|()| Instant::now());
     // Always attempt restoration, even if input injection failed.
-    desktop.wait(restore_delay);
-    if let Some(saved) = saved {
-        if let Err(error) = restore_clipboard(desktop, text, &saved) {
-            eprintln!("Parla clipboard restore failed after retries: {error}");
-        }
-    }
+    *pending = saved.map(|saved| PendingRestore {
+        saved,
+        pasted: text.into(),
+        due: desktop.now() + restore_delay,
+    });
     result
+}
+
+/// The restore timer's step: restores once `due` has passed (exactly once,
+/// since it takes the restore), else returns the time left.
+#[cfg(any(windows, test))]
+fn restore_if_due(
+    desktop: &mut impl Desktop,
+    pending: &mut Option<PendingRestore>,
+    now: Instant,
+) -> Option<Duration> {
+    let remaining = pending.as_ref()?.due.saturating_duration_since(now);
+    if !remaining.is_zero() {
+        return Some(remaining);
+    }
+    restore_pending(desktop, pending);
+    None
+}
+
+/// Restores now, after waiting out whatever is left of the delay.
+#[cfg(any(windows, test))]
+fn restore_pending(desktop: &mut impl Desktop, pending: &mut Option<PendingRestore>) {
+    let Some(restore) = pending.take() else {
+        return;
+    };
+    let remaining = restore.due.saturating_duration_since(desktop.now());
+    if !remaining.is_zero() {
+        desktop.wait(remaining);
+    }
+    if let Err(error) = restore_clipboard(desktop, &restore.pasted, &restore.saved) {
+        eprintln!("Parla clipboard restore failed after retries: {error}");
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -119,6 +222,16 @@ fn restore_clipboard(desktop: &mut impl Desktop, pasted: &str, saved: &str) -> R
 struct WindowsDesktop {
     clipboard: arboard::Clipboard,
     input: enigo::Enigo,
+}
+
+#[cfg(windows)]
+impl WindowsDesktop {
+    fn new() -> Result<Self, String> {
+        let clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        // Initialize input before touching the clipboard so setup failure is inert.
+        let input = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| e.to_string())?;
+        Ok(Self { clipboard, input })
+    }
 }
 
 #[cfg(windows)]
@@ -191,6 +304,10 @@ impl Desktop for WindowsDesktop {
     fn wait(&mut self, delay: Duration) {
         std::thread::sleep(delay);
     }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +331,7 @@ mod tests {
     // an in-memory clipboard so tests need neither a display nor global input.
     struct MemoryDesktop {
         text: Option<String>,
+        clock: Instant,
         pasted: Vec<String>,
         waits: Vec<Duration>,
         injection_error: bool,
@@ -230,6 +348,7 @@ mod tests {
         fn new(text: Option<&str>) -> Self {
             Self {
                 text: text.map(str::to_owned),
+                clock: Instant::now(),
                 pasted: vec![],
                 waits: vec![],
                 injection_error: false,
@@ -282,7 +401,94 @@ mod tests {
         }
         fn wait(&mut self, delay: Duration) {
             self.waits.push(delay);
+            self.clock += delay;
         }
+        fn now(&self) -> Instant {
+            self.clock
+        }
+    }
+
+    /// The blocking form: paste, then wait out and run the restore.
+    fn paste_with_backend(
+        desktop: &mut MemoryDesktop,
+        text: &str,
+        restore_delay: Duration,
+        compatibility_mode: bool,
+    ) -> Result<Instant, String> {
+        let mut pending = None;
+        let result = paste_deferring_restore(
+            desktop,
+            &mut pending,
+            text,
+            restore_delay,
+            compatibility_mode,
+        );
+        restore_pending(desktop, &mut pending);
+        result
+    }
+
+    #[test]
+    fn paste_returns_before_the_restore_delay_and_leaves_it_pending() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        let mut pending = None;
+        paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "new",
+            Duration::from_millis(250),
+            false,
+        )
+        .unwrap();
+        assert_eq!(desktop.waits, [Duration::from_millis(25)]);
+        assert_eq!(desktop.text.as_deref(), Some("new"));
+        let restore = pending.as_ref().unwrap();
+        assert_eq!(restore.saved, "old");
+        assert_eq!(restore.due, desktop.clock + Duration::from_millis(250));
+    }
+
+    #[test]
+    fn a_paste_with_a_pending_restore_restores_first() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        let mut pending = None;
+        let delay = Duration::from_millis(250);
+        paste_deferring_restore(&mut desktop, &mut pending, "first", delay, false).unwrap();
+        paste_deferring_restore(&mut desktop, &mut pending, "second", delay, false).unwrap();
+        assert_eq!(desktop.pasted, ["first", "second"]);
+        assert_eq!(desktop.writes, ["first", "old", "second"]);
+        // The remaining delay was waited out before the early restore.
+        assert_eq!(desktop.waits[1], delay);
+        // Our first transcript was never saved as the user's clipboard.
+        assert_eq!(pending.as_ref().unwrap().saved, "old");
+        restore_pending(&mut desktop, &mut pending);
+        assert_eq!(desktop.text.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn the_timer_restore_runs_exactly_once_when_due() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        let mut pending = None;
+        let delay = Duration::from_millis(250);
+        paste_deferring_restore(&mut desktop, &mut pending, "new", delay, false).unwrap();
+        let early = desktop.clock + Duration::from_millis(100);
+        assert_eq!(
+            restore_if_due(&mut desktop, &mut pending, early),
+            Some(Duration::from_millis(150))
+        );
+        assert_eq!(desktop.text.as_deref(), Some("new"));
+        let due = desktop.clock + delay;
+        assert_eq!(restore_if_due(&mut desktop, &mut pending, due), None);
+        assert_eq!(desktop.text.as_deref(), Some("old"));
+        assert_eq!(restore_if_due(&mut desktop, &mut pending, due), None);
+        restore_pending(&mut desktop, &mut pending);
+        assert_eq!(desktop.writes, ["new", "old"]);
+    }
+
+    #[test]
+    fn nothing_is_pending_for_an_empty_or_non_text_clipboard() {
+        let mut desktop = MemoryDesktop::new(None);
+        let mut pending = None;
+        paste_deferring_restore(&mut desktop, &mut pending, "new", Duration::ZERO, false).unwrap();
+        assert!(pending.is_none());
     }
 
     #[test]
@@ -292,7 +498,7 @@ mod tests {
         paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.text.as_deref(), Some("old"));
         assert_eq!(
-            &desktop.waits[2..],
+            &desktop.waits[1..],
             [Duration::from_millis(10), Duration::from_millis(20)]
         );
     }
@@ -322,7 +528,7 @@ mod tests {
         paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
         assert_eq!(desktop.read_failures, 94);
         assert_eq!(
-            desktop.waits.iter().skip(2).sum::<Duration>(),
+            desktop.waits.iter().skip(1).sum::<Duration>(),
             Duration::from_millis(100)
         );
     }
