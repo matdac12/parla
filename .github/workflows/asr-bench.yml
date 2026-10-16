@@ -1,0 +1,88 @@
+name: ASR bench (research)
+
+# Builds a Windows x64 kit comparing Parla's current local path (transcribe-rs
+# + ONNX Runtime int8) with transcribe-cpp GGUF models, runs it on the runner,
+# and uploads the kit so the same script can run on a real laptop.
+#   static/ : one exe, transcribe-cpp linked statically, portable AVX2 floor
+#   dl/     : transcribe-cpp dynamic backends (CPU ISA picked at runtime, Handy's posture)
+# Research only; nothing ships.
+on:
+  push:
+    branches: ['research/**']
+    paths: ['research/asr-bench/**', '.github/workflows/asr-bench.yml']
+  workflow_dispatch:
+    inputs:
+      clips:
+        description: FLEURS test clips per language
+        default: '40'
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+        working-directory: research/asr-bench
+    env:
+      CLIPS: ${{ inputs.clips || '40' }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            research/asr-bench -> target
+            research/asr-bench -> target-dl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build static (portable AVX2) and dl kits
+        env:
+          # Never tune ggml to the build runner: an AVX-512 runner would SIGILL on laptops.
+          TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON
+        run: |
+          cargo build --release
+          TRANSCRIBE_CMAKE_ARGS= cargo build --release --features dl --target-dir target-dl
+          mkdir -p kit/static kit/dl
+          cp target/release/asr-bench.exe kit/static/
+          find target/release -maxdepth 1 -name '*.dll' -exec cp {} kit/static/ \;
+          cp target-dl/release/asr-bench.exe kit/dl/
+          find target-dl/release -name '*.dll' -not -path '*/deps/*' -exec cp {} kit/dl/ \;
+          cp run-bench.ps1 kit/
+          ls -la kit/static kit/dl
+      - name: FLEURS clips
+        run: |
+          python -I fleurs.py it_it $CLIPS kit/data/it &
+          python -I fleurs.py en_us $CLIPS kit/data/en &
+          wait
+      - uses: actions/cache@v4
+        with:
+          path: research/asr-bench/kit/models
+          key: asr-kit-models-v1
+      - name: Run the kit on the runner
+        shell: pwsh
+        working-directory: research/asr-bench/kit
+        run: |
+          .\run-bench.ps1
+          "### Runner" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-Content results\summary.txt | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asr-bench-runner-results
+          path: research/asr-bench/kit/results/
+      - name: Kit without models
+        if: always()
+        run: rm -rf kit/models kit/results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parla-asr-bench-kit
+          path: research/asr-bench/kit/

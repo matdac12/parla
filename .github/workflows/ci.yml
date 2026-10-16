@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # research/** branches run only their own workflow (asr-bench.yml).
+    branches-ignore: ['research/**']
   pull_request:
   workflow_dispatch:
 
