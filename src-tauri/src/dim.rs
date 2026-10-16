@@ -226,22 +226,30 @@ fn restore_crashed<V: Volume>(file: &Path, sessions: impl FnOnce() -> Vec<Found<
     };
     let saved: Vec<Saved> = serde_json::from_slice(&bytes).unwrap_or_default();
     let mut live: Vec<Option<Found<V>>> = sessions().into_iter().map(Some).collect();
+    // The same instance if it still runs, else the app's new session (Windows
+    // kept the dimmed volume for it). All instances first, so a dead entry's
+    // app fallback cannot take a live entry's own session.
+    let mut matched: Vec<Option<Found<V>>> = saved.iter().map(|_| None).collect();
+    for by_instance in [true, false] {
+        for (entry, slot) in saved.iter().zip(&mut matched) {
+            if slot.is_some() {
+                continue;
+            }
+            let key = |session: &Found<V>| {
+                if by_instance {
+                    !entry.instance.is_empty() && session.instance == entry.instance
+                } else {
+                    !entry.app.is_empty() && session.app == entry.app
+                }
+            };
+            if let Some(index) = live.iter().position(|s| s.as_ref().is_some_and(key)) {
+                *slot = live[index].take();
+            }
+        }
+    }
     let mut restored = 0;
-    for entry in &saved {
-        // The same instance if it still runs, else the app's new session
-        // (Windows kept the dimmed volume for it).
-        let index = [true, false].into_iter().find_map(|by_instance| {
-            live.iter().position(|session| {
-                session.as_ref().is_some_and(|session| {
-                    if by_instance {
-                        !entry.instance.is_empty() && session.instance == entry.instance
-                    } else {
-                        !entry.app.is_empty() && session.app == entry.app
-                    }
-                })
-            })
-        });
-        let Some(session) = index.and_then(|index| live[index].take()) else {
+    for (entry, session) in saved.iter().zip(matched) {
+        let Some(session) = session else {
             continue;
         };
         let ours = session.volume.get().is_some_and(|now| {
@@ -276,13 +284,18 @@ fn serve<V: Volume>(
     let mut dimmer = Dimmer::new(file);
     let mut last = Instant::now();
     loop {
-        let request = if dimmer.fading() {
+        let fading = dimmer.fading();
+        let request = if fading {
             requests.recv_timeout(TICK)
         } else {
             requests
                 .recv()
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
         };
+        if !fading {
+            // A fade starts now, not when the last one ended.
+            last = Instant::now();
+        }
         match request {
             Ok(Request::Dim(level)) => {
                 // Paused players keep their session but are not dimmed.
@@ -694,6 +707,26 @@ mod tests {
     }
 
     #[test]
+    fn crash_restore_prefers_each_entrys_own_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE_NAME);
+        // Two Chrome sessions were dimmed; the first one's process died.
+        let saved = [("chrome|1", 1.0), ("chrome|2", 0.6)].map(|(instance, original)| Saved {
+            instance: instance.into(),
+            app: "chrome".into(),
+            original,
+            dimmed: original * 0.5,
+        });
+        write_saved(&file, &saved).unwrap();
+        let (alive, fresh) = (Fake::at(0.3), Fake::at(0.5));
+        restore_crashed(&file, || {
+            vec![found(2, "chrome", &alive), found(9, "chrome", &fresh)]
+        });
+        assert_eq!(alive.now(), 0.6, "its own original, not the dead one's");
+        assert_eq!(fresh.now(), 1.0, "the dead one's app fallback");
+    }
+
+    #[test]
     fn a_corrupt_file_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(FILE_NAME);
@@ -703,51 +736,61 @@ mod tests {
     }
 
     #[test]
-    fn worker_dims_and_restores_over_the_channel() {
+    fn worker_fades_both_ways_over_the_channel() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join(FILE_NAME);
-        let shared = Arc::new(Mutex::new(1.0f32));
+        // Every value the worker set, current last.
+        let history = Arc::new(Mutex::new(vec![1.0f32]));
         let (sender, requests) = mpsc::channel();
-        let worker_file = file.clone();
-        let worker_volume = shared.clone();
+        let worker_history = history.clone();
         let worker = std::thread::spawn(move || {
-            serve(worker_file, requests, OWN, |_| {
+            serve(dir.path().join(FILE_NAME), requests, OWN, |_| {
                 vec![Found {
                     pid: 1,
                     system_sounds: false,
                     instance: "a".into(),
                     app: "a".into(),
-                    volume: Locked(worker_volume.clone()),
+                    volume: Locked(worker_history.clone()),
                 }]
             })
         });
-        let reaches = |target: f32| {
+        // Waits for `target`, then returns whether the way there was a fade.
+        let fades_to = |target: f32| {
+            let from = history.lock().unwrap().len();
             let deadline = Instant::now() + Duration::from_secs(5);
-            while !close(*shared.lock().unwrap(), target) {
+            while !close(*history.lock().unwrap().last().unwrap(), target) {
                 assert!(Instant::now() < deadline, "never reached {target}");
                 std::thread::sleep(TICK);
             }
+            history.lock().unwrap()[from..]
+                .iter()
+                .any(|&value| value > 0.51 && value < 0.99)
         };
         sender.send(Request::Dim(0.5)).unwrap();
-        reaches(0.5);
+        assert!(fades_to(0.5), "fades down");
+        // Dimmed for a while: the fade up still takes its own time.
+        std::thread::sleep(FADE * 2);
         sender.send(Request::Restore).unwrap();
-        reaches(1.0);
-        assert_eq!(*shared.lock().unwrap(), 1.0);
+        assert!(fades_to(1.0), "fades up");
+        assert_eq!(*history.lock().unwrap().last().unwrap(), 1.0);
         sender.send(Request::Dim(0.5)).unwrap();
         let (done, finished) = mpsc::channel();
         sender.send(Request::Exit(done)).unwrap();
         finished.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(*shared.lock().unwrap(), 1.0, "quit restores at once");
+        assert_eq!(
+            *history.lock().unwrap().last().unwrap(),
+            1.0,
+            "quit restores at once"
+        );
         worker.join().unwrap();
     }
 
-    struct Locked(Arc<Mutex<f32>>);
+    struct Locked(Arc<Mutex<Vec<f32>>>);
     impl Volume for Locked {
         fn get(&self) -> Option<f32> {
-            Some(*self.0.lock().unwrap())
+            self.0.lock().unwrap().last().copied()
         }
         fn set(&self, value: f32) -> bool {
-            *self.0.lock().unwrap() = value;
+            self.0.lock().unwrap().push(value);
             true
         }
     }
