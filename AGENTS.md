@@ -26,6 +26,8 @@ From the root: `npm ci && npm run build` (UI type-check and bundle);
   the linker per command (`-C linker=`) forces a near-clean rebuild.
 - Run builds at normal priority with full jobs. The README's below-normal tip
   is for a human dictating, not for agents.
+- sccache caches dependencies machine-wide (user `~/.cargo/config.toml`). Never
+  set `CARGO_TARGET_DIR` as an env var (0 % hits); use `--target-dir` if you must.
 - Put Windows-only code behind `cfg(windows)`; CI lints and tests on Linux too.
 
 ## Shared machine
