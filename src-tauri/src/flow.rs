@@ -299,9 +299,7 @@ fn run_session(
     // Ctrl+Shift shortcut: read the selection (PARLA-64) and open the
     // connection the LLM request will use.
     let selection = (command && held).then(|| {
-        if crate::provider::openai::api_key(&settings).is_some() {
-            crate::provider::openai::prewarm();
-        }
+        crate::provider::openai::prewarm(&settings);
         SelectionRead::start(CommandDesktop::new(&settings))
     });
     // After the mic started, so it never delays the first syllable.
@@ -369,9 +367,14 @@ fn run_session(
         overlay.processing();
     }
     if command {
-        let outcome = finish_command(
-            app, audio, &settings, started_at, key_up, hold_error, stream, &cancelled, selection,
-        );
+        let run = command_mode::Run {
+            settings: &settings.command,
+            key_up,
+            date: command_mode::today(),
+            cancelled: &cancelled,
+            hold_error,
+        };
+        let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
         if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
             overlay.finish(ok);
@@ -538,31 +541,22 @@ fn combined_error(hold: Option<String>, error: Option<ProviderError>) -> Option<
 /// A command run after key-up (PARLA-63): the orchestrator with the real
 /// ports. A failure shows the usual notification but keeps no clip for Retry,
 /// which would paste the instruction as a dictation.
-#[allow(clippy::too_many_arguments)]
 fn finish_command(
     app: &tauri::AppHandle,
     audio: Result<crate::recorder::RecoveryAudio, ProviderError>,
     settings: &Settings,
     started_at: SystemTime,
-    key_up: Instant,
-    hold_error: Option<String>,
+    run: command_mode::Run,
     stream: Option<crate::streaming::Session>,
-    cancelled: &AtomicBool,
     selection: Option<SelectionRead>,
 ) -> command_mode::Outcome {
+    let (key_up, cancelled) = (run.key_up, run.cancelled);
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     record.kind = timing::COMMAND_KIND.into();
     let ports = command_mode::Ports {
         desktop: &CommandDesktop::new(settings),
         llm: &command_mode::responses::OpenAi(settings),
         history: &AppHistory(app),
-    };
-    let run = command_mode::Run {
-        settings: &settings.command,
-        key_up,
-        date: command_mode::today(),
-        cancelled,
-        hold_error,
     };
     // Joined once the instruction is in: the read finished long before.
     let selection = || selection.map(SelectionRead::join).unwrap_or_default();

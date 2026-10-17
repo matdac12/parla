@@ -347,9 +347,8 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
   `outcome` (`pasted`, `failed` or `cancelled`), `llm_model`, `tokens_in` and
-  `tokens_out`, the `reply`, `selection` (whether there was one),
-  `selection_chars` (its length; its text is never kept), `app` (the focused
-  executable), and stage times from key-up (`provider_returned` for the
+  `tokens_out`, the `reply`, `selection_chars` (the selection's length, 0 for
+  none; its text is never kept), `app` (the focused executable), and stage times from key-up (`provider_returned` for the
   transcript, `llm_returned` for the reply, `pasted`). A cancel while you are
   still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other

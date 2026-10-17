@@ -132,45 +132,19 @@ pub fn read_selection(desktop: &dyn Desktop) -> Selection {
     selection
 }
 
-/// Today, `YYYY-MM-DD`: local on Windows, UTC elsewhere.
+/// Today, local `YYYY-MM-DD`.
+#[cfg(windows)]
 pub fn today() -> String {
-    #[cfg(windows)]
-    let (year, month, day) = {
-        let mut now = unsafe { std::mem::zeroed() };
-        // SAFETY: GetLocalTime only fills the struct it is given.
-        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut now) };
-        (
-            i64::from(now.wYear),
-            u32::from(now.wMonth),
-            u32::from(now.wDay),
-        )
-    };
-    #[cfg(not(windows))]
-    let (year, month, day) = civil_date(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs() / 86_400) as i64,
-    );
-    format!("{year:04}-{month:02}-{day:02}")
+    // SAFETY: SYSTEMTIME is plain data, and GetLocalTime only fills it.
+    let mut now = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut now) };
+    format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
 }
 
-/// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-#[cfg(any(not(windows), test))]
-fn civil_date(days: i64) -> (i64, u32, u32) {
-    let days = days + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    } as u32;
-    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
+/// Off Windows, where Parla does not run, no date.
+#[cfg(not(windows))]
+pub fn today() -> String {
+    String::new()
 }
 
 /// What the pill and the notification show.
@@ -216,11 +190,12 @@ pub fn run(
     let transcribed = transcribe(&mut record);
     let selection = selection();
     // Whether there was a selection and its length, never its text.
-    record.selection = Some(selection.text.is_some());
-    record.selection_chars = selection
-        .text
-        .as_ref()
-        .map(|text| text.chars().count() as u64);
+    record.selection_chars = Some(
+        selection
+            .text
+            .as_ref()
+            .map_or(0, |text| text.chars().count() as u64),
+    );
     record.app = selection.app.clone();
     let outcome = match transcribed {
         None => Outcome::Silent,
@@ -707,7 +682,6 @@ mod tests {
         assert_eq!(h.writes(), ["Buongiorno a tutti.", "user copy"]);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
         let row = &h.rows()[0];
-        assert_eq!(row.selection, Some(true));
         assert_eq!(row.selection_chars, Some(12));
         assert_eq!(row.app.as_deref(), Some("notepad.exe"));
         let json = serde_json::to_string(row).unwrap();
@@ -728,7 +702,7 @@ mod tests {
         assert_eq!(h.pasted(), ["Ciao!"]);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
         let row = &h.rows()[0];
-        assert_eq!((row.selection, row.selection_chars), (Some(false), None));
+        assert_eq!(row.selection_chars, Some(0));
     }
 
     #[test]
@@ -753,7 +727,7 @@ mod tests {
         h.desktop.vscode_line = true;
         assert_eq!(h.run("Scrivi un commento"), Outcome::Pasted);
         assert_eq!(h.llm.requests.borrow()[0].selection, None);
-        assert_eq!(h.rows()[0].selection, Some(false));
+        assert_eq!(h.rows()[0].selection_chars, Some(0));
         // VS Code still overwrote the clipboard with the line: it is given back.
         assert_eq!(h.writes(), ["// hello", "user copy"]);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
@@ -811,13 +785,11 @@ mod tests {
         assert_eq!(h.writes(), ["user copy"]);
     }
 
+    #[cfg(windows)]
     #[test]
     fn today_is_a_plain_iso_date() {
-        assert_eq!(civil_date(0), (1970, 1, 1));
-        assert_eq!(civil_date(20_743), (2026, 10, 17));
-        assert_eq!(civil_date(11_016), (2000, 2, 29));
         let today = today();
-        assert_eq!(today.len(), 10);
+        assert_eq!(today.len(), 10, "{today}");
         assert!(today.starts_with("20") && today.as_bytes()[4] == b'-');
     }
 
