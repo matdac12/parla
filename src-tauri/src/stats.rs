@@ -1,7 +1,8 @@
 //! Lifetime usage counters, kept separately from `history.jsonl` so clearing the
 //! history does not reset them. Words are counted by one deterministic rule:
 //! whitespace-separated tokens of each successfully pasted transcript. Audio
-//! sent to each provider/model/mode drives the estimated cost (PARLA-19).
+//! sent to each provider/model/mode drives the estimated cost (PARLA-19), plus
+//! the LLM tokens of each command run (PARLA-66).
 
 use crate::{
     pricing::{self, BATCH, STREAMING},
@@ -31,6 +32,9 @@ pub struct Stats {
     pub first_used_at: Option<u64>,
     /// Audio sent per provider, model and mode, benchmarks included.
     pub usage: Vec<Usage>,
+    /// Command mode's LLM tokens per model, from when they were first billed
+    /// (PARLA-66); absent in older files, and not backfilled.
+    pub llm_usage: Vec<LlmUsage>,
     pub version: u32,
 }
 
@@ -43,7 +47,16 @@ pub struct Usage {
     pub requests: u64,
 }
 
-/// What the Home page shows; cost is computed from `usage` with list prices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmUsage {
+    pub model: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub requests: u64,
+}
+
+/// What the Home page shows; cost is computed from `usage` and `llm_usage`
+/// with list prices.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Summary {
     pub total_words: u64,
@@ -53,6 +66,8 @@ pub struct Summary {
     pub cost_usd: f64,
     /// Billed audio whose model has no built-in price.
     pub unpriced_audio_ms: u64,
+    /// LLM tokens (in and out) whose model has no built-in price.
+    pub unpriced_llm_tokens: u64,
 }
 
 impl Stats {
@@ -70,6 +85,13 @@ impl Stats {
                 None => unpriced_audio_ms += usage.audio_ms,
             }
         }
+        let mut unpriced_llm_tokens = 0;
+        for usage in &self.llm_usage {
+            match pricing::llm_cost_usd(&usage.model, usage.tokens_in, usage.tokens_out) {
+                Some(cost) => cost_usd += cost,
+                None => unpriced_llm_tokens += usage.tokens_in.saturating_add(usage.tokens_out),
+            }
+        }
         Summary {
             total_words: self.total_words,
             dictations: self.dictations,
@@ -77,6 +99,7 @@ impl Stats {
             first_used_at: self.first_used_at,
             cost_usd,
             unpriced_audio_ms,
+            unpriced_llm_tokens,
         }
     }
 
@@ -84,7 +107,8 @@ impl Stats {
     fn apply(&mut self, record: &DictationRecord) -> bool {
         let words = counted_words(record);
         let billed = billed_usage(record);
-        if words.is_none() && billed.is_empty() {
+        let tokens = billed_tokens(record);
+        if words.is_none() && billed.is_empty() && tokens.is_none() {
             return false;
         }
         if let Some(words) = words {
@@ -95,6 +119,9 @@ impl Stats {
         for (model, mode) in billed {
             self.bill(&record.provider_id, &model, mode, record.audio_ms);
         }
+        if let Some((model, tokens_in, tokens_out)) = tokens {
+            self.bill_tokens(model, tokens_in, tokens_out);
+        }
         self.first_used_at = Some(
             self.first_used_at
                 .map_or(record.started_at, |first| first.min(record.started_at)),
@@ -103,24 +130,38 @@ impl Stats {
     }
 
     fn bill(&mut self, provider_id: &str, model: &str, mode: &str, audio_ms: u64) {
-        let index = match self.usage.iter().position(|usage| {
+        let found = self.usage.iter_mut().find(|usage| {
             usage.provider_id == provider_id && usage.model == model && usage.mode == mode
-        }) {
-            Some(index) => index,
-            None => {
-                self.usage.push(Usage {
-                    provider_id: provider_id.into(),
-                    model: model.into(),
-                    mode: mode.into(),
-                    audio_ms: 0,
-                    requests: 0,
-                });
-                self.usage.len() - 1
+        });
+        match found {
+            Some(usage) => {
+                usage.audio_ms = usage.audio_ms.saturating_add(audio_ms);
+                usage.requests = usage.requests.saturating_add(1);
             }
-        };
-        let usage = &mut self.usage[index];
-        usage.audio_ms = usage.audio_ms.saturating_add(audio_ms);
-        usage.requests = usage.requests.saturating_add(1);
+            None => self.usage.push(Usage {
+                provider_id: provider_id.into(),
+                model: model.into(),
+                mode: mode.into(),
+                audio_ms,
+                requests: 1,
+            }),
+        }
+    }
+
+    fn bill_tokens(&mut self, model: &str, tokens_in: u64, tokens_out: u64) {
+        match self.llm_usage.iter_mut().find(|usage| usage.model == model) {
+            Some(usage) => {
+                usage.tokens_in = usage.tokens_in.saturating_add(tokens_in);
+                usage.tokens_out = usage.tokens_out.saturating_add(tokens_out);
+                usage.requests = usage.requests.saturating_add(1);
+            }
+            None => self.llm_usage.push(LlmUsage {
+                model: model.into(),
+                tokens_in,
+                tokens_out,
+                requests: 1,
+            }),
+        }
     }
 }
 
@@ -166,6 +207,23 @@ fn billed_usage(record: &DictationRecord) -> Vec<(String, &'static str)> {
         }
         _ => vec![(model, BATCH)],
     }
+}
+
+/// A command run's LLM tokens as (model, in, out), whatever its outcome: the
+/// API bills a reply even when it then fails or is not pasted. A run cancelled
+/// before the reply recorded no tokens and bills none.
+fn billed_tokens(record: &DictationRecord) -> Option<(&str, u64, u64)> {
+    if record.kind != crate::timing::COMMAND_KIND
+        || (record.tokens_in.is_none() && record.tokens_out.is_none())
+    {
+        return None;
+    }
+    let model = record.llm_model.as_deref()?;
+    Some((
+        model,
+        record.tokens_in.unwrap_or(0),
+        record.tokens_out.unwrap_or(0),
+    ))
 }
 
 fn default_model(provider_id: &str) -> &'static str {
@@ -414,6 +472,60 @@ mod tests {
         assert_eq!(usage(&stats, "gpt-4o-transcribe", BATCH), Some((1_000, 1)));
     }
 
+    fn command_run(llm_model: &str, tokens_in: u64, tokens_out: u64) -> DictationRecord {
+        let mut command = record(crate::timing::COMMAND_KIND, "translate to English", None);
+        command.provider_id = "parakeet".into();
+        command.model = Some("parakeet-tdt-0.6b-v3".into());
+        command.llm_model = Some(llm_model.into());
+        command.tokens_in = Some(tokens_in);
+        command.tokens_out = Some(tokens_out);
+        command
+    }
+
+    #[test]
+    fn total_cost_adds_each_command_runs_llm_tokens() {
+        let mut stats = Stats::default();
+        assert!(stats.apply(&command_run("gpt-6-luna", 1_000_000, 200_000)));
+        assert!(stats.apply(&command_run("gpt-6-luna", 1_000_000, 200_000)));
+        assert_eq!(counts(&stats), (0, 0));
+        assert_eq!(stats.audio_ms, 0);
+        let summary = stats.summary();
+        // 2M in × $0.10 + 0.4M out × $0.50; the local instruction is free.
+        assert!((summary.cost_usd - 0.40).abs() < 1e-9);
+        assert_eq!(summary.unpriced_llm_tokens, 0);
+    }
+
+    #[test]
+    fn llm_tokens_of_an_unknown_model_are_left_out_and_noted() {
+        let mut stats = Stats::default();
+        stats.apply(&command_run("gpt-6-luna", 1_000_000, 0));
+        stats.apply(&command_run("gpt-9-unknown", 300, 50));
+        let summary = stats.summary();
+        assert!((summary.cost_usd - 0.10).abs() < 1e-9);
+        assert_eq!(summary.unpriced_llm_tokens, 350);
+    }
+
+    #[test]
+    fn a_failed_command_still_bills_the_tokens_it_used() {
+        let mut stats = Stats::default();
+        // An empty reply fails but OpenAI billed its tokens; the instruction
+        // was transcribed, so its speech is billed too.
+        let mut failed = command_run("gpt-6-luna", 1_000_000, 0);
+        failed.error = Some("the reply was empty.".into());
+        assert!(stats.apply(&failed));
+        assert!((stats.summary().cost_usd - 0.10).abs() < 1e-9);
+        assert_eq!(
+            usage(&stats, "parakeet-tdt-0.6b-v3", BATCH),
+            Some((1_000, 1))
+        );
+        // Cancelled before the reply: no tokens recorded, nothing extra billed.
+        let mut cancelled = command_run("gpt-6-luna", 0, 0);
+        cancelled.tokens_in = None;
+        cancelled.tokens_out = None;
+        stats.apply(&cancelled);
+        assert!((stats.summary().cost_usd - 0.10).abs() < 1e-9);
+    }
+
     #[test]
     fn usage_is_billed_per_model_and_mode() {
         let mut stats = Stats::default();
@@ -587,6 +699,35 @@ mod tests {
         assert_eq!(counts(&reopened.get()), (9, 3));
         assert_eq!(reopened.get().audio_ms, 3_000);
         drop(reopened);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn counters_rebuilt_from_history_leave_command_runs_out_but_bill_them() {
+        let dir = temp_dir("rebuild-commands");
+        let history = dir.join("history.jsonl");
+        write_history(
+            &history,
+            &[
+                record("dictation", "one two three", None),
+                command_run("gpt-6-luna", 1_000_000, 200_000),
+            ],
+        );
+        let store = StatsStore::open(dir.join(FILE_NAME), &history).unwrap();
+        let stats = store.get();
+        assert_eq!(counts(&stats), (3, 1));
+        assert_eq!(stats.audio_ms, 1_000);
+        let summary = stats.summary();
+        // The dictation's OpenAI audio plus the command's LLM tokens.
+        let speech = pricing::cost_usd(
+            "openai",
+            crate::provider::openai::DEFAULT_MODEL,
+            BATCH,
+            1_000,
+        )
+        .unwrap();
+        assert!((summary.cost_usd - (speech + 0.20)).abs() < 1e-9);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

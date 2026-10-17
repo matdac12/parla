@@ -164,7 +164,7 @@ kbd {
 .sec-head button.link { color: var(--accent); font-size: 0.85rem; }
 .sec-head button.link:hover:not(:disabled) { color: var(--accent-hover); }
 
-/* Dictation rows (Home and History) */
+/* History rows (Home and History): dictations and command runs */
 .rows {
   margin: 0;
   padding: 0;
@@ -199,6 +199,18 @@ kbd {
 .act { display: flex; gap: 6px; opacity: 0.35; transition: opacity 120ms; }
 .rows li:hover .act, .act:focus-within, .rows li.failed .act { opacity: 1; }
 button.copied { color: var(--success); border-color: var(--success); background: var(--success-bg); }
+/* Command runs: the orange of the command pill, so they never read as dictation. */
+.rows { --command: #b85600; }
+@media (prefers-color-scheme: dark) { .rows { --command: #ff9f43; } }
+.tag {
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--command);
+  background: color-mix(in srgb, var(--command) 14%, transparent);
+  font-weight: 600;
+}
+.mt .bad { color: var(--danger); }
 
 /* History */
 .tools { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
