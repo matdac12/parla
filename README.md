@@ -399,7 +399,8 @@ cheap correctness check (the language, words a rewrite must keep, the source
 words a translation must drop, the bullet count). It prints every reply, a
 markdown table per effort (shares, reply time median and p90, tokens and
 cost) and the decision rule: ship `none` if it gets every outcome kind right,
-otherwise `low`. It fails if the default effort gets an outcome kind wrong.
+otherwise `low`. It fails if the default effort gets an outcome kind wrong;
+the text checks only report.
 Re-run it after changing the system prompt (`command_mode/responses.rs`) or
 adding a tool, and read the replies too: the checks are heuristics.
 

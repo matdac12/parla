@@ -219,11 +219,12 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
 struct Verdict {
     /// Text when text was expected, an `open_url` call when a page was.
     kind_ok: bool,
-    /// Text only: no preamble, wrapping quotes or markdown (fences, emphasis,
-    /// hard breaks).
-    clean: Option<bool>,
-    /// The cheap correctness check: language, kept words and bullets for a
-    /// text; for a page, Parla's validator, the host and the terms.
+    /// A text with no preamble, wrapping quotes, markdown, stray spaces or
+    /// leaked tags.
+    clean: bool,
+    /// The cheap correctness check: language, kept and dropped words and
+    /// bullets for a text; for a page, Parla's validator, the host and the
+    /// terms.
     correct: bool,
     problems: Vec<String>,
 }
@@ -311,116 +312,127 @@ fn language(text: &str) -> Option<Lang> {
     (it != en).then_some(if it > en { It } else { En })
 }
 
+/// The bullets the system prompt asks for.
 fn is_bullet(line: &str) -> bool {
-    let line = line.trim_start();
-    ["- ", "* ", "• "]
-        .iter()
-        .any(|marker| line.starts_with(marker))
-        || line.split_once(". ").is_some_and(|(number, _)| {
-            !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
-        })
+    line.starts_with("- ")
 }
 
 fn grade(expect: &Expect, reply: &Reply) -> Verdict {
-    let mut verdict = Verdict::default();
-    match expect {
-        Expect::Text {
-            lang,
-            keeps,
-            drops,
-            bullets,
-        } => {
-            if let Some(call) = &reply.call {
-                verdict
-                    .problems
-                    .push(format!("called {} instead of replying", call.name));
-                return verdict;
-            }
-            verdict.kind_ok = true;
-            let text = reply.text.trim();
-            let first = text.lines().next().unwrap_or_default().to_lowercase();
-            let mut dirty = Vec::new();
-            if PREAMBLES.iter().any(|opener| first.starts_with(opener)) {
-                dirty.push("preamble".to_string());
-            }
-            if [('"', '"'), ('“', '”'), ('«', '»'), ('\'', '\''), ('‘', '’')]
-                .iter()
-                .any(|(open, close)| text.starts_with(*open) && text.ends_with(*close))
-            {
-                dirty.push("wrapped in quotes".into());
-            }
-            if text.contains("```") {
-                dirty.push("markdown fence".into());
-            }
-            if text.contains("**") || text.contains("__") {
-                dirty.push("markdown emphasis".into());
-            }
-            // Markdown hard breaks and odd indents, pasted as stray spaces.
-            if reply.text.lines().any(|line| line != line.trim()) {
-                dirty.push("stray spaces".into());
-            }
-            if ["<|", "|>", "<br", "</"]
-                .iter()
-                .any(|tag| text.contains(tag))
-            {
-                dirty.push("leaked tag or chat token".into());
-            }
-            verdict.clean = Some(dirty.is_empty());
-            verdict.problems = dirty;
+    match (expect, &reply.call) {
+        (Expect::Text { .. }, Some(call)) => Verdict {
+            problems: vec![format!("called {} instead of replying", call.name)],
+            ..Verdict::default()
+        },
+        (Expect::Open { .. }, None) => Verdict {
+            problems: vec!["replied with text instead of opening".into()],
+            ..Verdict::default()
+        },
+        (
+            Expect::Text {
+                lang,
+                keeps,
+                drops,
+                bullets,
+            },
+            None,
+        ) => grade_text(*lang, keeps, drops, *bullets, &reply.text),
+        (Expect::Open { hosts, has }, Some(call)) => grade_page(hosts, has, call),
+    }
+}
 
-            let lower = text.to_lowercase();
-            let mut wrong = missing(&lower, keeps);
-            wrong.extend(
-                drops
-                    .iter()
-                    .filter(|word| lower.contains(*word))
-                    .map(|word| format!("kept the source's {word:?}")),
-            );
-            if let (Some(want), Some(got)) = (lang, language(text)) {
-                if *want != got {
-                    wrong.push(format!("in {got:?}, not {want:?}"));
-                }
-            }
-            let found = text.lines().filter(|line| is_bullet(line)).count();
-            if found < *bullets {
-                wrong.push(format!("{found} bullets, wanted {bullets}"));
-            }
-            verdict.correct = wrong.is_empty();
-            verdict.problems.extend(wrong);
+fn grade_text(
+    lang: Option<Lang>,
+    keeps: &[&'static str],
+    drops: &[&'static str],
+    bullets: usize,
+    pasted: &str,
+) -> Verdict {
+    let text = pasted.trim();
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or_default().to_lowercase();
+    let mut problems = Vec::new();
+    // An opener, or a first line that announces what follows ("Testo corretto:").
+    if PREAMBLES.iter().any(|opener| first.starts_with(opener))
+        || (first.ends_with(':') && lines.next().is_some())
+    {
+        problems.push("preamble".to_string());
+    }
+    if [('"', '"'), ('“', '”'), ('«', '»'), ('\'', '\''), ('‘', '’')]
+        .iter()
+        .any(|(open, close)| text.starts_with(*open) && text.ends_with(*close))
+    {
+        problems.push("wrapped in quotes".into());
+    }
+    if text.contains("```") {
+        problems.push("markdown fence".into());
+    }
+    if text.contains("**") || text.contains("__") {
+        problems.push("markdown emphasis".into());
+    }
+    // Markdown hard breaks and odd indents, pasted as stray spaces.
+    if pasted.lines().any(|line| line != line.trim()) {
+        problems.push("stray spaces".into());
+    }
+    if ["<|", "|>", "<br", "</"]
+        .iter()
+        .any(|tag| text.contains(tag))
+    {
+        problems.push("leaked tag or chat token".into());
+    }
+    let dirt = problems.len();
+
+    let lower = text.to_lowercase();
+    problems.extend(missing(&lower, keeps));
+    problems.extend(
+        drops
+            .iter()
+            .filter(|word| lower.contains(*word))
+            .map(|word| format!("kept the source's {word:?}")),
+    );
+    if let (Some(want), Some(got)) = (lang, language(text)) {
+        if want != got {
+            problems.push(format!("in {got:?}, not {want:?}"));
         }
-        Expect::Open { hosts, has } => {
-            let Some(call) = &reply.call else {
-                verdict
-                    .problems
-                    .push("replied with text instead of opening".into());
-                return verdict;
-            };
-            verdict.kind_ok = true;
-            let url = match tools::validate(call) {
-                Ok(Tool::OpenUrl(url)) => url,
-                Err(refused) => {
-                    verdict.problems.push(refused);
-                    return verdict;
-                }
-            };
+    }
+    let found = text.lines().filter(|line| is_bullet(line)).count();
+    if found < bullets {
+        problems.push(format!("{found} bullets, wanted {bullets}"));
+    }
+    Verdict {
+        kind_ok: true,
+        clean: dirt == 0,
+        correct: problems.len() == dirt,
+        problems,
+    }
+}
+
+/// Parla's own validator, so a refused address fails as it would in the app.
+fn grade_page(hosts: &[&'static str], has: &[&'static str], call: &ToolCall) -> Verdict {
+    let problems = match tools::validate(call) {
+        Err(refused) => vec![refused],
+        Ok(Tool::OpenUrl(url)) => {
             let host = url.host_str().unwrap_or_default();
+            let mut problems = Vec::new();
             if !hosts
                 .iter()
                 .any(|want| host == *want || host.ends_with(&format!(".{want}")))
             {
-                verdict.problems.push(format!("opened {host}"));
+                problems.push(format!("opened {host}"));
             }
             let mut address = format!("{host}{}", url.path());
             for (_, value) in url.query_pairs() {
                 address = address + " " + &value;
             }
-            verdict
-                .problems
-                .extend(missing(&address.to_lowercase(), has));
-            verdict.correct = verdict.problems.is_empty();
+            problems.extend(missing(&address.to_lowercase(), has));
+            problems
         }
+    };
+    Verdict {
+        kind_ok: true,
+        clean: false,
+        correct: problems.is_empty(),
+        problems,
     }
-    verdict
 }
 
 const EFFORTS: [&str; 2] = ["none", "low"];
@@ -499,7 +511,7 @@ fn table(runs: &[Run]) -> String {
             share(runs, opens, |run| run.verdict.correct)
         }),
         row("Text clean (no preamble, quotes or markdown)", &|runs| {
-            share(runs, is_text, |run| run.verdict.clean == Some(true))
+            share(runs, is_text, |run| run.verdict.clean)
         }),
         row("Text correct (language, kept words, bullets)", &|runs| {
             share(runs, is_text, |run| run.verdict.correct)
@@ -511,7 +523,7 @@ fn table(runs: &[Run]) -> String {
         row("Reply time median / p90, `open_url`", &|runs| {
             times(runs, opens)
         }),
-        row("Tokens in / out (cost)", &|runs| spend(runs)),
+        row("Tokens in / out (cost)", &spend),
     ]
     .concat()
 }
@@ -636,7 +648,7 @@ mod grading {
     fn opens(url: &str) -> Reply {
         Reply {
             call: Some(ToolCall {
-                name: "open_url".into(),
+                name: tools::OPEN_URL.into(),
                 arguments: serde_json::json!({ "url": url }).to_string(),
             }),
             ..text("")
@@ -654,6 +666,7 @@ mod grading {
         for dirty in [
             "Ecco la versione formale:\nLa saluto, a domani.",
             "Certo! La saluto, a domani.",
+            "Testo formale:\nLa saluto, a domani.",
             "\"La saluto, a domani.\"",
             "«La saluto, a domani.»",
             "```\nLa saluto, a domani.\n```",
@@ -668,7 +681,7 @@ mod grading {
         ] {
             let verdict = grade(&FORMAL, &text(dirty));
             assert!(verdict.kind_ok, "{dirty:?}");
-            assert_eq!(verdict.clean, Some(false), "{dirty:?}");
+            assert!(!verdict.clean, "{dirty:?}");
         }
     }
 
@@ -679,7 +692,7 @@ mod grading {
         assert!(grade(&FORMAL, &text("Arrivederci, a domani.")).correct);
         let english = grade(&FORMAL, &text("Kind regards, see you tomorrow."));
         assert!(!english.correct);
-        assert_eq!(english.clean, Some(true), "wrong but clean");
+        assert!(english.clean, "wrong but clean");
         assert!(!grade(&FORMAL, &text("La saluto cordialmente.")).correct);
 
         let translated = says(En, &["thursday", "meeting|call"]);
@@ -720,17 +733,11 @@ mod grading {
             )
             .correct
         );
+        // Only the "- " bullets the system prompt asks for.
         assert!(
-            grade(
+            !grade(
                 &bullets,
                 &text("• Comprare il latte\n• Chiamare il dentista")
-            )
-            .correct
-        );
-        assert!(
-            grade(
-                &bullets,
-                &text("1. Comprare il latte\n2. Chiamare il dentista")
             )
             .correct
         );
@@ -745,7 +752,6 @@ mod grading {
             &opens("https://www.google.com/search?q=ristoranti+a+Milano"),
         );
         assert!(google.kind_ok && google.correct, "{:?}", google.problems);
-        assert_eq!(google.clean, None);
         assert!(
             grade(
                 &search,
@@ -778,7 +784,7 @@ mod grading {
             tokens: (1_000_000, 100_000),
             verdict: Verdict {
                 kind_ok,
-                clean: Some(true),
+                clean: true,
                 correct,
                 problems: Vec::new(),
             },
@@ -788,8 +794,6 @@ mod grading {
             .iter()
             .position(|(_, _, expect)| matches!(expect, Expect::Open { .. }))
             .unwrap();
-        assert!(is_text(&run("none", 0, 0, true, true)));
-        assert!(!is_text(&run("none", page, 0, true, true)));
         let table = table(&[
             run("none", 0, 1000, true, true),
             run("none", page, 3000, false, false),
