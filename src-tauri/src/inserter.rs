@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_RESTORE_DELAY_MS: u64 = 250;
 
-/// The user's clipboard while command mode's Ctrl+Insert holds it (PARLA-64):
+/// The user's clipboard while command mode's copy holds it (PARLA-64):
 /// `saved` is owed back as long as the clipboard still holds `copied`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Borrowed {
@@ -255,11 +255,13 @@ pub fn foreground_class() -> Option<String> {
 /// A mouse button is down: a Ctrl+Shift+drag, not a command (PARLA-78).
 #[cfg(windows)]
 pub fn mouse_button_down() -> bool {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    // Left, right, middle, X1, X2. SAFETY: no pointer parameters.
-    [0x01, 0x02, 0x04, 0x05, 0x06]
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+    };
+    // SAFETY: no pointer parameters.
+    [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2]
         .into_iter()
-        .any(|vk| unsafe { GetAsyncKeyState(vk) } < 0)
+        .any(|vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
 }
 
 /// The paste transaction: at most one restore is pending at a time.

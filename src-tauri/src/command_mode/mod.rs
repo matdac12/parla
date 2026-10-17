@@ -40,6 +40,7 @@ pub trait Desktop {
     fn foreground_app(&self) -> Option<String>;
     /// The focused top-level window's class, such as `ConsoleWindowClass`.
     fn foreground_class(&self) -> Option<String>;
+    fn now(&self) -> Instant;
     fn wait(&self, delay: Duration);
     /// Writes the saved text back now, unless the clipboard changed since the copy.
     fn give_back(&self, borrowed: &Borrowed);
@@ -87,6 +88,8 @@ pub const COPY_WAIT: Duration = Duration::from_millis(150);
 /// else's (a clipboard manager, a sync): never the selection, and never
 /// overwritten by the give-back (PARLA-78).
 pub const LATE_COPY_WAIT: Duration = Duration::from_secs(1);
+/// About: Windows may round a 5 ms wait up to its 15.6 ms timer tick, so the
+/// waits above are deadlines, not counts of polls.
 const COPY_POLL: Duration = Duration::from_millis(5);
 
 /// A copy shortcut for the selection read.
@@ -99,22 +102,29 @@ pub enum CopyKey {
     CtrlC,
 }
 
-/// Whether the focused window may get Ctrl+C: never a console, a terminal or
-/// an app with a terminal pane (an IDE, T3 Code), where Ctrl+C with nothing
-/// selected interrupts the running program. A window Parla cannot name gets
-/// none either.
+/// Whether the focused window may get Ctrl+C: never a console, a terminal, an
+/// app with a terminal pane (an IDE) or a window onto another machine (remote
+/// desktop, a VM), where Ctrl+C with nothing selected interrupts the running
+/// program. Nor a Chromium, Firefox or Java window: they all copy on
+/// Ctrl+Insert, so a copy that missed there had nothing selected, and they
+/// host terminals of their own (VS Code, T3 Code, a web shell in a tab,
+/// JetBrains). A window Parla cannot name gets none either.
 pub fn takes_ctrl_c(class: Option<&str>, app: Option<&str>) -> bool {
-    const CLASSES: [&str; 6] = [
+    const CLASSES: &[&str] = &[
         "ConsoleWindowClass",
         "CASCADIA_HOSTING_WINDOW_CLASS",
         "PseudoConsoleWindow",
         "mintty",
         "PuTTY",
         "VirtualConsoleClass",
+        "MozillaWindowClass",
+        "SunAwtFrame",
+        "TscShellContainerClass",
     ];
-    // Lowercase, without `.exe`.
-    const APPS: [&str; 41] = [
-        // Consoles, shells and terminals.
+    // Lowercase, without `.exe`. Any name with `term`, `console` or `conhost`
+    // in it is out as well (Windows Terminal, OpenConsole, MobaXterm…).
+    const APPS: &[&str] = &[
+        // Shells and terminals.
         "cmd",
         "powershell",
         "powershell_ise",
@@ -124,39 +134,43 @@ pub fn takes_ctrl_c(class: Option<&str>, app: Option<&str>) -> bool {
         "bash",
         "mintty",
         "alacritty",
-        "wezterm",
-        "wezterm-gui",
         "hyper",
         "tabby",
         "conemu",
         "conemu64",
         "putty",
         "kitty",
-        "mobaxterm",
-        "termius",
         "warp",
         "rio",
         "ghostty",
-        "extraterm",
-        // Editors and IDEs with a terminal pane.
+        "xshell",
+        "securecrt",
+        "mremoteng",
+        // Editors and IDEs with a terminal pane, whatever their window class.
         "code",
         "code - insiders",
+        "code - oss",
         "cursor",
         "windsurf",
         "vscodium",
+        "positron",
         "zed",
         "devenv",
-        "idea64",
-        "pycharm64",
-        "webstorm64",
-        "rider64",
-        "clion64",
-        "goland64",
-        "phpstorm64",
-        "rubymine64",
-        "rustrover64",
-        "datagrip64",
-        "studio64",
+        "eclipse",
+        "fleet",
+        // Other machines.
+        "mstsc",
+        "msrdc",
+        "vmconnect",
+        "virtualboxvm",
+        "vmware",
+        "vmplayer",
+        "wfica32",
+        "cdviewer",
+        "anydesk",
+        "parsecd",
+        "rustdesk",
+        "teamviewer",
     ];
     let (Some(class), Some(app)) = (class, app) else {
         return false;
@@ -164,10 +178,13 @@ pub fn takes_ctrl_c(class: Option<&str>, app: Option<&str>) -> bool {
     let app = app.to_lowercase();
     let app = app.strip_suffix(".exe").unwrap_or(&app);
     !CLASSES.contains(&class)
+        && !class.starts_with("Chrome_WidgetWin_")
         && !APPS.contains(&app)
-        // Windows Terminal, OpenConsole, conhost, any other *term* or console,
-        // and every T3 Code channel.
-        && !["term", "console", "conhost"].iter().any(|name| app.contains(name))
+        && !["term", "console", "conhost"]
+            .iter()
+            .any(|name| app.contains(name))
+        // T3 Code's channels; JetBrains IDEs end in 64 (`idea64`), and their
+        // window is `SunAwtFrame` anyway.
         && !app.starts_with("t3 code")
 }
 
@@ -206,10 +223,15 @@ impl Selection {
 /// speaking: saves the clipboard, sends Ctrl+Insert and watches the clipboard
 /// sequence for `COPY_WAIT`; then Ctrl+C, where the window takes it, for as
 /// long again. A change with text is the selection. A slow app's copy counts
-/// until `LATE_COPY_WAIT`, or until `joined`: the run wants the selection.
+/// until `LATE_COPY_WAIT` after the first key, or until `joined`: the run
+/// wants the selection. A copy that lands later still overwrites the
+/// clipboard, and is not given back: Parla cannot tell it from somebody
+/// else's write.
 pub fn read_selection(desktop: &dyn Desktop, joined: &AtomicBool) -> Selection {
+    // The same window for both, read before any key is sent.
+    let (app, class) = (desktop.foreground_app(), desktop.foreground_class());
     let mut selection = Selection {
-        app: desktop.foreground_app(),
+        app,
         ..Selection::default()
     };
     // Unsaved, the user's clipboard would be lost to the copy.
@@ -221,41 +243,34 @@ pub fn read_selection(desktop: &dyn Desktop, joined: &AtomicBool) -> Selection {
         }
     };
     let before = desktop.clipboard_sequence();
-    let mut polls_left = LATE_COPY_WAIT.as_millis() / COPY_POLL.as_millis();
-    // Up to `polls` more polls, within `LATE_COPY_WAIT` in all; with
-    // `joined`, until the run joins, then one last look.
-    let mut watch = |polls: u128, joined: Option<&AtomicBool>| {
-        for _ in 0..polls.min(polls_left) {
-            if joined.is_some_and(|joined| joined.load(Ordering::Acquire)) {
-                break;
-            }
-            polls_left -= 1;
+    let copied = || desktop.clipboard_sequence() != before;
+    // Polls until the clipboard moves on, `until` passes or `stop` holds;
+    // then one last look.
+    let watch = |until: Instant, stop: &dyn Fn() -> bool| {
+        while !stop() && desktop.now() < until {
             desktop.wait(COPY_POLL);
-            if desktop.clipboard_sequence() != before {
+            if copied() {
                 return true;
             }
         }
-        desktop.clipboard_sequence() != before
+        copied()
     };
     // A failed copy leaves the sequence alone: no selection.
-    let copy = |key| {
+    let send = |key| {
         if let Err(error) = desktop.send_copy(key) {
             eprintln!("Parla selection copy ({key:?}) failed: {error}");
         }
     };
-    let window = COPY_WAIT.as_millis() / COPY_POLL.as_millis();
-    copy(CopyKey::CtrlInsert);
-    let mut copied = watch(window, None);
-    if !copied
-        && takes_ctrl_c(
-            desktop.foreground_class().as_deref(),
-            selection.app.as_deref(),
-        )
-    {
-        copy(CopyKey::CtrlC);
-        copied = watch(window, None);
+    let first = desktop.now();
+    let never = || false;
+    send(CopyKey::CtrlInsert);
+    let mut answered = watch(first + COPY_WAIT, &never);
+    if !answered && takes_ctrl_c(class.as_deref(), selection.app.as_deref()) {
+        send(CopyKey::CtrlC);
+        answered = watch(desktop.now() + COPY_WAIT, &never);
     }
-    if copied || watch(u128::MAX, Some(joined)) {
+    let joined = || joined.load(Ordering::Acquire);
+    if answered || watch(first + LATE_COPY_WAIT, &joined) {
         selection.take_copy(desktop, saved);
     }
     selection
@@ -517,6 +532,8 @@ mod tests {
         class: Option<String>,
         /// The copy keys sent, in order.
         keys: RefCell<Vec<CopyKey>>,
+        /// The fake clock: `start` plus every wait.
+        start: Instant,
         waited: Cell<Duration>,
         /// Set once the run joins the read: at once unless `join_after`
         /// polls are given.
@@ -540,6 +557,7 @@ mod tests {
                 app: Some("notepad.exe".into()),
                 class: Some("Notepad".into()),
                 keys: RefCell::default(),
+                start: Instant::now(),
                 waited: Cell::new(Duration::ZERO),
                 joined: AtomicBool::new(true),
                 join_after: Cell::new(None),
@@ -591,6 +609,9 @@ mod tests {
         }
         fn foreground_class(&self) -> Option<String> {
             self.class.clone()
+        }
+        fn now(&self) -> Instant {
+            self.start + self.waited.get()
         }
         fn wait(&self, delay: Duration) {
             self.waited.set(self.waited.get() + delay);
@@ -1190,8 +1211,18 @@ mod tests {
     fn ctrl_c_goes_only_to_a_window_parla_can_name_that_is_no_terminal() {
         for (class, app, takes) in [
             (Some("Notepad"), Some("notepad.exe"), true),
-            (Some("PDFgear"), Some("pdfeditor.exe"), true),
-            (Some("Chrome_WidgetWin_1"), Some("olk.exe"), true),
+            (
+                Some("HwndWrapper[pdfeditor.exe;;1f0e]"),
+                Some("pdfeditor.exe"),
+                true,
+            ),
+            (Some("Outlook Host"), Some("olk.exe"), true),
+            // These copy on Ctrl+Insert, and may host a terminal.
+            (Some("Chrome_WidgetWin_1"), Some("msedge.exe"), false),
+            (Some("MozillaWindowClass"), Some("firefox.exe"), false),
+            // Windows onto another machine.
+            (Some("TscShellContainerClass"), Some("mstsc.exe"), false),
+            (Some("VMConnect"), Some("vmconnect.exe"), false),
             (Some("ConsoleWindowClass"), Some("cmd.exe"), false),
             // A console app's own window class gives it away.
             (Some("ConsoleWindowClass"), Some("myapp.exe"), false),

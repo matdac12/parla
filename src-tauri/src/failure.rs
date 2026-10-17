@@ -26,7 +26,7 @@ pub struct RetryMenu(pub tauri::menu::MenuItem<tauri::Wry>);
 /// Only trusted summaries are displayed: raw server, transport and config strings
 /// can contain credentials of arbitrary shape, so none are copied into the toast.
 pub fn user_message(provider_display_name: &str, error: &ProviderError) -> String {
-    message(
+    provider_message(
         provider_display_name,
         error,
         "dictation failed. Check Settings and try again.",
@@ -34,7 +34,7 @@ pub fn user_message(provider_display_name: &str, error: &ProviderError) -> Strin
 }
 
 /// `fallback` covers Parla's own reasons that have no message of their own.
-fn message(provider_display_name: &str, error: &ProviderError, fallback: &str) -> String {
+fn provider_message(provider_display_name: &str, error: &ProviderError, fallback: &str) -> String {
     let reason = match error {
         ProviderError::MissingConfig(reason) => {
             let lower = reason.to_lowercase();
@@ -85,7 +85,7 @@ fn message(provider_display_name: &str, error: &ProviderError, fallback: &str) -
 /// A command run's instruction could not be transcribed (PARLA-78): the
 /// provider's reason, worded for command mode.
 pub fn instruction_message(provider_display_name: &str, error: &ProviderError) -> String {
-    let reason = message(
+    let reason = provider_message(
         provider_display_name,
         error,
         "the instruction could not be transcribed. Try again.",
@@ -97,9 +97,15 @@ const DICTATION_FAILED: &str = "Parla — dictation failed";
 const COMMAND_FAILED: &str = "Parla — command failed";
 
 pub fn notify_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
-    let provider = registry::get(provider_id);
-    let name = provider.as_ref().map_or("Provider", |p| p.display_name());
-    notify_failure(app, DICTATION_FAILED, &user_message(name, error));
+    notify_failure(
+        app,
+        DICTATION_FAILED,
+        &user_message(&provider_name(provider_id), error),
+    );
+}
+
+fn provider_name(provider_id: &str) -> String {
+    registry::get(provider_id).map_or_else(|| "Provider".into(), |p| p.display_name().into())
 }
 
 /// A command run's LLM step or paste failed (PARLA-63). The reason is also its
@@ -133,9 +139,11 @@ pub fn notify_command_error(app: &tauri::AppHandle, error: &ProviderError) {
 }
 
 pub fn notify_instruction_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
-    let provider = registry::get(provider_id);
-    let name = provider.as_ref().map_or("Provider", |p| p.display_name());
-    notify_failure(app, COMMAND_FAILED, &instruction_message(name, error));
+    notify_failure(
+        app,
+        COMMAND_FAILED,
+        &instruction_message(&provider_name(provider_id), error),
+    );
 }
 
 fn notify_failure(app: &tauri::AppHandle, title: &str, message: &str) {

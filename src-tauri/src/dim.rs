@@ -752,19 +752,25 @@ mod tests {
     /// (PARLA-83). A quarter of the fade is exact in f32, so each fade takes
     /// exactly four steps and ends on its exact target.
     #[derive(Clone)]
-    struct StepClock(Arc<(Instant, AtomicU32)>);
+    struct StepClock {
+        start: Instant,
+        steps: Arc<AtomicU32>,
+    }
     const STEP: Duration = Duration::from_millis(FADE.as_millis() as u64 / 4);
     impl StepClock {
         fn new() -> Self {
-            Self(Arc::new((Instant::now(), AtomicU32::new(0))))
+            Self {
+                start: Instant::now(),
+                steps: Arc::default(),
+            }
         }
         fn read(&self) -> Instant {
-            self.0 .0 + STEP * self.0 .1.fetch_add(1, Ordering::SeqCst)
+            self.start + STEP * self.steps.fetch_add(1, Ordering::SeqCst)
         }
         /// Time passes with no reads: the worker sits idle.
         fn skip(&self, idle: Duration) {
             let steps = (idle.as_millis() / STEP.as_millis()) as u32;
-            self.0 .1.fetch_add(steps, Ordering::SeqCst);
+            self.steps.fetch_add(steps, Ordering::SeqCst);
         }
     }
 

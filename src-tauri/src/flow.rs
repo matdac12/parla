@@ -668,7 +668,8 @@ fn finish_command(
         browser: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
     };
-    // Joined once the instruction is in: the read finished long before.
+    // Joined once the instruction is in: the read has finished, or stops
+    // watching for a slow copy.
     let selection = || selection.map(SelectionRead::join).unwrap_or_default();
     let outcome = command_mode::run(&ports, run, record, selection, |record| {
         let clip = match audio {
@@ -734,6 +735,9 @@ impl command_mode::Desktop for CommandDesktop {
     }
     fn foreground_class(&self) -> Option<String> {
         inserter::foreground_class()
+    }
+    fn now(&self) -> Instant {
+        Instant::now()
     }
     /// The join unparks it, so the run never waits out a poll.
     fn wait(&self, delay: Duration) {

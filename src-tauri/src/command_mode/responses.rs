@@ -196,7 +196,7 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
                 serde_json::from_str(body).map_err(|_| ProviderError::Other(UNREADABLE.into()))?;
             let usage = response.usage.take();
             Ok(Reply {
-                content: content(response).unwrap_or_else(Content::Unusable),
+                content: read_content(response).unwrap_or_else(Content::Unusable),
                 tokens_in: usage.as_ref().and_then(|usage| usage.input_tokens),
                 tokens_out: usage.and_then(|usage| usage.output_tokens),
             })
@@ -220,7 +220,7 @@ const UNREADABLE: &str = "the reply could not be read.";
 const EMPTY: &str = "the reply was empty.";
 
 /// What a 2xx response holds, or why it has nothing to show.
-fn content(response: Response) -> Result<Content, String> {
+fn read_content(response: Response) -> Result<Content, String> {
     if response.status.as_deref() != Some("completed") {
         let reason = response
             .incomplete_details

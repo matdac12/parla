@@ -349,12 +349,15 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   Parla saves your clipboard text, sends **Ctrl+Insert** and watches the
   clipboard for about 150 ms. If nothing is copied (some apps, such as the
   PDFgear PDF viewer, ignore Ctrl+Insert), it sends **Ctrl+C** and watches as
-  long again, except in a console, a terminal or an app with a terminal pane
-  (Windows Terminal, conhost, Git Bash, VS Code, JetBrains IDEs, T3 Code…),
-  which never get Ctrl+C. New, non-empty text is the selection. A slower copy
-  still counts until about 1 s after the first key or until you release,
-  whichever comes first; a clipboard write after that is someone else's (a
-  clipboard manager, a sync) and is neither the selection nor overwritten.
+  long again. Ctrl+C never goes to a console, a terminal, an app with a
+  terminal pane (Windows Terminal, conhost, Git Bash, VS Code, Visual Studio,
+  T3 Code…), a remote desktop or VM window, or a Chromium, Firefox or Java
+  window (browsers, Electron apps, JetBrains IDEs: they copy on Ctrl+Insert
+  anyway, and may host a terminal). New, non-empty text is the selection. A
+  slower copy still counts until about 1 s after the first key or until you
+  release, whichever comes first. A clipboard write after that is taken as
+  someone else's (a clipboard manager, a sync): it is neither the selection
+  nor overwritten, so a copy that slow is not given back either.
   Nothing new, or an editor's copy of the whole line when nothing is selected
   (VS Code, Visual Studio, Notepad++), means no selection. The focused app's
   executable name is noted too, and the connection to OpenAI is opened ahead
@@ -426,8 +429,10 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
   `outcome` (`shown`, `opened`, `failed` or `cancelled`; `pasted` on rows from
-  before the Card), `llm_model`, `tokens_in` and `tokens_out` (billed whatever
-  the outcome), the `reply` and its `reply_kind` (`edit` or `answer`; not
+  before the Card), `llm_model`, `tokens_in` and `tokens_out` (whenever a
+  reply came back, even one cut off, refused or unreadable; a request Esc
+  drops mid-flight is never read, so its tokens are not counted), the
+  `reply` and its `reply_kind` (`edit` or `answer`; not
   `kind`, which says the row is a command),
   for an `opened` run the `tool` (`open_url`) and the `url`,
   `selection_chars` (the selection's length, 0 for none; its text is never
