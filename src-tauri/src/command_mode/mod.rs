@@ -62,7 +62,7 @@ pub trait HistorySink {
 pub struct Ports<'a> {
     pub desktop: &'a dyn Desktop,
     pub llm: &'a dyn Llm,
-    pub urls: &'a dyn UrlOpener,
+    pub browser: &'a dyn UrlOpener,
     pub history: &'a dyn HistorySink,
 }
 
@@ -333,15 +333,15 @@ fn run_tool(
     record: &mut DictationRecord,
     call: &responses::ToolCall,
 ) -> Outcome {
-    let action = match tools::validate(call) {
-        Ok(action) => action,
+    let tool = match tools::validate(call) {
+        Ok(tool) => tool,
         Err(reason) => return Outcome::Failed(Failure::Command(ProviderError::Other(reason))),
     };
-    record.tool = Some(call.name.clone());
-    match action.run(ports.urls) {
+    match tool.run(ports.browser) {
         Ok(()) => {
             record.opened = Some(timing::elapsed_ms(run.key_up));
-            let tools::Action::OpenUrl(url) = action;
+            record.tool = Some(call.name.clone());
+            let tools::Tool::OpenUrl(url) = tool;
             record.url = Some(url.to_string());
             Outcome::Opened {
                 host: url.host_str().unwrap_or_default().into(),
@@ -552,7 +552,7 @@ mod tests {
             let ports = Ports {
                 desktop: &self.desktop,
                 llm: &self.llm,
-                urls: &self.browser,
+                browser: &self.browser,
                 history: &self.history,
             };
             let input = Run {
@@ -1033,5 +1033,7 @@ mod tests {
         let row = &h.rows()[0];
         assert_eq!(row.outcome, Some(CommandOutcome::Failed));
         assert!(row.error.as_deref().unwrap().contains("no default browser"));
+        // `tool` and `url` describe a page that opened.
+        assert!(row.tool.is_none() && row.url.is_none());
     }
 }

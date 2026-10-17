@@ -109,22 +109,30 @@ fn place(app: &tauri::AppHandle) {
 }
 
 /// The overlay window's size: the pill alone, under live captions, or with a
-/// result label. Kept until a session or a label asks for another.
+/// result label.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Size {
     Pill,
     Captions,
     Labelled,
 }
+/// The window's size now.
 static SIZE: AtomicU8 = AtomicU8::new(Size::Pill as u8);
+/// The session's size: a label widens the window only until the pill hides,
+/// so the next key-down finds it at the right size.
+static SESSION_SIZE: AtomicU8 = AtomicU8::new(Size::Pill as u8);
 
 impl Size {
-    fn current() -> Self {
-        match SIZE.load(Ordering::Acquire) {
-            1 => Size::Captions,
-            2 => Size::Labelled,
+    fn load(cell: &AtomicU8) -> Self {
+        match cell.load(Ordering::Acquire) {
+            size if size == Size::Captions as u8 => Size::Captions,
+            size if size == Size::Labelled as u8 => Size::Labelled,
             _ => Size::Pill,
         }
+    }
+
+    fn current() -> Self {
+        Self::load(&SIZE)
     }
 
     fn dimensions(self) -> (f64, f64) {
@@ -147,7 +155,9 @@ impl Size {
 }
 
 fn configure(app: &tauri::AppHandle, captions: bool, generation: u64) {
-    if captions { Size::Captions } else { Size::Pill }.apply(app);
+    let size = if captions { Size::Captions } else { Size::Pill };
+    SESSION_SIZE.store(size as u8, Ordering::Release);
+    size.apply(app);
     let _ = app.emit_to(
         LABEL,
         "caption-session",
@@ -281,6 +291,8 @@ fn hide(app: &tauri::AppHandle) {
         let _ = window.as_ref().hide();
         set_memory_target(&window, true);
     }
+    // Off the key-down path: undoes a label's widening while hidden.
+    Size::load(&SESSION_SIZE).apply(app);
 }
 
 impl Overlay {

@@ -12,25 +12,25 @@ pub const OPEN_URL: &str = "open_url";
 
 /// A tool call that passed the allowlist and its validator, ready to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
+pub enum Tool {
     /// An http or https page, for the default browser.
     OpenUrl(Url),
 }
 
 /// The allowlist and the validators: an unknown tool, malformed arguments or
 /// an address that is not an http(s) page is refused, with the reason.
-pub fn validate(call: &ToolCall) -> Result<Action, String> {
+pub fn validate(call: &ToolCall) -> Result<Tool, String> {
     match call.name.as_str() {
-        OPEN_URL => web_page(&call.arguments).map(Action::OpenUrl),
+        OPEN_URL => parse_web_page(&call.arguments).map(Tool::OpenUrl),
         name => Err(format!("the reply asked for an unknown tool ({name}).")),
     }
 }
 
-impl Action {
+impl Tool {
     /// The executor.
-    pub fn run(&self, urls: &dyn UrlOpener) -> Result<(), String> {
+    pub fn run(&self, browser: &dyn UrlOpener) -> Result<(), String> {
         match self {
-            Action::OpenUrl(url) => urls.open(url.as_str()),
+            Tool::OpenUrl(url) => browser.open(url.as_str()),
         }
     }
 }
@@ -94,7 +94,7 @@ struct OpenUrlArguments {
 
 /// Only http and https pages with a host: never a file, a program, a script
 /// or another app's protocol.
-fn web_page(arguments: &str) -> Result<Url, String> {
+fn parse_web_page(arguments: &str) -> Result<Url, String> {
     let arguments: OpenUrlArguments = serde_json::from_str(arguments)
         .map_err(|_| "the reply's open_url call could not be read.".to_string())?;
     let url = Url::parse(arguments.url.trim())
@@ -140,7 +140,7 @@ mod tests {
     }
 
     fn opens(url: &str) -> Result<String, String> {
-        validate(&call(OPEN_URL, url)).map(|Action::OpenUrl(url)| url.to_string())
+        validate(&call(OPEN_URL, url)).map(|Tool::OpenUrl(url)| url.to_string())
     }
 
     #[test]
@@ -175,8 +175,7 @@ mod tests {
             opens(" http://example.com/a b?q=ristoranti a Milano "),
             Ok("http://example.com/a%20b?q=ristoranti%20a%20Milano".into())
         );
-        let Ok(Action::OpenUrl(url)) =
-            validate(&call(OPEN_URL, "https://www.google.com/search?q=x"))
+        let Ok(Tool::OpenUrl(url)) = validate(&call(OPEN_URL, "https://www.google.com/search?q=x"))
         else {
             panic!("a search page opens")
         };

@@ -560,7 +560,7 @@ fn finish_command(
     let ports = command_mode::Ports {
         desktop: &CommandDesktop::new(settings),
         llm: &command_mode::responses::OpenAi(settings),
-        urls: &command_mode::tools::DefaultBrowser,
+        browser: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
     };
     // Joined once the instruction is in: the read finished long before.
