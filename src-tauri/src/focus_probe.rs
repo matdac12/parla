@@ -1,4 +1,6 @@
-//! The editable probe (PARLA-79): whether the focused element accepts text.
+//! The editable probe (PARLA-79): whether a paste has somewhere to land.
+//! UI Automation is asked only when the shell has the foreground, or nothing
+//! does: inside an app every answer would paste anyway (Mattia, 17/10).
 use std::{
     sync::{mpsc, Arc, LazyLock, OnceLock},
     time::{Duration, Instant},
@@ -19,36 +21,51 @@ pub enum Rule {
     Document,
     Value,
     Text,
-    NoForeground,
+    /// An app has the focus: never queried, it pastes as before.
+    App,
+    /// The desktop or a taskbar, with nothing editable focused.
     Shell,
-    NoMatch,
+    /// No foreground window, and the focus is on the shell or nowhere.
+    NoForeground,
     Error,
 }
 
 impl Rule {
-    /// Never stop a paste that would have worked: an element that matches no
-    /// rule may still take text (WhatsApp's message box is a bare Pane), so
-    /// only no window or the shell is a confident no.
+    /// Never stop a paste that would have worked: only the shell, or no
+    /// window with the focus on the shell, is a confident no.
     pub fn verdict(self) -> Verdict {
         match self {
             Rule::Edit | Rule::Document | Rule::Value | Rule::Text => Verdict::Editable,
-            Rule::NoForeground | Rule::Shell => Verdict::NotEditable,
-            Rule::NoMatch | Rule::Error => Verdict::Unknown,
+            Rule::Shell | Rule::NoForeground => Verdict::NotEditable,
+            Rule::App | Rule::Error => Verdict::Unknown,
         }
     }
 }
 
-/// The foreground window, as far as the verdict cares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Foreground {
-    NoWindow,
-    /// The desktop or a taskbar.
-    Shell,
-    App,
+/// What the probe saw. `focus` is only read on the shell or with no
+/// foreground window.
+#[derive(Debug, Clone)]
+pub struct Facts {
+    /// The foreground window's class; None with no foreground window.
+    pub foreground: Option<String>,
+    /// The foreground app's executable, for the log.
+    pub app: Option<String>,
+    pub focus: Focus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum Focus {
+    /// An app has the foreground: UI Automation is not asked.
+    #[default]
+    NotAsked,
+    /// UI Automation found no focused element.
+    Nothing,
+    Element(Element),
+    Error(String),
 }
 
 /// The UI Automation facts about the focused element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Element {
     /// A UIA control type id, such as 50004 for Edit.
     pub control_type: i32,
@@ -56,15 +73,47 @@ pub struct Element {
     pub value_read_only: Option<bool>,
     pub text_pattern: bool,
     pub keyboard_focusable: bool,
+    /// The class of the top-level window that holds it, when UIA has one.
+    pub window_class: Option<String>,
+    /// Its process's executable.
+    pub process: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Facts {
-    pub foreground: Foreground,
-    /// The UIA error when the focused element could not be read.
-    pub focused: Result<Element, String>,
-    /// The foreground app's executable, for the log.
-    pub app: Option<String>,
+/// The desktop (Progman, WorkerW) and the taskbars.
+const SHELL_CLASSES: [&str; 4] = [
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+];
+/// The desktop window, UIA's root: focus there is focus on nothing.
+const DESKTOP_ROOT: &str = "#32769";
+
+fn is_shell_class(class: &str) -> bool {
+    SHELL_CLASSES.contains(&class)
+}
+
+impl Element {
+    /// The desktop, a taskbar or the root. Without a window, explorer.exe.
+    fn in_shell(&self) -> bool {
+        match &self.window_class {
+            Some(class) => is_shell_class(class) || class == DESKTOP_ROOT,
+            None => self
+                .process
+                .as_deref()
+                .is_some_and(|process| process.eq_ignore_ascii_case("explorer.exe")),
+        }
+    }
+
+    fn editable_rule(&self) -> Option<Rule> {
+        match self.control_type {
+            EDIT => Some(Rule::Edit),
+            DOCUMENT => Some(Rule::Document),
+            _ if self.value_read_only == Some(false) => Some(Rule::Value),
+            _ if self.text_pattern && self.keyboard_focusable => Some(Rule::Text),
+            _ => None,
+        }
+    }
 }
 
 /// A probe's answer, kept for the log.
@@ -72,13 +121,13 @@ pub struct Facts {
 pub struct Reading {
     pub rule: Rule,
     pub facts: Facts,
-    /// The UIA calls alone.
+    /// The probe's own calls.
     pub probe: Duration,
     /// From the start of the session to the answer.
     pub answered_after: Duration,
 }
 
-/// Reads the focused element's facts, on the probe thread.
+/// Reads the facts, on the probe thread.
 pub trait Probe {
     fn facts(&mut self) -> Facts;
 }
@@ -139,16 +188,24 @@ impl Reading {
     }
 
     fn describe(&self) -> String {
-        let (control, error) = match &self.facts.focused {
-            Ok(element) => (control_name(element.control_type), String::new()),
-            Err(error) => ("-".into(), format!(", error {error}")),
+        let focus = match &self.facts.focus {
+            Focus::NotAsked => String::new(),
+            Focus::Nothing => ", focus nothing".into(),
+            Focus::Element(element) => format!(
+                ", focus {} in {} / {}",
+                control_name(element.control_type),
+                element.window_class.as_deref().unwrap_or("-"),
+                element.process.as_deref().unwrap_or("-"),
+            ),
+            Focus::Error(error) => format!(", error {error}"),
         };
         format!(
-            "{:?} by {:?}, app {}, control {control}, probe {} ms, answered {} ms after key-down{error}",
+            "{:?} by {:?}, app {}, window {}{focus}, probe {} µs, answered {} ms after key-down",
             self.verdict(),
             self.rule,
             self.facts.app.as_deref().unwrap_or("-"),
-            self.probe.as_millis(),
+            self.facts.foreground.as_deref().unwrap_or("-"),
+            self.probe.as_micros(),
             self.answered_after.as_millis(),
         )
     }
@@ -240,7 +297,7 @@ fn spawn<P: Probe>(make: impl FnOnce() -> P + Send + 'static) -> Jobs {
         .spawn(move || {
             let mut probe = make();
             for slot in queue {
-                // Discarded before its turn (a cancelled hold): skip the UIA calls.
+                // Discarded before its turn (a cancelled hold): skip the probe.
                 if Arc::strong_count(&slot) == 1 {
                     continue;
                 }
@@ -267,141 +324,216 @@ pub fn start() -> Pending {
     WORKER.start()
 }
 
-/// UI Automation on the probe thread: COM (MTA) and one cached client. Thin
-/// on purpose: `decide` holds the rules.
+/// The foreground window and, on the shell or with no window, UI Automation
+/// (COM MTA and one cached client, both made on the first such probe). Thin on
+/// purpose: `decide` holds the rules.
 #[cfg(windows)]
 mod uia {
-    use super::{Element, Facts, Foreground};
+    use super::{Element, Facts, Focus};
     use windows::{
         core::{Interface, Result},
         Win32::{
+            Foundation::HWND,
             System::Com::{
                 CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
             },
             UI::{
                 Accessibility::{
                     CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest,
-                    IUIAutomationTextPattern, IUIAutomationValuePattern, UIA_ControlTypePropertyId,
-                    UIA_IsKeyboardFocusablePropertyId, UIA_TextPatternId,
-                    UIA_ValueIsReadOnlyPropertyId, UIA_ValuePatternId,
+                    IUIAutomationElement, IUIAutomationTextPattern, IUIAutomationTreeWalker,
+                    IUIAutomationValuePattern, UIA_ControlTypePropertyId,
+                    UIA_IsKeyboardFocusablePropertyId, UIA_NativeWindowHandlePropertyId,
+                    UIA_ProcessIdPropertyId, UIA_TextPatternId, UIA_ValueIsReadOnlyPropertyId,
+                    UIA_ValuePatternId,
                 },
-                WindowsAndMessaging::{GetClassNameW, GetForegroundWindow},
+                WindowsAndMessaging::{GetAncestor, GetClassNameW, GetForegroundWindow, GA_ROOT},
             },
         },
     };
 
     /// A hung app fails its probe (Unknown) instead of holding up the next one.
     const TIMEOUT_MS: u32 = 1000;
-    /// The desktop and the taskbars.
-    const SHELL_CLASSES: [&str; 4] = [
-        "Progman",
-        "WorkerW",
-        "Shell_TrayWnd",
-        "Shell_SecondaryTrayWnd",
-    ];
+    /// Ancestors climbed to find the window that holds the focused element.
+    const MAX_CLIMB: usize = 16;
 
-    pub struct Uia(std::result::Result<(IUIAutomation, IUIAutomationCacheRequest), String>);
+    /// Made on the first shell or no-window probe, never otherwise.
+    pub struct Uia(Option<std::result::Result<Client, String>>);
+
+    struct Client {
+        automation: IUIAutomation,
+        cache: IUIAutomationCacheRequest,
+        walker: IUIAutomationTreeWalker,
+    }
 
     impl Uia {
         pub fn new() -> Self {
-            // SAFETY: COM is initialised on this thread before any UIA call,
-            // and the interfaces never leave it.
-            Self(unsafe { client() }.map_err(|error| error.to_string()))
-        }
-    }
-
-    unsafe fn client() -> Result<(IUIAutomation, IUIAutomationCacheRequest)> {
-        unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
-            let automation: IUIAutomation =
-                CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
-            if let Ok(timeouts) = automation.cast::<IUIAutomation2>() {
-                let _ = timeouts.SetConnectionTimeout(TIMEOUT_MS);
-                let _ = timeouts.SetTransactionTimeout(TIMEOUT_MS);
-            }
-            // Everything the verdict reads, in one cross-process call.
-            let cache = automation.CreateCacheRequest()?;
-            for property in [
-                UIA_ControlTypePropertyId,
-                UIA_IsKeyboardFocusablePropertyId,
-                UIA_ValueIsReadOnlyPropertyId,
-            ] {
-                cache.AddProperty(property)?;
-            }
-            cache.AddPattern(UIA_ValuePatternId)?;
-            cache.AddPattern(UIA_TextPatternId)?;
-            Ok((automation, cache))
+            Self(None)
         }
     }
 
     impl super::Probe for Uia {
         fn facts(&mut self) -> Facts {
-            let foreground = foreground();
-            let focused = match (&self.0, foreground) {
-                (_, Foreground::NoWindow) => Err("no foreground window".into()),
-                (Err(error), _) => Err(error.clone()),
-                // SAFETY: the client was made on this thread.
-                (Ok((automation, cache)), _) => {
-                    unsafe { focused(automation, cache) }.map_err(|error| error.to_string())
-                }
+            // SAFETY: plain Win32 calls.
+            let window = unsafe { GetForegroundWindow() };
+            let foreground = (!window.is_invalid()).then(|| class_name(window));
+            let focus = match &foreground {
+                Some(class) if !super::is_shell_class(class) => Focus::NotAsked,
+                // SAFETY: COM is initialised on this thread before any UIA
+                // call, and the interfaces never leave it.
+                _ => match self
+                    .0
+                    .get_or_insert_with(|| unsafe { Client::new() }.map_err(|e| e.to_string()))
+                {
+                    Ok(client) => unsafe { client.focus() },
+                    Err(error) => Focus::Error(error.clone()),
+                },
             };
             Facts {
                 foreground,
-                focused,
                 app: crate::inserter::foreground_app(),
+                focus,
             }
         }
     }
 
-    unsafe fn focused(
-        automation: &IUIAutomation,
-        cache: &IUIAutomationCacheRequest,
-    ) -> Result<Element> {
-        unsafe {
-            let element = automation.GetFocusedElementBuildCache(cache)?;
-            // An unsupported pattern comes back null, an error here: absent.
-            // A present one whose flag fails is a UIA error, not a no.
-            let value_read_only = element
-                .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                .ok()
-                .map(|value| {
-                    value
-                        .CachedIsReadOnly()
-                        .map(|read_only| read_only.as_bool())
+    impl Client {
+        unsafe fn new() -> Result<Self> {
+            unsafe {
+                CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+                let automation: IUIAutomation =
+                    CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
+                if let Ok(timeouts) = automation.cast::<IUIAutomation2>() {
+                    let _ = timeouts.SetConnectionTimeout(TIMEOUT_MS);
+                    let _ = timeouts.SetTransactionTimeout(TIMEOUT_MS);
+                }
+                // Everything the rules read, in one cross-process call.
+                let cache = automation.CreateCacheRequest()?;
+                for property in [
+                    UIA_ControlTypePropertyId,
+                    UIA_IsKeyboardFocusablePropertyId,
+                    UIA_ValueIsReadOnlyPropertyId,
+                    UIA_ProcessIdPropertyId,
+                    UIA_NativeWindowHandlePropertyId,
+                ] {
+                    cache.AddProperty(property)?;
+                }
+                cache.AddPattern(UIA_ValuePatternId)?;
+                cache.AddPattern(UIA_TextPatternId)?;
+                let walker = automation.ControlViewWalker()?;
+                Ok(Self {
+                    automation,
+                    cache,
+                    walker,
                 })
-                .transpose()?;
-            Ok(Element {
-                control_type: element.CachedControlType()?.0,
-                value_read_only,
-                text_pattern: element
-                    .GetCachedPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-                    .is_ok(),
-                keyboard_focusable: element.CachedIsKeyboardFocusable()?.as_bool(),
-            })
+            }
+        }
+
+        unsafe fn focus(&self) -> Focus {
+            unsafe {
+                match self.automation.GetFocusedElementBuildCache(&self.cache) {
+                    // A null element, not a failed call.
+                    Err(error) if error.code().is_ok() => Focus::Nothing,
+                    Err(error) => Focus::Error(error.to_string()),
+                    Ok(element) => self
+                        .element(&element)
+                        .map_or_else(|error| Focus::Error(error.to_string()), Focus::Element),
+                }
+            }
+        }
+
+        unsafe fn element(&self, element: &IUIAutomationElement) -> Result<Element> {
+            unsafe {
+                // An unsupported pattern comes back null, an error here: absent.
+                // A present one whose flag fails is a UIA error.
+                let value_read_only = element
+                    .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    .ok()
+                    .map(|value| {
+                        value
+                            .CachedIsReadOnly()
+                            .map(|read_only| read_only.as_bool())
+                    })
+                    .transpose()?;
+                Ok(Element {
+                    control_type: element.CachedControlType()?.0,
+                    value_read_only,
+                    text_pattern: element
+                        .GetCachedPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                        .is_ok(),
+                    keyboard_focusable: element.CachedIsKeyboardFocusable()?.as_bool(),
+                    window_class: self.window_class(element),
+                    process: element
+                        .CachedProcessId()
+                        .ok()
+                        .and_then(|id| process_name(id as u32)),
+                })
+            }
+        }
+
+        /// The class of the top-level window holding `element`: its own
+        /// window, or its nearest ancestor's.
+        unsafe fn window_class(&self, element: &IUIAutomationElement) -> Option<String> {
+            unsafe {
+                let mut current = element.clone();
+                for _ in 0..MAX_CLIMB {
+                    let window = current.CachedNativeWindowHandle().ok()?;
+                    if !window.is_invalid() {
+                        let top = GetAncestor(window, GA_ROOT);
+                        return Some(class_name(if top.is_invalid() { window } else { top }));
+                    }
+                    current = self
+                        .walker
+                        .GetParentElementBuildCache(&current, &self.cache)
+                        .ok()?;
+                }
+                None
+            }
         }
     }
 
-    fn foreground() -> Foreground {
-        // SAFETY: plain Win32 calls; the buffer outlives GetClassNameW.
-        let window = unsafe { GetForegroundWindow() };
-        if window.is_invalid() {
-            return Foreground::NoWindow;
-        }
+    fn class_name(window: HWND) -> String {
         let mut class = [0u16; 64];
+        // SAFETY: the buffer outlives the call.
         let length = unsafe { GetClassNameW(window, &mut class) };
-        let class = String::from_utf16_lossy(&class[..length.max(0) as usize]);
-        if SHELL_CLASSES.contains(&class.as_str()) {
-            Foreground::Shell
-        } else {
-            Foreground::App
-        }
+        String::from_utf16_lossy(&class[..length.max(0) as usize])
+    }
+
+    /// The executable of process `id`, such as `explorer.exe`.
+    fn process_name(id: u32) -> Option<String> {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let mut path = [0u16; 1024];
+        let mut length = path.len() as u32;
+        // SAFETY: the out pointers are valid for the given sizes, and the
+        // handle is closed once the name is read.
+        let named = unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, id);
+            if process.is_null() {
+                return None;
+            }
+            let named = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                path.as_mut_ptr(),
+                &mut length,
+            );
+            CloseHandle(process);
+            named != 0
+        };
+        let path = String::from_utf16_lossy(&path[..length as usize]);
+        named.then(|| path.rsplit('\\').next().unwrap_or(&path).to_owned())
     }
 }
 
 /// Off Windows, where Parla does not run, every probe is Unknown: editable.
 #[cfg(not(windows))]
 mod uia {
-    use super::{Facts, Foreground};
+    use super::{Facts, Focus};
 
     pub struct Uia;
 
@@ -414,9 +546,9 @@ mod uia {
     impl super::Probe for Uia {
         fn facts(&mut self) -> Facts {
             Facts {
-                foreground: Foreground::App,
-                focused: Err("no UI Automation on this platform".into()),
+                foreground: None,
                 app: None,
+                focus: Focus::Error("no UI Automation on this platform".into()),
             }
         }
     }
@@ -426,25 +558,26 @@ mod uia {
 const EDIT: i32 = 50004;
 const DOCUMENT: i32 = 50030;
 
-/// The first rule that holds: an editable one wins, even over the shell (a
-/// desktop rename); then no window, the shell, a UIA error, or no match.
+/// An app in the foreground pastes as before, unqueried. On the shell or with
+/// no foreground window, an editable element still wins (a desktop rename);
+/// otherwise the shell is a confident no, and so is no window with the focus
+/// on the shell or nowhere.
 pub fn decide(facts: &Facts) -> Rule {
-    if facts.foreground == Foreground::NoWindow {
-        return Rule::NoForeground;
-    }
-    if let Ok(element) = &facts.focused {
-        match element.control_type {
-            EDIT => return Rule::Edit,
-            DOCUMENT => return Rule::Document,
-            _ if element.value_read_only == Some(false) => return Rule::Value,
-            _ if element.text_pattern && element.keyboard_focusable => return Rule::Text,
-            _ => {}
+    let on_shell = match facts.foreground.as_deref() {
+        Some(class) if !is_shell_class(class) => return Rule::App,
+        Some(_) => true,
+        None => false,
+    };
+    if let Focus::Element(element) = &facts.focus {
+        if let Some(rule) = element.editable_rule() {
+            return rule;
         }
     }
-    match (facts.foreground, &facts.focused) {
-        (Foreground::Shell, _) => Rule::Shell,
-        (_, Err(_)) => Rule::Error,
-        (_, Ok(_)) => Rule::NoMatch,
+    match &facts.focus {
+        _ if on_shell => Rule::Shell,
+        Focus::Element(element) if !element.in_shell() => Rule::App,
+        Focus::Error(_) => Rule::Error,
+        Focus::NotAsked | Focus::Nothing | Focus::Element(_) => Rule::NoForeground,
     }
 }
 
@@ -455,109 +588,148 @@ mod tests {
     const PANE: i32 = 50033;
     const LIST_ITEM: i32 = 50007;
 
-    fn app(element: Element) -> Facts {
-        Facts {
-            foreground: Foreground::App,
-            focused: Ok(element),
-            app: None,
-        }
-    }
     fn control(control_type: i32) -> Element {
         Element {
             control_type,
             ..Element::default()
         }
     }
+    fn facts(foreground: Option<&str>, focus: Focus) -> Facts {
+        Facts {
+            foreground: foreground.map(Into::into),
+            app: None,
+            focus,
+        }
+    }
     fn judged(facts: &Facts) -> (Verdict, Rule) {
         let rule = decide(facts);
         (rule.verdict(), rule)
     }
+    /// The editable rules, each on its own.
+    fn editable_elements() -> [(Element, Rule); 4] {
+        [
+            (control(EDIT), Rule::Edit),
+            (control(DOCUMENT), Rule::Document),
+            (
+                Element {
+                    value_read_only: Some(false),
+                    ..control(PANE)
+                },
+                Rule::Value,
+            ),
+            (
+                Element {
+                    text_pattern: true,
+                    keyboard_focusable: true,
+                    ..control(PANE)
+                },
+                Rule::Text,
+            ),
+        ]
+    }
 
     #[test]
-    fn edit_and_document_controls_are_editable() {
-        assert_eq!(judged(&app(control(EDIT))), (Verdict::Editable, Rule::Edit));
+    fn an_app_in_the_foreground_is_unknown_and_never_queried() {
+        // WhatsApp's message box read as a bare Pane (hand check, 17/10).
+        for app in [
+            "Notepad",
+            "Chrome_WidgetWin_1",
+            "WinUIDesktopWin32WindowClass",
+        ] {
+            assert_eq!(
+                judged(&facts(Some(app), Focus::NotAsked)),
+                (Verdict::Unknown, Rule::App)
+            );
+        }
+    }
+
+    #[test]
+    fn on_the_shell_an_editable_element_wins_and_anything_else_is_not_editable() {
+        for shell in SHELL_CLASSES {
+            for (element, rule) in editable_elements() {
+                // Renaming a file on the desktop, the taskbar's search box.
+                assert_eq!(
+                    judged(&facts(Some(shell), Focus::Element(element))),
+                    (Verdict::Editable, rule)
+                );
+            }
+            for focus in [
+                Focus::Element(control(LIST_ITEM)),
+                Focus::Element(Element {
+                    value_read_only: Some(true),
+                    ..control(PANE)
+                }),
+                Focus::Element(Element {
+                    text_pattern: true,
+                    ..control(PANE)
+                }),
+                Focus::Nothing,
+                // The window class is the confident signal.
+                Focus::Error("UIA timed out".into()),
+            ] {
+                assert_eq!(
+                    judged(&facts(Some(shell), focus)),
+                    (Verdict::NotEditable, Rule::Shell)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn with_no_foreground_window_focus_on_the_shell_or_nowhere_is_not_editable() {
+        let on = |window_class: Option<&str>, process: Option<&str>| {
+            Focus::Element(Element {
+                window_class: window_class.map(Into::into),
+                process: process.map(Into::into),
+                ..control(LIST_ITEM)
+            })
+        };
+        for focus in [
+            on(Some("Progman"), Some("explorer.exe")),
+            on(Some("Shell_TrayWnd"), Some("explorer.exe")),
+            on(Some(DESKTOP_ROOT), None),
+            on(None, Some("Explorer.EXE")),
+            Focus::Nothing,
+        ] {
+            assert_eq!(
+                judged(&facts(None, focus)),
+                (Verdict::NotEditable, Rule::NoForeground)
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_foreground_window_focus_in_an_app_is_unknown() {
+        // Mid Alt+Tab, or just after a window closed.
+        for (window_class, process) in [
+            (Some("Chrome_WidgetWin_1"), Some("WhatsApp.Root.exe")),
+            // File Explorer is explorer.exe, but its window is no shell.
+            (Some("CabinetWClass"), Some("explorer.exe")),
+            (None, Some("Notepad.exe")),
+            (None, None),
+        ] {
+            let focus = Focus::Element(Element {
+                window_class: window_class.map(Into::into),
+                process: process.map(Into::into),
+                ..control(PANE)
+            });
+            assert_eq!(judged(&facts(None, focus)), (Verdict::Unknown, Rule::App));
+        }
+        // An editable element anywhere wins.
+        for (element, rule) in editable_elements() {
+            assert_eq!(
+                judged(&facts(None, Focus::Element(element))),
+                (Verdict::Editable, rule)
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_foreground_window_a_uia_error_is_unknown() {
         assert_eq!(
-            judged(&app(control(DOCUMENT))),
-            (Verdict::Editable, Rule::Document)
+            judged(&facts(None, Focus::Error("E_FAIL".into()))),
+            (Verdict::Unknown, Rule::Error)
         );
-    }
-
-    #[test]
-    fn a_writable_value_pattern_is_editable_and_a_read_only_one_unknown() {
-        let value = |read_only| Element {
-            value_read_only: Some(read_only),
-            ..control(PANE)
-        };
-        assert_eq!(judged(&app(value(false))), (Verdict::Editable, Rule::Value));
-        assert_eq!(judged(&app(value(true))), (Verdict::Unknown, Rule::NoMatch));
-    }
-
-    #[test]
-    fn a_text_pattern_is_editable_when_keyboard_focusable_else_unknown() {
-        let text = |keyboard_focusable| Element {
-            text_pattern: true,
-            keyboard_focusable,
-            ..control(PANE)
-        };
-        assert_eq!(judged(&app(text(true))), (Verdict::Editable, Rule::Text));
-        assert_eq!(judged(&app(text(false))), (Verdict::Unknown, Rule::NoMatch));
-        // Focusable alone is not text: a button or a list item.
-        let focusable = Element {
-            keyboard_focusable: true,
-            ..control(LIST_ITEM)
-        };
-        assert_eq!(judged(&app(focusable)), (Verdict::Unknown, Rule::NoMatch));
-    }
-
-    #[test]
-    fn an_element_that_matches_no_rule_is_unknown_so_it_still_pastes() {
-        // WhatsApp's message box reads as a bare Pane (hand check, 17/10).
-        assert_eq!(
-            judged(&app(control(PANE))),
-            (Verdict::Unknown, Rule::NoMatch)
-        );
-    }
-
-    #[test]
-    fn the_shell_is_not_editable_unless_an_edit_box_has_focus() {
-        let desktop = |focused| Facts {
-            foreground: Foreground::Shell,
-            focused,
-            app: Some("explorer.exe".into()),
-        };
-        assert_eq!(
-            judged(&desktop(Ok(control(LIST_ITEM)))),
-            (Verdict::NotEditable, Rule::Shell)
-        );
-        assert_eq!(
-            judged(&desktop(Err("UIA timed out".into()))),
-            (Verdict::NotEditable, Rule::Shell)
-        );
-        // Renaming a file on the desktop.
-        assert_eq!(
-            judged(&desktop(Ok(control(EDIT)))),
-            (Verdict::Editable, Rule::Edit)
-        );
-    }
-
-    #[test]
-    fn no_foreground_window_is_not_editable() {
-        let facts = Facts {
-            foreground: Foreground::NoWindow,
-            focused: Err("no element".into()),
-            app: None,
-        };
-        assert_eq!(judged(&facts), (Verdict::NotEditable, Rule::NoForeground));
-    }
-
-    #[test]
-    fn a_uia_error_in_an_app_is_unknown() {
-        let facts = Facts {
-            foreground: Foreground::App,
-            focused: Err("E_FAIL".into()),
-            app: None,
-        };
-        assert_eq!(judged(&facts), (Verdict::Unknown, Rule::Error));
     }
 
     /// Polls for a test only: production never waits on a probe.
@@ -572,14 +744,14 @@ mod tests {
         }
     }
 
-    /// A probe that answers Edit in Notepad once the test opens its gate.
+    /// A probe that answers the desktop once the test opens its gate.
     fn gated() -> (mpsc::Sender<()>, impl FnMut() -> Facts + Send) {
         let (open, gate) = mpsc::channel();
         let probe = move || {
             let _ = gate.recv();
             Facts {
-                app: Some("notepad.exe".into()),
-                ..app(control(EDIT))
+                app: Some("explorer.exe".into()),
+                ..facts(Some("Progman"), Focus::Element(control(LIST_ITEM)))
             }
         };
         (open, probe)
@@ -604,12 +776,12 @@ mod tests {
         );
         open.send(()).unwrap();
         let reading = answered(&pending);
-        assert_eq!(reading.rule, Rule::Edit);
-        assert_eq!(reading.facts.app.as_deref(), Some("notepad.exe"));
+        assert_eq!(reading.rule, Rule::Shell);
+        assert_eq!(reading.facts.app.as_deref(), Some("explorer.exe"));
         assert!(reading.answered_after >= reading.probe);
         // The next paste sees the answer; with the Safety Net off, Unknown.
         around_paste(Some(&pending), "dictation", |verdict| {
-            assert_eq!(verdict, Verdict::Editable)
+            assert_eq!(verdict, Verdict::NotEditable)
         });
         around_paste(None, "dictation", |verdict| {
             assert_eq!(verdict, Verdict::Unknown)
@@ -621,7 +793,7 @@ mod tests {
         let (made, was_made) = mpsc::channel();
         let worker = worker(move || {
             made.send(()).unwrap();
-            || app(control(EDIT))
+            || facts(Some("Notepad"), Focus::NotAsked)
         });
         std::thread::sleep(Duration::from_millis(20));
         assert!(was_made.try_recv().is_err(), "built before any session");
@@ -656,25 +828,11 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 
-    #[test]
-    fn a_uia_error_is_kept_with_its_reason() {
-        let worker = worker(|| {
-            || Facts {
-                foreground: Foreground::App,
-                focused: Err("E_FAIL".into()),
-                app: Some("code.exe".into()),
-            }
-        });
-        let reading = answered(&worker.start()).clone();
-        assert_eq!(reading.rule, Rule::Error);
-        assert_eq!(reading.facts.focused.unwrap_err(), "E_FAIL");
-    }
-
-    /// The timed check of "0 ms on key-up→pasted", against whatever has focus:
+    /// The timed check, against whatever has the foreground (an app: no UIA):
     /// `cargo test --release --lib measure_focus_probe -- --ignored --nocapture`.
     #[cfg(windows)]
     #[test]
-    #[ignore = "measurement: real UI Automation on the focused app"]
+    #[ignore = "measurement: the real probe on the foreground app"]
     fn measure_focus_probe() {
         fn summary(mut times: Vec<Duration>) -> String {
             times.sort();
@@ -698,7 +856,7 @@ mod tests {
         }
         println!("{}", answered(&start()).describe());
         println!("key-down queueing (thread up): {}", summary(queue));
-        println!("UIA probe alone: {}", summary(probe));
+        println!("probe alone: {}", summary(probe));
         // What around_paste does before the paste, answered and unanswered.
         let (open, gated) = gated();
         let slow = worker(move || gated);

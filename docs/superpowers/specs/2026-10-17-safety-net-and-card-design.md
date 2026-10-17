@@ -60,22 +60,27 @@ The Card is fed two ways:
 - All UIA and window code goes behind `cfg(windows)`. On other targets the probe always answers "editable".
 
 **The editable probe (Rust, new module)**
-- It needs the `Win32_UI_Accessibility` feature of the `windows` crate. It runs on one long-lived probe thread with COM initialised (MTA). The thread holds a cached `IUIAutomation` and is created lazily on the first session, never at startup.
+- It needs the `Win32_UI_Accessibility` feature of the `windows` crate. It runs on one long-lived probe thread, created lazily on the first session, never at startup. COM (MTA) and a cached `IUIAutomation` are made only on the first probe that needs UIA (the shell or no window), so a day without one never creates a UIA client.
 - **When it runs:** it starts at **key-down** for dictation (hold, latch or hands-free) and for command (it is discarded if the command hold is cancelled). It runs in parallel with recording.
-- **What it reads:** `GetFocusedElement`, then:
-  - **Editable** if any of these holds:
-    - the control type is Edit or Document;
-    - a ValuePattern is present and `IsReadOnly` is false;
-    - a TextPattern is present and the element is keyboard-focusable.
-  - **Not editable** only on a confident no:
-    - there's no foreground window (clicking the desktop reads this way);
-    - the foreground is the shell (Progman, WorkerW, Shell_TrayWnd, Shell_SecondaryTrayWnd).
-  - An editable rule wins even over the shell (renaming a file on the desktop).
-  - **Unknown** (counts as editable): a UIA error, an empty tree, no answer by the time it's needed, or a focused element that matches none of the editable rules (logged as `NoMatch`).
-  - 17/10, PARLA-79 hand check: WhatsApp's message box reads as a bare Pane, which matches no rule. Mattia's rule is to never stop a paste that would have worked, so no-match is Unknown, not Not editable. A PDF viewer's page (`pdfeditor.exe`, a Window or a Menu) also reads no-match, so it pastes as today.
+- **What it reads:** the foreground window's class first; UIA only where its answer can change the verdict.
+  - **An app has the foreground:** no UIA call at all. **Unknown** (rule `App`), so it pastes as today.
+  - **The shell has the foreground** (Progman, WorkerW, Shell_TrayWnd, Shell_SecondaryTrayWnd): UIA's focused element.
+    - **Editable** if any of these holds (a desktop rename box, the taskbar's search box):
+      - the control type is Edit or Document;
+      - a ValuePattern is present and `IsReadOnly` is false;
+      - a TextPattern is present and the element is keyboard-focusable.
+    - Otherwise, a UIA error included, **Not editable** (rule `Shell`): the window class is the confident signal.
+  - **No foreground window:** UIA's focused element and the top-level window (or, without one, the process) that holds it.
+    - An editable element: **Editable**, as above.
+    - Focus on the shell (a shell window class, the desktop root, or explorer.exe with no window) or no focused element: **Not editable** (rule `NoForeground`).
+    - Focus in another app (mid Alt+Tab, a window just closed): **Unknown** (rule `App`).
+    - A UIA error: **Unknown** for now (never stop a paste that would have worked); revisit once a real desktop click is logged.
+  - **Unknown** also covers no answer by the time it's needed. It counts as editable.
+  - 17/10, PARLA-79 hand check: WhatsApp's message box read as a bare Pane and a PDF viewer's page as a Window or a Menu; neither matched a rule, and Mattia's rule is to never stop a paste that would have worked. The desktop read as no foreground window.
+  - 17/10, Mattia: UIA only on the shell/no-window path; no app is queried. Inside an app every UIA answer pasted anyway, so the call was pure cost, and it may switch on Chromium's accessibility tree (WhatsApp's WebView2 grew after the hand check).
 - **When it's read:** at the moment the paste would happen, after transcription, so the probe has the whole hold plus transcription to answer. The read never waits.
 - **Focus changes during the hold** are not handled (Mattia: he doesn't switch context mid-command). No second probe at key-up.
-- **Log** each decision: verdict, app executable, control type, which rule fired, and probe time.
+- **Log** each decision: verdict, app executable, foreground window class, which rule fired, probe time and, when UIA was asked, the control type and where the focused element lives.
 
 **Safety Net (dictation)**
 - Setting: `safety_net: bool`, default **true**, a flat field like `auto_send`. It sits in Settings next to the paste options. It is not added to the flyout's quick toggles.
@@ -121,7 +126,7 @@ The Card is fed two ways:
 
 ## Testing Decisions
 
-- **Probe:** a pure decision function (UIA facts in, verdict out) is unit-tested on all platforms, covering Edit, Document, a read-only Value, a Text pattern, the shell window, no foreground window, an error meaning unknown, and an element matching no rule meaning unknown. The COM wrapper is thin and checked by hand.
+- **Probe:** a pure decision function (window and UIA facts in, verdict out) is unit-tested on all platforms: an app in the foreground (Unknown, never queried); on the shell, each editable rule winning and anything else, an error included, not editable; with no foreground window, focus on the shell or nowhere (not editable), focus in an app (Unknown), an editable element (editable) and a UIA error (Unknown). The COM wrapper is thin and checked by hand.
 - **Flow:**
   - A fake probe source covers a dictation that is not editable (Card, no paste, no clipboard write), an unknown verdict (paste), and a probe that hasn't answered when the paste is due (paste, no wait).
   - Prior art: `RecoverySource` and the `on_event` tests.
@@ -140,7 +145,7 @@ The Card is fed two ways:
   - Esc passes through when idle;
   - dictating onto the desktop opens the Card;
   - dictating into Notepad, Windows Terminal, VS Code, T3 Code, WhatsApp and Outlook pastes;
-  - a command over a PDF selection gives an answer with Copy as the main button (a PDF page is Unknown since 17/10, so Replace stays as the secondary button);
+  - a command over a PDF selection gives an answer with Copy as the main button (an app in the foreground is Unknown since 17/10, so Replace stays as the secondary button);
   - the Card's buttons don't steal focus, and Replace lands over the live selection.
 
 ## Out of Scope

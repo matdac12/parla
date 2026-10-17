@@ -609,16 +609,16 @@ mod tests {
 
     #[test]
     fn a_reply_pastes_without_waiting_for_a_slow_probe() {
-        use crate::focus_probe::{Facts, Foreground};
+        use crate::focus_probe::{Facts, Focus};
         let (answer, gate) = std::sync::mpsc::channel::<()>();
         let worker = crate::focus_probe::worker(move || {
             move || {
                 // Still running when the reply is pasted.
                 let _ = gate.recv_timeout(Duration::from_secs(5));
                 Facts {
-                    foreground: Foreground::Shell,
-                    focused: Err("slow".into()),
+                    foreground: Some("Progman".into()),
                     app: None,
+                    focus: Focus::Nothing,
                 }
             }
         });
