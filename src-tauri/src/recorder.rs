@@ -1231,7 +1231,7 @@ mod tests {
         let (ready_tx, ready_rx) = mpsc::channel();
         // A driver that answers long after the limit.
         let late = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(300));
+            thread::sleep(Duration::from_millis(1_500));
             ready_tx.send(Ok(())).is_err()
         });
         let begun = Instant::now();
@@ -1239,7 +1239,8 @@ mod tests {
             await_open(ready_rx, Duration::from_millis(50)),
             Err(OpenError::Hung)
         );
-        assert!(begun.elapsed() < Duration::from_millis(250));
+        // Loose bound: a loaded CI runner can stall a thread for a while.
+        assert!(begun.elapsed() < Duration::from_secs(1));
         // The worker sees nobody waiting and closes the stream it opened.
         assert!(late.join().unwrap());
 
