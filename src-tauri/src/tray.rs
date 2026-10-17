@@ -1,11 +1,16 @@
-//! Owns the tray menu and settings window lifecycle.
+//! Owns the tray icon: its right-click menu, its left-click flyout, and the
+//! lifecycle of the windows they open.
 
-use std::time::Duration;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use tauri::{
     menu::{IsMenuItem, Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 /// The right-click menu, top to bottom, as `(id, label)`. The first item is
@@ -46,6 +51,18 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         )
         .tooltip("Parla")
         .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                rect,
+                ..
+            } = event
+            {
+                toggle_flyout(tray.app_handle(), rect);
+            }
+        })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => open_app(app, "home"),
             "settings" => open_app(app, "settings"),
@@ -57,7 +74,8 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .build(app)?;
 
     // Only the recording overlay is kept warm. Secondary windows are created
-    // by open_app/open_bench and destroyed normally when the user closes them.
+    // by open_app/open_bench and destroyed normally when the user closes them;
+    // the flyout is created per left-click and destroyed when it loses focus.
     Ok(())
 }
 
@@ -163,6 +181,192 @@ fn ensure_window(
     }
     Ok(window)
 }
+const FLYOUT: &str = "flyout";
+/// The flyout's logical width; its height comes from the page (`show_flyout`).
+const FLYOUT_WIDTH: f64 = 360.0;
+/// Logical gap to the work-area edge, as Windows leaves around its own flyouts.
+const FLYOUT_MARGIN: f64 = 12.0;
+/// Clicking the tray icon while the flyout is open blurs it, which closes it,
+/// just before the click itself arrives. A click this soon after a blur close
+/// is that same click: it must not reopen the flyout.
+const REOPEN_GUARD: Duration = Duration::from_millis(400);
+
+/// The icon the open flyout is anchored to, and when a blur last closed one.
+struct FlyoutState {
+    icon: Option<Rect>,
+    clicked_at: Option<Instant>,
+    closed_at: Option<Instant>,
+}
+
+static FLYOUT_STATE: Mutex<FlyoutState> = Mutex::new(FlyoutState {
+    icon: None,
+    clicked_at: None,
+    closed_at: None,
+});
+
+fn flyout_state() -> std::sync::MutexGuard<'static, FlyoutState> {
+    FLYOUT_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Left-click: opens the flyout, or closes it when it is already open. Runs on
+/// the event loop, like every tray callback, so creation is serialized.
+fn toggle_flyout(app: &tauri::AppHandle, icon: Rect) {
+    let now = Instant::now();
+    if let Some(window) = app.get_webview_window(FLYOUT) {
+        let _ = window.destroy();
+        return;
+    }
+    {
+        let mut state = flyout_state();
+        if !should_reopen(state.closed_at.take(), now) {
+            return;
+        }
+        state.icon = Some(icon);
+        state.clicked_at = Some(now);
+    }
+    // Hidden until the page has rendered and reported its height, so it never
+    // flashes empty or at the wrong size.
+    let built = WebviewWindowBuilder::new(app, FLYOUT, WebviewUrl::App("flyout.html".into()))
+        .title("Parla")
+        .inner_size(FLYOUT_WIDTH, 400.0)
+        .decorations(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .focused(false)
+        .visible(false)
+        .build();
+    match built {
+        Ok(window) => {
+            let target = window.clone();
+            window.on_window_event(move |event| {
+                // Focus changes before `show_flyout` belong to the hidden
+                // window being created, not to the user clicking away.
+                if matches!(event, WindowEvent::Focused(false))
+                    && target.is_visible().unwrap_or(false)
+                {
+                    flyout_state().closed_at = Some(Instant::now());
+                    let _ = target.destroy();
+                }
+            });
+        }
+        Err(error) => eprintln!("failed to open the flyout: {error}"),
+    }
+}
+
+fn should_reopen(closed_at: Option<Instant>, now: Instant) -> bool {
+    closed_at.is_none_or(|at| now.saturating_duration_since(at) >= REOPEN_GUARD)
+}
+
+/// Called by the page once it has rendered: sizes the flyout to `height`
+/// logical px, places it above the tray icon and shows it focused, so that a
+/// click anywhere else blurs and destroys it.
+pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::Result<()> {
+    let (icon, clicked_at) = {
+        let state = flyout_state();
+        (state.icon, state.clicked_at)
+    };
+    // The tray reports the icon in physical pixels already.
+    let icon = icon.map(|rect| {
+        let position = rect.position.to_physical::<i32>(1.0);
+        let size = rect.size.to_physical::<i32>(1.0);
+        Bounds {
+            left: position.x,
+            top: position.y,
+            right: position.x + size.width,
+            bottom: position.y + size.height,
+        }
+    });
+    let monitor = match icon {
+        Some(icon) => window.monitor_from_point(
+            f64::from(icon.left + icon.right) / 2.0,
+            f64::from(icon.top + icon.bottom) / 2.0,
+        )?,
+        None => None,
+    };
+    let Some(monitor) = monitor.or(window.primary_monitor()?) else {
+        return Err(tauri::Error::WindowNotFound);
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let work = Bounds {
+        left: area.position.x,
+        top: area.position.y,
+        right: area.position.x + area.size.width as i32,
+        bottom: area.position.y + area.size.height as i32,
+    };
+    let height = height.clamp(1.0, f64::from(work.bottom - work.top) / scale);
+    let size = (
+        (FLYOUT_WIDTH * scale).round() as i32,
+        (height * scale).round() as i32,
+    );
+    // Without an icon rect, fall back to the bottom-right corner.
+    let corner = Bounds {
+        left: work.right,
+        top: work.bottom,
+        right: work.right,
+        bottom: work.bottom,
+    };
+    let (x, y) = flyout_origin(
+        work,
+        icon.unwrap_or(corner),
+        size,
+        (FLYOUT_MARGIN * scale).round() as i32,
+    );
+    // tao pads a borderless window that keeps its shadow by the frame it
+    // measures. On a window never shown yet that measure is off (+43 px at
+    // 150 %); once applied it is right, so a second call lands exactly.
+    let want = PhysicalSize::new(size.0 as u32, size.1 as u32);
+    window.set_size(want)?;
+    if window.inner_size()? != want {
+        window.set_size(want)?;
+    }
+    window.set_position(PhysicalPosition::new(x, y))?;
+    window.show()?;
+    window.set_focus()?;
+    if let Some(at) = clicked_at {
+        eprintln!(
+            "flyout: shown {} ms after the click",
+            at.elapsed().as_millis()
+        );
+    }
+    Ok(())
+}
+
+/// A screen rectangle in physical pixels; `right` and `bottom` are exclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Bounds {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+/// Top-left corner for a `size` flyout next to the tray `icon`, kept `margin`
+/// px inside the monitor's `work` area. The taskbar lies outside the work area,
+/// so an icon below it (the usual bottom taskbar) puts the flyout in the
+/// bottom corner, an icon above it puts it at the top, and an icon inside it
+/// (an auto-hidden taskbar, the overflow) puts the flyout just above the icon.
+fn flyout_origin(work: Bounds, icon: Bounds, size: (i32, i32), margin: i32) -> (i32, i32) {
+    let (width, height) = size;
+    let x = (icon.left + icon.right) / 2 - width / 2;
+    let y = if icon.top >= work.bottom {
+        work.bottom - margin - height
+    } else if icon.bottom <= work.top {
+        work.top + margin
+    } else {
+        icon.top - margin - height
+    };
+    // When the flyout is larger than the area, its top-left edge wins.
+    let fit = |value: i32, low: i32, high: i32| value.min(high).max(low);
+    (
+        fit(x, work.left + margin, work.right - margin - width),
+        fit(y, work.top + margin, work.bottom - margin - height),
+    )
+}
+
 /// Records three seconds from the default microphone, saves it as
 /// `clips/test.wav` in the app data dir, and logs the path. Everything runs on
 /// a spawned thread: acquiring the recorder can block while the device opens,
@@ -225,6 +429,91 @@ fn reveal(path: &std::path::Path) {
         if let Some(dir) = path.parent() {
             let _ = std::process::Command::new("xdg-open").arg(dir).status();
         }
+    }
+}
+
+#[cfg(test)]
+mod flyout_tests {
+    use super::*;
+
+    const WORK: Bounds = Bounds {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1032,
+    };
+
+    #[test]
+    fn bottom_taskbar_puts_the_flyout_in_the_corner_above_the_icon() {
+        let icon = Bounds {
+            left: 1700,
+            top: 1040,
+            right: 1724,
+            bottom: 1072,
+        };
+        assert_eq!(flyout_origin(WORK, icon, (360, 500), 12), (1532, 520));
+        // An icon near the screen edge keeps the flyout inside the work area.
+        let edge = Bounds {
+            left: 1890,
+            right: 1914,
+            ..icon
+        };
+        assert_eq!(flyout_origin(WORK, edge, (360, 500), 12), (1548, 520));
+    }
+
+    #[test]
+    fn top_taskbar_hangs_the_flyout_below_it() {
+        let work = Bounds { top: 48, ..WORK };
+        let icon = Bounds {
+            left: 1700,
+            top: 8,
+            right: 1724,
+            bottom: 40,
+        };
+        assert_eq!(flyout_origin(work, icon, (360, 500), 12), (1532, 60));
+    }
+
+    #[test]
+    fn icon_inside_the_work_area_gets_the_flyout_just_above_it() {
+        let icon = Bounds {
+            left: 1000,
+            top: 900,
+            right: 1032,
+            bottom: 932,
+        };
+        assert_eq!(flyout_origin(WORK, icon, (360, 500), 12), (836, 388));
+        // Too close to the top: the flyout stays inside the area instead.
+        let high = Bounds {
+            top: 100,
+            bottom: 132,
+            ..icon
+        };
+        assert_eq!(flyout_origin(WORK, high, (360, 500), 12).1, 12);
+    }
+
+    #[test]
+    fn a_flyout_larger_than_the_area_is_pinned_top_left() {
+        let small = Bounds {
+            left: 0,
+            top: 0,
+            right: 300,
+            bottom: 400,
+        };
+        let icon = Bounds {
+            left: 280,
+            top: 410,
+            right: 300,
+            bottom: 430,
+        };
+        assert_eq!(flyout_origin(small, icon, (360, 500), 12), (12, 12));
+    }
+
+    #[test]
+    fn the_click_that_blurred_the_flyout_does_not_reopen_it() {
+        let now = Instant::now();
+        assert!(should_reopen(None, now));
+        assert!(!should_reopen(Some(now), now + Duration::from_millis(150)));
+        assert!(should_reopen(Some(now), now + REOPEN_GUARD));
     }
 }
 

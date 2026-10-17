@@ -8,6 +8,7 @@ export default defineConfig({
         main: "index.html",
         app: "app.html",
         bench: "bench.html",
+        flyout: "flyout.html",
         overlay: "overlay.html",
       },
     },

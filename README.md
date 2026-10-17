@@ -163,7 +163,20 @@ model), **Dictation & hotkey** (shortcut, live transcription and captions),
 model applies at once. Other edits show a **Save** bar at the bottom with
 **Discard**; it stays until you save or discard, across pages.
 
-The tray menu contains, in order:
+### Tray icon
+
+**Left-click** the tray icon for a small flyout above it: the **Ready ·
+<engine>** status and your push-to-talk keys; an **OpenAI / Grok / Local**
+switch (applies at once, like the provider choice in Settings; providers that
+are not set up are greyed out); three quick toggles, **Live captions**, **Dim
+audio** and **Live mode**, saved at once; the last dictation with **Copy**, and
+the three before it on one line each with **Copy** (or **Retry** on the newest
+failure while its recording is saved). The footer has **History**, **Timings**,
+**Test mic**, **⚙** (Settings) and **Quit**. Clicking anywhere else, or **Esc**,
+closes it. The flyout is created on each click and destroyed when it closes,
+so it costs nothing while closed.
+
+**Right-click** opens the menu, which contains, in order:
 
 - **Open Parla** (the default item, in bold) — shows or focuses the main window.
 - **Settings…** — opens the main window on its **Transcription** settings page.
@@ -557,7 +570,13 @@ the WebView2 browser processes behind the four hidden windows of the time (main,
 a separate history window since retired, benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
 700 MB (about 1.4 GB working set in total). These are single measurements, not
 benchmarks. Main and benchmark windows are now created on demand and
-destroyed on close; the pill stays warm. The recorder drains audio every 10 ms
+destroyed on close; the pill stays warm. The tray flyout (PARLA-60, measured
+2026-10-17 on an i7-1370P at 150 % scaling, Parakeet loaded, 10 open/close
+cycles) appears 122–162 ms after the click (median ~130 ms), adds one WebView2
+renderer (about 55–75 MB private in total while open), and that renderer exits
+when it closes. Afterwards about 6–12 MB stays in WebView2's shared GPU and
+browser processes and does not grow with more opens; idle CPU and wakeups were
+unchanged. The recorder drains audio every 10 ms
 while recording and every 100 ms while idle, and start/stop commands wake it
 immediately. After 60 s idle the microphone stream is paused and the recorder
 stops polling: the open microphone was about 94 % of Parla's idle CPU, almost
