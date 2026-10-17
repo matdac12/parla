@@ -60,7 +60,8 @@ pub fn body(request: &Request) -> serde_json::Value {
         "reasoning": {"effort": request.reasoning_effort},
         "max_output_tokens": MAX_OUTPUT_TOKENS,
         // Unnamed and undescribed, it drew `open_url` calls over selections
-        // that only mention a page (the eval's #11).
+        // that only mention a page (the eval's #11). The name predates the
+        // Card (PARLA-81) and stays: #11 is sensitive to this wording.
         "text": {"format": {
             "type": "json_schema",
             "name": "pasted_text",

@@ -717,8 +717,8 @@ mod tests {
         assert_eq!(explained.actions, [Action::Copy, Action::Replace]);
         assert_eq!(h.rows()[0].reply_kind, Some(Kind::Answer));
         let h = Harness::new(answer("Canberra."));
-        let answered = card(h.run("What's the capital of Australia?"));
-        assert_eq!(answered.actions, [Action::Copy, Action::Paste]);
+        let capital = card(h.run("What's the capital of Australia?"));
+        assert_eq!(capital.actions, [Action::Copy, Action::Paste]);
     }
 
     #[test]

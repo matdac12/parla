@@ -4,7 +4,7 @@
 //! call), and grades each text reply's `kind`, edit or answer (PARLA-81);
 //! re-run it whenever the system prompt, the request or a tool changes:
 //! `OPENAI_API_KEY=... cargo test --test command_eval -- --ignored --nocapture`
-//! (about 160 calls, under a cent). The grading itself runs offline in every
+//! (about 190 calls, about a cent). The grading itself runs offline in every
 //! `cargo test`.
 
 use parla_lib::{
