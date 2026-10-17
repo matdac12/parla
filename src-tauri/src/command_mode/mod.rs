@@ -4,9 +4,11 @@
 //! The orchestrator owns a run from the confirmed hold to its outcome: reading
 //! the selection (PARLA-64), the empty-instruction rule, the LLM call,
 //! cancellation, the paste, giving the user's clipboard back and the history
-//! row. It talks to the desktop, the LLM and history through narrow ports, so
-//! it is tested with fakes and flow.rs supplies the real ones.
+//! row, or running an allowlisted tool instead of the paste (PARLA-65). It
+//! talks to the desktop, the LLM, the browser and history through narrow
+//! ports, so it is tested with fakes and flow.rs supplies the real ones.
 pub mod responses;
+pub mod tools;
 
 pub use crate::inserter::Borrowed;
 use crate::{
@@ -48,6 +50,11 @@ pub trait Llm {
     fn reply(&self, request: &Request, cancelled: &AtomicBool) -> Result<Reply, ProviderError>;
 }
 
+/// The shell's default handler for a web page: the default browser.
+pub trait UrlOpener {
+    fn open(&self, url: &str) -> Result<(), String>;
+}
+
 pub trait HistorySink {
     fn record(&self, record: DictationRecord);
 }
@@ -55,6 +62,7 @@ pub trait HistorySink {
 pub struct Ports<'a> {
     pub desktop: &'a dyn Desktop,
     pub llm: &'a dyn Llm,
+    pub urls: &'a dyn UrlOpener,
     pub history: &'a dyn HistorySink,
 }
 
@@ -172,6 +180,10 @@ pub enum Outcome {
     /// An empty or silent instruction: nothing shown, no row.
     Silent,
     Pasted,
+    /// `open_url` opened a page: the pill names its host.
+    Opened {
+        host: String,
+    },
     Cancelled,
     Failed(Failure),
 }
@@ -181,7 +193,7 @@ impl Outcome {
     pub fn pill(&self) -> Option<bool> {
         match self {
             Outcome::Silent | Outcome::Cancelled => None,
-            Outcome::Pasted => Some(true),
+            Outcome::Pasted | Outcome::Opened { .. } => Some(true),
             Outcome::Failed(_) => Some(false),
         }
     }
@@ -225,7 +237,7 @@ pub fn run(
             record.error = Some(error.to_string());
             Outcome::Failed(Failure::Transcription(error))
         }
-        Some(Ok(())) => reply_and_paste(ports, &run, &mut record, &selection),
+        Some(Ok(())) => reply_and_act(ports, &run, &mut record, &selection),
     };
     // A paste gives the clipboard back itself, once.
     if outcome != Outcome::Pasted {
@@ -240,6 +252,7 @@ pub fn run(
     record.outcome = Some(match outcome {
         Outcome::Silent => unreachable!("a silent run returned above"),
         Outcome::Pasted => CommandOutcome::Pasted,
+        Outcome::Opened { .. } => CommandOutcome::Opened,
         Outcome::Cancelled => CommandOutcome::Cancelled,
         Outcome::Failed(_) => CommandOutcome::Failed,
     });
@@ -247,7 +260,8 @@ pub fn run(
     outcome
 }
 
-fn reply_and_paste(
+/// Asks the LLM, then pastes its text or runs the tool it called.
+fn reply_and_act(
     ports: &Ports,
     run: &Run,
     record: &mut DictationRecord,
@@ -280,6 +294,9 @@ fn reply_and_paste(
     };
     record.tokens_in = reply.tokens_in;
     record.tokens_out = reply.tokens_out;
+    if let Some(call) = &reply.call {
+        return run_tool(ports, run, record, call);
+    }
     if reply.text.trim().is_empty() {
         return Outcome::Failed(Failure::Command(ProviderError::Other(
             "the reply was empty.".into(),
@@ -297,6 +314,33 @@ fn reply_and_paste(
         }
         Err(error) => Outcome::Failed(Failure::Command(ProviderError::Other(format!(
             "could not paste the reply ({error})."
+        )))),
+    }
+}
+
+/// A tool call instead of a paste. Nothing goes back to the model.
+fn run_tool(
+    ports: &Ports,
+    run: &Run,
+    record: &mut DictationRecord,
+    call: &responses::ToolCall,
+) -> Outcome {
+    let action = match tools::validate(call) {
+        Ok(action) => action,
+        Err(reason) => return Outcome::Failed(Failure::Command(ProviderError::Other(reason))),
+    };
+    record.tool = Some(call.name.clone());
+    match action.run(ports.urls) {
+        Ok(()) => {
+            record.opened = Some(timing::elapsed_ms(run.key_up));
+            let tools::Action::OpenUrl(url) = action;
+            record.url = Some(url.to_string());
+            Outcome::Opened {
+                host: url.host_str().unwrap_or_default().into(),
+            }
+        }
+        Err(error) => Outcome::Failed(Failure::Command(ProviderError::Other(format!(
+            "could not open the page ({error})."
         )))),
     }
 }
@@ -437,6 +481,22 @@ mod tests {
         }
     }
 
+    /// The default browser: records what it was asked to open.
+    #[derive(Default)]
+    struct FakeBrowser {
+        opened: RefCell<Vec<String>>,
+        fail: bool,
+    }
+    impl UrlOpener for FakeBrowser {
+        fn open(&self, url: &str) -> Result<(), String> {
+            if self.fail {
+                return Err("no default browser".into());
+            }
+            self.opened.borrow_mut().push(url.into());
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct FakeHistory(RefCell<Vec<DictationRecord>>);
     impl HistorySink for FakeHistory {
@@ -448,6 +508,7 @@ mod tests {
     fn text(reply: &str) -> Result<Reply, ProviderError> {
         Ok(Reply {
             text: reply.into(),
+            call: None,
             tokens_in: Some(92),
             tokens_out: Some(18),
         })
@@ -456,6 +517,7 @@ mod tests {
     struct Harness {
         desktop: FakeDesktop,
         llm: FakeLlm,
+        browser: FakeBrowser,
         history: FakeHistory,
         cancelled: AtomicBool,
         settings: CommandSettings,
@@ -467,6 +529,7 @@ mod tests {
             Self {
                 desktop: FakeDesktop::new(Some("user copy")),
                 llm: FakeLlm::new(reply),
+                browser: FakeBrowser::default(),
                 history: FakeHistory::default(),
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
@@ -481,6 +544,7 @@ mod tests {
             let ports = Ports {
                 desktop: &self.desktop,
                 llm: &self.llm,
+                urls: &self.browser,
                 history: &self.history,
             };
             let input = Run {
@@ -848,5 +912,114 @@ mod tests {
         selection.give_back(&h.desktop);
         assert!(h.writes().is_empty());
         assert_eq!(h.clipboard().as_deref(), Some("newer copy"));
+    }
+
+    fn tool(name: &str, url: &str) -> Result<Reply, ProviderError> {
+        Ok(Reply {
+            text: String::new(),
+            call: Some(responses::ToolCall {
+                name: name.into(),
+                arguments: serde_json::json!({ "url": url }).to_string(),
+            }),
+            tokens_in: Some(295),
+            tokens_out: Some(25),
+        })
+    }
+
+    impl Harness {
+        fn opened(&self) -> Vec<String> {
+            self.browser.opened.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn open_url_opens_the_page_pastes_nothing_and_gives_the_clipboard_back() {
+        let h = Harness::selecting(
+            tool("open_url", "https://it.wikipedia.org/wiki/Roma"),
+            "ciao",
+        );
+        assert_eq!(
+            h.run("Apri la pagina di Wikipedia su Roma"),
+            Outcome::Opened {
+                host: "it.wikipedia.org".into()
+            }
+        );
+        assert_eq!(h.opened(), ["https://it.wikipedia.org/wiki/Roma"]);
+        assert!(h.pasted().is_empty());
+        // The copy borrowed the clipboard; the user's text comes back once.
+        assert_eq!(h.writes(), ["user copy"]);
+        assert_eq!(h.llm.requests.borrow().len(), 1, "a single round trip");
+        let [row] = &h.rows()[..] else {
+            panic!("one row")
+        };
+        assert_eq!(row.outcome, Some(CommandOutcome::Opened));
+        assert_eq!(row.tool.as_deref(), Some("open_url"));
+        assert_eq!(
+            row.url.as_deref(),
+            Some("https://it.wikipedia.org/wiki/Roma")
+        );
+        assert_eq!((row.tokens_in, row.tokens_out), (Some(295), Some(25)));
+        assert!(row.error.is_none() && row.reply.is_none() && row.pasted.is_none());
+        assert!(row.llm_returned.unwrap() <= row.opened.unwrap());
+        let json = serde_json::to_value(row).unwrap();
+        assert_eq!(json["outcome"], "opened");
+        assert_eq!(json["url"], "https://it.wikipedia.org/wiki/Roma");
+        assert_eq!(json["tool"], "open_url");
+    }
+
+    #[test]
+    fn a_page_that_is_not_http_or_https_is_refused_and_nothing_opens() {
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-settings:privacy",
+            "not a url",
+        ] {
+            let h = Harness::selecting(tool("open_url", url), "ciao");
+            assert!(
+                matches!(h.run("Apri"), Outcome::Failed(Failure::Command(_))),
+                "{url}"
+            );
+            assert!(h.opened().is_empty() && h.pasted().is_empty(), "{url}");
+            assert_eq!(h.writes(), ["user copy"], "{url}");
+            let row = &h.rows()[0];
+            assert_eq!(row.outcome, Some(CommandOutcome::Failed));
+            assert!(row.error.is_some() && row.url.is_none(), "{url}");
+            assert_eq!(row.tokens_out, Some(25), "billed anyway");
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_fails_and_runs_nothing() {
+        let h = Harness::new(tool("run_shell", "https://example.com"));
+        assert!(matches!(
+            h.run("Apri"),
+            Outcome::Failed(Failure::Command(_))
+        ));
+        assert!(h.opened().is_empty() && h.pasted().is_empty());
+        let row = &h.rows()[0];
+        assert_eq!(row.outcome, Some(CommandOutcome::Failed));
+        assert!(row.error.as_deref().unwrap().contains("unknown tool"));
+    }
+
+    #[test]
+    fn esc_during_the_wait_opens_nothing() {
+        let mut h = Harness::new(tool("open_url", "https://example.com"));
+        h.llm.late = true;
+        assert_eq!(h.run("Apri example.com"), Outcome::Cancelled);
+        assert!(h.opened().is_empty());
+        assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Cancelled));
+    }
+
+    #[test]
+    fn a_browser_that_fails_to_open_fails_the_run() {
+        let mut h = Harness::new(tool("open_url", "https://example.com"));
+        h.browser.fail = true;
+        assert!(matches!(
+            h.run("Apri example.com"),
+            Outcome::Failed(Failure::Command(_))
+        ));
+        let row = &h.rows()[0];
+        assert_eq!(row.outcome, Some(CommandOutcome::Failed));
+        assert!(row.error.as_deref().unwrap().contains("no default browser"));
     }
 }

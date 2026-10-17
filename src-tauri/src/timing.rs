@@ -65,6 +65,15 @@ pub struct DictationRecord {
     /// The focused app's executable name at the confirmed hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    /// The allowlisted tool an `opened` run called (PARLA-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The page an `opened` run opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Key-up to the page handed to the browser, like `pasted` for a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened: Option<u64>,
 }
 
 /// How a command run ended.
@@ -72,6 +81,8 @@ pub struct DictationRecord {
 #[serde(rename_all = "lowercase")]
 pub enum CommandOutcome {
     Pasted,
+    /// A tool opened a page instead of a paste.
+    Opened,
     Failed,
     Cancelled,
 }
@@ -110,6 +121,9 @@ impl DictationRecord {
             reply: None,
             selection_chars: None,
             app: None,
+            tool: None,
+            url: None,
+            opened: None,
         }
     }
 }

@@ -1,5 +1,6 @@
 //! The small always-on-top pill: live level meter while recording, a spinner
-//! while transcribing, and a brief done/error confirmation.
+//! while transcribing, and a brief done/error confirmation ("Opened <host>"
+//! beside the check after command mode opened a page).
 
 use std::{
     sync::{
@@ -16,9 +17,15 @@ const WIDTH: f64 = 144.0;
 const HEIGHT: f64 = 40.0;
 const CAPTION_WIDTH: f64 = 366.0;
 const CAPTION_HEIGHT: f64 = 116.0;
+/// Room for "Opened <host>" beside the check (PARLA-65).
+const OPENED_WIDTH: f64 = 248.0;
 static CAPTIONS_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Widened for "Opened <host>" until the next session.
+static OPENED: AtomicBool = AtomicBool::new(false);
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 const DONE_HOLD: Duration = Duration::from_millis(750);
+/// Long enough to read which site opened.
+const OPENED_HOLD: Duration = Duration::from_millis(1500);
 /// A failed dictation keeps its pill (Dismiss and Retry buttons) up for a while.
 const ERROR_HOLD: Duration = Duration::from_secs(10);
 
@@ -98,26 +105,34 @@ fn place(app: &tauri::AppHandle) {
     let scale = monitor.scale_factor();
     let size = monitor.size();
     let origin = monitor.position();
-    let (width, height) = dimensions(CAPTIONS_ENABLED.load(Ordering::Acquire));
+    let (width, height) = dimensions(
+        CAPTIONS_ENABLED.load(Ordering::Acquire),
+        OPENED.load(Ordering::Acquire),
+    );
     let x = origin.x + ((f64::from(size.width) - width * scale) / 2.0) as i32;
     let y = origin.y + (f64::from(size.height) - (height + 72.0) * scale) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-fn dimensions(captions: bool) -> (f64, f64) {
-    if captions {
-        (CAPTION_WIDTH, CAPTION_HEIGHT)
-    } else {
-        (WIDTH, HEIGHT)
+fn dimensions(captions: bool, opened: bool) -> (f64, f64) {
+    match (captions, opened) {
+        (true, _) => (CAPTION_WIDTH, CAPTION_HEIGHT),
+        (false, true) => (OPENED_WIDTH, HEIGHT),
+        (false, false) => (WIDTH, HEIGHT),
+    }
+}
+
+fn resize(app: &tauri::AppHandle, captions: bool, opened: bool) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let (width, height) = dimensions(captions, opened);
+        let _ = window.set_size(LogicalSize::new(width, height));
     }
 }
 
 fn configure(app: &tauri::AppHandle, captions: bool, generation: u64) {
-    if CAPTIONS_ENABLED.swap(captions, Ordering::AcqRel) != captions {
-        if let Some(window) = app.get_webview_window(LABEL) {
-            let (width, height) = dimensions(captions);
-            let _ = window.set_size(LogicalSize::new(width, height));
-        }
+    let widened = OPENED.swap(false, Ordering::AcqRel);
+    if CAPTIONS_ENABLED.swap(captions, Ordering::AcqRel) != captions || widened {
+        resize(app, captions, false);
     }
     let _ = app.emit_to(
         LABEL,
@@ -291,7 +306,19 @@ impl Overlay {
 
     /// Shows a short confirmation (check on success, cross on failure), then
     /// hides the pill.
-    pub fn finish(mut self, ok: bool) {
+    pub fn finish(self, ok: bool) {
+        self.settle(ok, if ok { DONE_HOLD } else { ERROR_HOLD });
+    }
+
+    /// The check with "Opened <host>" beside it: command mode opened a page.
+    pub fn finish_opened(self, host: &str) {
+        OPENED.store(true, Ordering::Release);
+        resize(&self.app, CAPTIONS_ENABLED.load(Ordering::Acquire), true);
+        let _ = self.app.emit_to(LABEL, "opened", host);
+        self.settle(true, OPENED_HOLD);
+    }
+
+    fn settle(mut self, ok: bool, hold: Duration) {
         self.clear_captions();
         self.settled = true;
         self.metering.store(false, Ordering::Release);
@@ -305,7 +332,6 @@ impl Overlay {
             .emit_to(LABEL, "phase", if ok { "done" } else { "error" });
         let app = self.app.clone();
         let generation = self.generation;
-        let hold = if ok { DONE_HOLD } else { ERROR_HOLD };
         let _ = std::thread::Builder::new()
             .name("parla-overlay-hide".into())
             .spawn(move || {

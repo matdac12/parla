@@ -377,8 +377,14 @@ fn run_session(
         };
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
-        if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
-            overlay.finish(ok);
+        match (overlay, &outcome) {
+            (Some(overlay), command_mode::Outcome::Opened { host }) => overlay.finish_opened(host),
+            (Some(overlay), outcome) => {
+                if let Some(ok) = outcome.pill() {
+                    overlay.finish(ok);
+                }
+            }
+            (None, _) => {}
         }
         return;
     }
@@ -557,6 +563,7 @@ fn finish_command(
     let ports = command_mode::Ports {
         desktop: &CommandDesktop::new(settings),
         llm: &command_mode::responses::OpenAi(settings),
+        urls: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
     };
     // Joined once the instruction is in: the read finished long before.
@@ -582,7 +589,9 @@ fn finish_command(
         }
     });
     match &outcome {
-        command_mode::Outcome::Pasted => crate::failure::on_success(app),
+        command_mode::Outcome::Pasted | command_mode::Outcome::Opened { .. } => {
+            crate::failure::on_success(app)
+        }
         command_mode::Outcome::Failed(command_mode::Failure::Transcription(error)) => {
             crate::failure::notify_error(app, &settings.active_provider, error)
         }
