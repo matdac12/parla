@@ -1,17 +1,17 @@
 //! The OpenAI Responses API client for command mode (never Chat Completions).
 //! Pure request building and response parsing, plus one thin blocking call.
 
-use crate::{provider::ProviderError, settings::Settings};
-use reqwest::{
-    blocking::Client,
-    header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+use crate::{
+    provider::{openai, ProviderError},
+    settings::Settings,
 };
+use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, OnceLock,
+        mpsc,
     },
     time::Duration,
 };
@@ -150,15 +150,16 @@ pub fn send(api_key: &str, request: &Request) -> Result<Reply, ProviderError> {
     let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
         .map_err(|_| ProviderError::MissingConfig("Invalid OpenAI API key header".into()))?;
     authorization.set_sensitive(true);
-    let response = client()?
+    let response = openai::client()?
         .post(ENDPOINT)
+        .timeout(TIMEOUT)
         .header(AUTHORIZATION, authorization)
         .header(CONTENT_TYPE, "application/json")
         .body(body(request).to_string())
         .send()
-        .map_err(map_transport)?;
+        .map_err(openai::map_transport)?;
     let status = response.status().as_u16();
-    let text = response.text().map_err(map_transport)?;
+    let text = response.text().map_err(openai::map_transport)?;
     parse(status, &text)
 }
 
@@ -167,7 +168,7 @@ pub fn send(api_key: &str, request: &Request) -> Result<Reply, ProviderError> {
 pub struct OpenAi<'a>(pub &'a Settings);
 impl super::Llm for OpenAi<'_> {
     fn reply(&self, request: &Request, cancelled: &AtomicBool) -> Result<Reply, ProviderError> {
-        let api_key = crate::provider::openai::api_key(self.0)
+        let api_key = openai::api_key(self.0)
             .ok_or_else(|| ProviderError::MissingConfig("OpenAI API key".into()))?;
         let request = request.clone();
         let (sender, receiver) = mpsc::channel();
@@ -177,46 +178,19 @@ impl super::Llm for OpenAi<'_> {
                 let _ = sender.send(send(&api_key, &request));
             })
             .map_err(|error| ProviderError::Other(format!("Cannot start the request: {error}")))?;
-        loop {
+        while !cancelled.load(Ordering::Acquire) {
             match receiver.recv_timeout(CANCEL_POLL) {
                 Ok(reply) => return reply,
-                Err(mpsc::RecvTimeoutError::Timeout) if cancelled.load(Ordering::Acquire) => {
-                    return Err(ProviderError::Other("Cancelled".into()))
-                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ProviderError::Other("The request thread stopped.".into()))
-                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+        // Cancelled (the orchestrator discards it) or the thread died.
+        Err(ProviderError::Other("No reply.".into()))
     }
 }
 /// How soon Esc frees the pill during the wait.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
-
-fn client() -> Result<&'static Client, ProviderError> {
-    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(TIMEOUT)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Duration::from_secs(30))
-                .build()
-                .map_err(|e| e.to_string())
-        })
-        .as_ref()
-        .map_err(|e| ProviderError::Other(e.clone()))
-}
-
-fn map_transport(error: reqwest::Error) -> ProviderError {
-    if error.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(error.without_url().to_string())
-    }
-}
 
 #[cfg(test)]
 mod tests {

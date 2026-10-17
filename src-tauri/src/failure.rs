@@ -73,10 +73,12 @@ pub fn user_message(provider_display_name: &str, error: &ProviderError) -> Strin
     format!("{provider_display_name}: {reason}")
 }
 
+const DICTATION_FAILED: &str = "Parla — dictation failed";
+
 pub fn notify_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
     let provider = registry::get(provider_id);
     let name = provider.as_ref().map_or("Provider", |p| p.display_name());
-    notify_failure(app, "Parla — dictation failed", &user_message(name, error));
+    notify_failure(app, DICTATION_FAILED, &user_message(name, error));
 }
 
 /// A command run's LLM step or paste failed (PARLA-63). The reason is also its
@@ -306,7 +308,7 @@ pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), Stri
             Err(_) => {
                 notify_failure(
                     app,
-                    "Parla — dictation failed",
+                    DICTATION_FAILED,
                     "Could not read the saved failed clip. Record a new dictation.",
                 );
                 return Err("Could not read the saved failed clip".into());

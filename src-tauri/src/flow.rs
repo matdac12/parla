@@ -360,13 +360,9 @@ fn run_session(
         let outcome = finish_command(
             app, audio, &settings, started_at, key_up, hold_error, stream, &cancelled,
         );
-        // A silent or cancelled run drops the pill without a check or a cross.
-        if let Some(overlay) = overlay {
-            match outcome {
-                command_mode::Outcome::Pasted => overlay.finish(true),
-                command_mode::Outcome::Failed(_) => overlay.finish(false),
-                command_mode::Outcome::Silent | command_mode::Outcome::Cancelled => {}
-            }
+        // Dropping the pill unfinished hides it: a silent or cancelled run.
+        if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
+            overlay.finish(ok);
         }
         return;
     }
@@ -599,18 +595,12 @@ impl Drop for DisarmEsc {
 /// The command run's desktop port: the inserter's paste and clipboard restore.
 struct CommandDesktop<'a>(&'a Settings);
 impl command_mode::Desktop for CommandDesktop<'_> {
-    fn save_clipboard(&self) -> Option<String> {
-        inserter::user_clipboard_text().unwrap_or_else(|error| {
-            eprintln!("Parla could not read the clipboard to restore it: {error}");
-            None
-        })
-    }
-    fn paste(&self, text: &str, saved: Option<String>) -> Result<Instant, String> {
-        inserter::paste_text_restoring(
+    fn paste(&self, text: &str) -> Result<Instant, String> {
+        inserter::paste_text_with_options(
             text,
-            saved,
             Duration::from_millis(self.0.restore_delay_ms),
             self.0.paste_compatibility_mode,
+            false,
         )
     }
 }
@@ -690,7 +680,7 @@ fn transcribe_and_paste(
         Duration::from_millis(settings.restore_delay_ms),
     )
     .map_err(|error| ProviderError::Other(format!("Paste failed: {error}")))?;
-    record.pasted = Some(pasted.saturating_duration_since(key_up).as_millis() as u64);
+    record.pasted = Some(timing::offset_ms(key_up, pasted));
     Ok(())
 }
 

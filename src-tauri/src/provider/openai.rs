@@ -103,7 +103,8 @@ impl SttProvider for OpenAi {
     }
 }
 
-fn client() -> Result<&'static Client, ProviderError> {
+/// Shared with command mode's Responses call, which sets its own timeout.
+pub(crate) fn client() -> Result<&'static Client, ProviderError> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -165,7 +166,7 @@ fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Reques
         .map_err(map_transport)
 }
 
-fn map_transport(error: reqwest::Error) -> ProviderError {
+pub(crate) fn map_transport(error: reqwest::Error) -> ProviderError {
     classify_transport(error.is_timeout(), error.without_url().to_string())
 }
 fn classify_transport(timeout: bool, message: String) -> ProviderError {

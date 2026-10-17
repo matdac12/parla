@@ -109,6 +109,11 @@ pub fn elapsed_ms(key_up: Instant) -> u64 {
     key_up.elapsed().as_millis() as u64
 }
 
+/// The stage offset of `at`, like `elapsed_ms` for an instant already taken.
+pub fn offset_ms(key_up: Instant, at: Instant) -> u64 {
+    at.saturating_duration_since(key_up).as_millis() as u64
+}
+
 fn default_kind() -> String {
     "dictation".into()
 }

@@ -47,54 +47,15 @@ pub fn paste_text_with_options(
 ) -> Result<Instant, String> {
     // AudioBud also serializes capture/write/paste/restore as one transaction:
     // https://github.com/jamditis/audiobud/blob/main/src-tauri/src/clipboard.rs
-    in_transaction(|desktop, pending| {
-        paste_deferring_restore(
-            desktop,
-            pending,
-            text,
-            restore_delay,
-            compatibility_mode,
-            send,
-        )
-    })
-}
-
-/// The user's clipboard text, for a later `paste_text_restoring` (command
-/// mode saves it before anything changes the clipboard).
-#[cfg(windows)]
-pub fn user_clipboard_text() -> Result<Option<String>, String> {
-    let pending = pending_restore();
-    user_text(&mut WindowsDesktop::new()?, &pending)
-}
-
-/// Pastes `text` and restores `saved` afterwards, on the same timer as a
-/// dictation's restore.
-#[cfg(windows)]
-pub fn paste_text_restoring(
-    text: &str,
-    saved: Option<String>,
-    restore_delay: Duration,
-    compatibility_mode: bool,
-) -> Result<Instant, String> {
-    in_transaction(|desktop, pending| {
-        paste_then_restore(
-            desktop,
-            pending,
-            text,
-            saved,
-            restore_delay,
-            compatibility_mode,
-            false,
-        )
-    })
-}
-
-#[cfg(windows)]
-fn in_transaction(
-    paste: impl FnOnce(&mut WindowsDesktop, &mut Option<PendingRestore>) -> Result<Instant, String>,
-) -> Result<Instant, String> {
     let mut pending = pending_restore();
-    let result = paste(&mut WindowsDesktop::new()?, &mut pending);
+    let result = paste_deferring_restore(
+        &mut WindowsDesktop::new()?,
+        &mut pending,
+        text,
+        restore_delay,
+        compatibility_mode,
+        send,
+    );
     if let Some(restore) = pending.as_ref() {
         schedule_restore(restore.due);
     }
@@ -154,21 +115,6 @@ pub fn paste_text_with_options(
     restore_delay: Duration,
     _compatibility_mode: bool,
     _send: bool,
-) -> Result<Instant, String> {
-    paste_text_timed(text, restore_delay)
-}
-
-#[cfg(not(windows))]
-pub fn user_clipboard_text() -> Result<Option<String>, String> {
-    Ok(None)
-}
-
-#[cfg(not(windows))]
-pub fn paste_text_restoring(
-    text: &str,
-    _saved: Option<String>,
-    restore_delay: Duration,
-    _compatibility_mode: bool,
 ) -> Result<Instant, String> {
     paste_text_timed(text, restore_delay)
 }
@@ -245,45 +191,14 @@ fn paste_deferring_restore(
     compatibility_mode: bool,
     send: bool,
 ) -> Result<Instant, String> {
-    let saved = user_text(desktop, pending)?;
-    paste_then_restore(
-        desktop,
-        pending,
-        text,
-        saved,
-        restore_delay,
-        compatibility_mode,
-        send,
-    )
-}
-
-/// The clipboard text owed back to the user: the clipboard itself, unless it
-/// still holds our previous paste, whose restore is pending.
-#[cfg(any(windows, test))]
-fn user_text(
-    desktop: &mut impl Desktop,
-    pending: &Option<PendingRestore>,
-) -> Result<Option<String>, String> {
     let current = restorable_text(desktop.read_text()?);
-    Ok(match pending.as_ref() {
+    // Still our previous transcript: the user's text is the one owed back.
+    let saved = match pending.as_ref() {
         Some(restore) if current.as_deref() == Some(restore.pasted.as_str()) => {
             Some(restore.saved.clone())
         }
         _ => current,
-    })
-}
-
-/// Pastes `text` and leaves the restore of `saved` pending.
-#[cfg(any(windows, test))]
-fn paste_then_restore(
-    desktop: &mut impl Desktop,
-    pending: &mut Option<PendingRestore>,
-    text: &str,
-    saved: Option<String>,
-    restore_delay: Duration,
-    compatibility_mode: bool,
-    send: bool,
-) -> Result<Instant, String> {
+    };
     desktop.write_text(text)?;
     let (settle, key_hold) = if compatibility_mode {
         (COMPATIBILITY_WAIT, COMPATIBILITY_WAIT)
@@ -633,41 +548,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pending.as_ref().unwrap().saved, "user copy");
-    }
-
-    #[test]
-    fn a_paste_handed_the_users_text_restores_that_text() {
-        // A command run saved the user's copy before the clipboard changed.
-        let mut desktop = MemoryDesktop::new(Some("something else"));
-        let mut pending = None;
-        paste_then_restore(
-            &mut desktop,
-            &mut pending,
-            "reply",
-            Some("user copy".into()),
-            Duration::ZERO,
-            false,
-            false,
-        )
-        .unwrap();
-        assert_eq!(desktop.pasted, ["reply"]);
-        restore_pending(&mut desktop, &mut pending);
-        assert_eq!(desktop.text.as_deref(), Some("user copy"));
-    }
-
-    #[test]
-    fn the_users_text_is_the_pending_one_while_our_paste_is_still_there() {
-        let mut desktop = MemoryDesktop::new(Some("old"));
-        let mut pending = None;
-        let delay = Duration::from_millis(250);
-        assert_eq!(user_text(&mut desktop, &pending), Ok(Some("old".into())));
-        paste_deferring_restore(&mut desktop, &mut pending, "first", delay, false, false).unwrap();
-        assert_eq!(user_text(&mut desktop, &pending), Ok(Some("old".into())));
-        desktop.text = Some("user copy".into());
-        assert_eq!(
-            user_text(&mut desktop, &pending),
-            Ok(Some("user copy".into()))
-        );
     }
 
     #[test]

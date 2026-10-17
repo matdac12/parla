@@ -2,8 +2,8 @@
 //! client. The only code that calls an LLM (ADR-0001).
 //!
 //! The orchestrator owns a run from key-up to its outcome: the empty-instruction
-//! rule, the LLM call, cancellation, the paste and the clipboard restore, and
-//! the history row. It talks to the desktop, the LLM and history through narrow
+//! rule, the LLM call, cancellation, the paste (the inserter restores the
+//! clipboard) and the history row. It talks to the desktop, the LLM and history through narrow
 //! ports, so it is tested with fakes and flow.rs supplies the real ones.
 pub mod responses;
 
@@ -19,13 +19,11 @@ use std::{
 };
 
 /// The focused app, through the inserter. Selection reading (Ctrl+Insert,
-/// PARLA-64) joins here.
+/// PARLA-64) joins here, with the clipboard saved before it.
 pub trait Desktop {
-    /// The user's clipboard text, to hand back after the paste.
-    fn save_clipboard(&self) -> Option<String>;
-    /// Pastes `text` once and restores `saved` afterwards. Returns the instant
-    /// the paste was injected.
-    fn paste(&self, text: &str, saved: Option<String>) -> Result<Instant, String>;
+    /// Pastes `text` once and restores the user's clipboard afterwards.
+    /// Returns the instant the paste was injected.
+    fn paste(&self, text: &str) -> Result<Instant, String>;
 }
 
 pub trait Llm {
@@ -62,6 +60,17 @@ pub enum Outcome {
     Failed(Failure),
 }
 
+impl Outcome {
+    /// The pill's check or cross; None drops the pill without one.
+    pub fn pill(&self) -> Option<bool> {
+        match self {
+            Outcome::Silent | Outcome::Cancelled => None,
+            Outcome::Pasted => Some(true),
+            Outcome::Failed(_) => Some(false),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     /// The instruction could not be transcribed: the provider's notification.
@@ -92,7 +101,8 @@ pub fn run(
     record.outcome = Some(match outcome {
         Outcome::Pasted => CommandOutcome::Pasted,
         Outcome::Cancelled => CommandOutcome::Cancelled,
-        _ => CommandOutcome::Failed,
+        Outcome::Failed(_) => CommandOutcome::Failed,
+        Outcome::Silent => unreachable!("a silent run returned above"),
     });
     ports.history.record(record);
     outcome
@@ -129,13 +139,11 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
             "OpenAI returned an empty reply.".into(),
         )));
     }
-    // Saved now, not at key-up: a copy made during the wait is the one owed back.
-    let saved = ports.desktop.save_clipboard();
-    let pasted = ports.desktop.paste(&reply.text, saved);
+    let pasted = ports.desktop.paste(&reply.text);
     record.reply = Some(reply.text);
     match pasted {
         Ok(at) => {
-            record.pasted = Some(at.saturating_duration_since(run.key_up).as_millis() as u64);
+            record.pasted = Some(timing::offset_ms(run.key_up, at));
             Outcome::Pasted
         }
         Err(error) => Outcome::Failed(Failure::Command(ProviderError::Other(format!(
@@ -163,17 +171,15 @@ mod tests {
             }
         }
     }
+    /// The inserter's contract: the clipboard is the reply while pasting,
+    /// then the user's text again once the restore delay passes.
     impl Desktop for FakeDesktop {
-        fn save_clipboard(&self) -> Option<String> {
-            self.clipboard.borrow().clone()
-        }
-        fn paste(&self, text: &str, saved: Option<String>) -> Result<Instant, String> {
+        fn paste(&self, text: &str) -> Result<Instant, String> {
             if self.fail_paste {
                 return Err("clipboard unavailable".into());
             }
-            *self.clipboard.borrow_mut() = Some(text.into());
+            let saved = self.clipboard.replace(Some(text.into()));
             self.pasted.borrow_mut().push(text.into());
-            // The restore delay passes.
             *self.clipboard.borrow_mut() = saved;
             Ok(Instant::now())
         }
