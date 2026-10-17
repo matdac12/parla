@@ -294,10 +294,10 @@ call an LLM; dictation always pastes the raw transcript (see
 steps (PARLA-61). **So far it answers an instruction with text pasted at the
 cursor;** it doesn't read a selection or open pages yet.
 
-It is off by default: turn it on in the Settings **Command mode** card (see
-[The Parla window](#the-parla-window)). It needs an OpenAI key: the same
-`providers.openai.api_key` dictation uses, with `OPENAI_API_KEY` overriding
-it.
+It is off by default: turn it on in Settings → **Dictation & hotkey** →
+**Command mode** (see [The Parla window](#the-parla-window)). It needs an
+OpenAI key: the same `providers.openai.api_key` dictation uses, with
+`OPENAI_API_KEY` overriding it. A blank model means `gpt-6-luna`.
 
 - **Hold** the command hotkey (default left **Ctrl** plus either **Shift**;
   see [Hotkey](#hotkey)), say the instruction, release. It is hold only: no

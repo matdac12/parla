@@ -118,7 +118,11 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
         return Outcome::Failed(Failure::Command(ProviderError::Other(hold.clone())));
     }
     let request = Request {
-        model: run.settings.model.clone(),
+        // A blank model field means the default (the card clears to it).
+        model: match run.settings.model.trim() {
+            "" => CommandSettings::default().model,
+            model => model.into(),
+        },
         reasoning_effort: run.settings.reasoning_effort.clone(),
         instruction: record.text.clone(),
     };
@@ -311,6 +315,15 @@ mod tests {
             row.pasted.unwrap(),
         );
         assert!(transcribed <= replied && replied <= pasted);
+    }
+
+    #[test]
+    fn a_blank_model_setting_asks_the_default_model() {
+        let mut h = Harness::new(text("Ciao"));
+        h.settings.model = "  ".into();
+        assert_eq!(h.run("Scrivi"), Outcome::Pasted);
+        assert_eq!(h.llm.requests.borrow()[0].model, "gpt-6-luna");
+        assert_eq!(h.rows()[0].llm_model.as_deref(), Some("gpt-6-luna"));
     }
 
     #[test]
