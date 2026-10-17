@@ -303,8 +303,8 @@ Command mode is a separate mode, with its own hotkey, where what you say is an
 **instruction** rather than text to paste. It is the only place Parla will
 call an LLM; dictation always pastes the raw transcript (see
 `docs/adr/0001-command-mode-is-the-only-llm-path.md`). It is being built in
-steps (PARLA-61). **So far it applies an instruction to the selected text, or
-answers it at the cursor;** it doesn't open pages yet.
+steps (PARLA-61). **So far it applies an instruction to the selected text,
+answers it at the cursor, or opens a web page** (the `open_url` tool).
 
 It is off by default: turn it on in Settings → **Dictation & hotkey** →
 **Command mode** (see [The Parla window](#the-parla-window)). It needs an
@@ -329,13 +329,30 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   `store: false` (OpenAI keeps nothing), the configured `reasoning_effort`, a
   cap of about 2,000 output tokens and a 20 s timeout. The request carries the
   instruction, the selection between `<selection>` tags (data to work on,
-  never instructions), the app name and today's date.
+  never instructions), the app name and today's date. It also offers the
+  allowlisted tools (below), `tool_choice: auto`, at most one call per reply.
 - The text reply is **pasted once**, over the selection if there was one,
   otherwise at the cursor, the same way a dictation is pasted, so one Ctrl+Z
   brings back what was there. Your clipboard text is restored once, after the
   paste, and also when a run is cancelled, fails or hears nothing. A copy you
   make during the run is kept. Non-text clipboard content (an image) is not
   restored, as with dictation. The pill then shows the check.
+- **Tools.** Instead of text, the model may call a tool from Parla's fixed
+  allowlist (`src-tauri/src/command_mode/tools.rs`). Tools join it one at a
+  time and are never a shell or anything destructive (ADR-0002). Each has a
+  strict JSON schema, a validator and an executor. Parla runs the call and
+  sends nothing back to the model: one round trip. Nothing is pasted and your
+  clipboard text is given back. Today the allowlist holds one tool:
+  - **`open_url`** `{"url": "…"}`: "apri la pagina di Wikipedia su Roma",
+    "cerca ristoranti a Milano" or "open the GitHub page for tauri" open the
+    page in your **default browser**, through the shell's default handler
+    (`ShellExecuteEx` "open"). A search opens a search engine's results page.
+    Only `http` and `https` addresses with a host open; anything else (a
+    `file:` path, a program, `javascript:`, another app's protocol such as
+    `ms-settings:`), a malformed address or an unknown tool shows the red
+    cross and a notification, and nothing opens. The pill shows
+    **"Opened <host>"** beside the check. Esc while waiting for the reply
+    opens nothing.
 - An empty or silent instruction ends quietly: no LLM call and no row.
 - A network error, a timeout, an API error, a reply cut off by the token cap
   or an empty reply shows the red cross and a "Command mode: …" notification,
@@ -347,12 +364,13 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - A hold that reaches the 120 s cap fails without asking the LLM; the
   instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
-  `outcome` (`pasted`, `failed` or `cancelled`), `llm_model`, `tokens_in` and
-  `tokens_out`, the `reply`, `selection_chars` (the selection's length, 0 for
-  none; its text is never kept), `app` (the focused executable), and stage
-  times from key-up (`provider_returned` for the transcript, `llm_returned`
-  for the reply, `pasted`). A cancel while you are still holding leaves no
-  row.
+  `outcome` (`pasted`, `opened`, `failed` or `cancelled`), `llm_model`,
+  `tokens_in` and `tokens_out` (billed whatever the outcome), the `reply`,
+  for an `opened` run the `tool` (`open_url`) and the `url`,
+  `selection_chars` (the selection's length, 0 for none; its text is never
+  kept), `app` (the focused executable), and stage times from key-up
+  (`provider_returned` for the transcript, `llm_returned` for the reply,
+  `pasted` or `opened`). A cancel while you are still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
   as usual), and the hold stops after 120 s. Recording starts at key-down, but

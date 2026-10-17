@@ -100,7 +100,12 @@ retry.addEventListener("click", () => {
   void invoke("retry_last_failed").catch(() => undefined);
 });
 
-pill.append(mode, container, spinner, result, retry);
+// Beside the check when there is something to say, e.g. "Opened <host>"
+// after command mode opened a page.
+const label = document.createElement("span");
+label.className = "label";
+
+pill.append(mode, container, spinner, result, label, retry);
 
 const bars: HTMLDivElement[] = [];
 for (let i = 0; i < BARS; i++) {
@@ -137,6 +142,11 @@ function setPhase(nextPhase: string): void {
   result.title = failed ? "Dismiss" : "";
   if (failed) result.setAttribute("aria-label", "Dismiss");
   else result.removeAttribute("aria-label");
+  // The label arrives just before "done" and lasts until the next phase.
+  if (phase !== "done") {
+    label.textContent = "";
+    delete pill.dataset.labelled;
+  }
   pill.dataset.phase = phase;
   if (!["recording", "processing"].includes(phase)) clearCaptions();
 }
@@ -148,6 +158,10 @@ void listen<number>("level", (event) => {
   render();
 });
 void listen<Mode>("mode", (event) => setMode(event.payload));
+void listen<string>("label", (event) => {
+  label.textContent = event.payload;
+  pill.dataset.labelled = "";
+});
 void listen<string>("phase", (event) => setPhase(event.payload));
 void listen<{ generation: number; enabled: boolean }>("caption-session", (event) => {
   if (event.payload.generation < generation) return;
