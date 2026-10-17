@@ -53,7 +53,7 @@ enum Message {
     Append(Box<DictationRecord>),
     Load {
         limit: usize,
-        kind: Option<&'static str>,
+        kinds: &'static [&'static str],
         respond: Sender<Vec<DictationRecord>>,
     },
     Clear {
@@ -83,22 +83,22 @@ impl History {
 
     /// Newest-first records, at most `limit` of them.
     pub fn load_recent(&self, limit: usize) -> Vec<DictationRecord> {
-        self.load_recent_kind(limit, None)
+        self.load_recent_kinds(limit, &[])
     }
 
-    /// Like `load_recent`, but only rows of `kind` count toward `limit`, so a
-    /// view of one kind still gets up to `limit` rows among other kinds.
-    pub fn load_recent_kind(
+    /// Like `load_recent`, but only rows of `kinds` (all when empty) count
+    /// toward `limit`, so a view still gets up to `limit` rows among others.
+    pub fn load_recent_kinds(
         &self,
         limit: usize,
-        kind: Option<&'static str>,
+        kinds: &'static [&'static str],
     ) -> Vec<DictationRecord> {
         let (respond, response) = mpsc::channel();
         if self
             .sender
             .send(Message::Load {
                 limit: limit.min(MAX_LIMIT),
-                kind,
+                kinds,
                 respond,
             })
             .is_err()
@@ -128,10 +128,10 @@ fn writer_loop(path: PathBuf, receiver: Receiver<Message>) {
             Message::Append(record) => writer.append(&record),
             Message::Load {
                 limit,
-                kind,
+                kinds,
                 respond,
             } => {
-                let _ = respond.send(load_filtered(writer.path(), limit, kind));
+                let _ = respond.send(load_filtered(writer.path(), limit, kinds));
             }
             Message::Clear { respond } => {
                 let _ = respond.send(writer.clear().map_err(|error| error.to_string()));
@@ -241,12 +241,13 @@ fn ends_without_newline(path: &Path) -> std::io::Result<bool> {
 /// Returns as soon as it has `limit` records.
 #[cfg(test)]
 fn load_recent_from(path: &Path, limit: usize) -> Vec<DictationRecord> {
-    load_filtered(path, limit, None)
+    load_filtered(path, limit, &[])
 }
 
-/// `load_recent_from` keeping only rows whose `kind` equals `kind` (if given).
-fn load_filtered(path: &Path, limit: usize, kind: Option<&str>) -> Vec<DictationRecord> {
-    let keep = |record: &DictationRecord| kind.is_none_or(|kind| record.kind == kind);
+/// `load_recent_from` keeping only rows whose `kind` is in `kinds` (all rows
+/// when it is empty).
+fn load_filtered(path: &Path, limit: usize, kinds: &[&str]) -> Vec<DictationRecord> {
+    let keep = |record: &DictationRecord| kinds.is_empty() || kinds.contains(&record.kind.as_str());
     if limit == 0 {
         return Vec::new();
     }
@@ -418,7 +419,7 @@ mod tests {
             rows.push(bench);
         }
         append_all(&path, &rows);
-        let dictations = load_filtered(&path, 2, Some("dictation"));
+        let dictations = load_filtered(&path, 2, &["dictation"]);
         assert_eq!(
             dictations
                 .iter()
@@ -426,8 +427,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["d2", "d1"]
         );
-        assert_eq!(load_filtered(&path, 50, Some("benchmark")).len(), 5);
+        assert_eq!(load_filtered(&path, 50, &["benchmark"]).len(), 5);
         assert_eq!(load_recent_from(&path, 50).len(), 7);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn command_runs_round_trip_next_to_dictations_without_benchmarks() {
+        use crate::timing::{CommandOutcome, COMMAND_KIND};
+        let path = temp_path("commands");
+        let mut command = record(2, "make this more formal");
+        command.kind = COMMAND_KIND.into();
+        command.outcome = Some(CommandOutcome::Pasted);
+        command.llm_model = Some("gpt-6-luna".into());
+        command.tokens_in = Some(92);
+        command.tokens_out = Some(18);
+        command.llm_returned = Some(1_400);
+        command.reply = Some("Buongiorno a tutti.".into());
+        let mut bench = record(3, "b");
+        bench.kind = "benchmark".into();
+        append_all(&path, &[record(1, "d1"), command, bench]);
+
+        let rows = load_filtered(&path, 50, &["dictation", COMMAND_KIND]);
+        assert_eq!(
+            rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            ["make this more formal", "d1"]
+        );
+        let command = &rows[0];
+        assert_eq!(command.kind, "command");
+        assert_eq!(command.outcome, Some(CommandOutcome::Pasted));
+        assert_eq!(command.llm_model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(
+            (command.tokens_in, command.tokens_out),
+            (Some(92), Some(18))
+        );
+        assert_eq!(command.llm_returned, Some(1_400));
+        assert_eq!(command.reply.as_deref(), Some("Buongiorno a tutti."));
+        // A dictation row writes none of the command fields.
+        let line = std::fs::read_to_string(&path).unwrap();
+        let dictation_line = line.lines().next().unwrap();
+        for field in ["outcome", "llm_model", "tokens_in", "reply"] {
+            assert!(!dictation_line.contains(field), "{field}");
+        }
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

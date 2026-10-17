@@ -122,25 +122,31 @@ at the bottom opens the benchmark window.
   newest dictation failed, a banner offers **Retry** (while its recording is
   still saved) and **Dismiss** (hides it for that failure). Below are lifetime
   totals (words dictated, dictations, audio time, cost with the yearly projection
-  against Wispr Flow's $144) and the five most recent dictations.
+  against Wispr Flow's $144) and the five most recent dictations and command
+  runs.
 - **History** lists dictations newest first, grouped by day: time, transcript
   (two lines; click to expand), provider, audio length and word count, with
-  **Copy** on hover. A search box and an **All / Failed** filter narrow the loaded
-  transcripts, new dictations appear at the top as they finish, and **Show older**
+  **Copy** on hover. [Command runs](#command-mode-experimental) sit among them
+  with an orange **Command** tag: the instruction, then the outcome (**Reply
+  pasted**, **Opened <host>**, **Failed: …** or **Cancelled**), the LLM model and
+  the instruction's audio length; **Copy** copies the reply, and a failed run
+  has none. A search box (transcripts and instructions) and an **All / Failed**
+  filter narrow the loaded rows, new ones appear at the top as they finish, and **Show older**
   loads more (200 at a time, up to 2000). Failed dictations are red; the newest
   one, while its recording is still saved, has **Retry**, which transcribes the
   saved clip and adds the result to the list (nothing is pasted, since the focus
   is Parla itself). **Clear history…** truncates the file after a confirmation.
-- **Timings** shows the same loaded dictations as a latency log: median, fastest
+- **Timings** shows the same loaded dictations (not command runs) as a latency log: median, fastest
   and slowest key-up-to-pasted tiles, one stacked bar per dictation (Ready,
   Transcribe, Paste; see [History](#history)) with its total, and the full table
   behind **Table view**.
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a
-transcript that was pasted successfully; failures and benchmark rows are not
-counted. On first run the counters start from whatever is already in
-`history.jsonl`.
+transcript that was pasted successfully; failures, benchmark rows and command
+runs are not counted, so words, dictations and audio time are about dictation
+only. On first run the counters start from whatever is already in
+`history.jsonl`, by the same rules.
 Counter updates appear immediately; a dedicated writer persists them in order
 in the background and flushes queued updates when Parla exits normally.
 
@@ -150,8 +156,13 @@ streaming) multiplied by built-in list prices in `src-tauri/src/pricing.rs`
 `gpt-transcribe` $0.0045/min, `gpt-live-transcribe` $0.017/min; Parakeet free).
 A provider counts as billed when it returned a transcript, even if pasting then
 failed. A live session that fell back to batch is counted twice. Benchmark runs
-add to cost but not to words, dictations or audio time. Models without a known
-price are left out of the total and shown as a note. The yearly projection
+add to cost but not to words, dictations or audio time. A command run adds the
+transcription of its instruction (billed like a dictation) and its LLM tokens:
+`tokens_in` and `tokens_out` × the model's list price per million tokens
+(`gpt-6-luna` $0.10 in and $0.50 out, checked 2026-10-17). Tokens count
+whenever the reply came back, even if the run then failed; a run cancelled
+before the reply has none. Models without a known price, for audio or tokens,
+are left out of the total and shown as a note. The yearly projection
 (cost per day since first use × 365) appears after 7 days. Counters written by
 older versions keep their words and get audio and cost from `history.jsonl`
 once.
@@ -332,9 +343,10 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   the pill appears and other audio is dimmed only once the hold passes
   300 ms, and only from then does **Esc** cancel (and get swallowed).
 - While a command run or a dictation is in flight, both hotkeys are ignored.
-- Command runs never count toward words, dictations or audio; the
-  instruction's transcription is billed in Total cost like a dictation. The
-  LLM tokens are recorded but not yet added to Total cost.
+- Command runs never count toward words, dictations or audio. Total cost adds
+  the instruction's transcription, like a dictation, and the LLM tokens (see
+  [The Parla window](#the-parla-window)). The History page lists each run with
+  an orange tag.
 - With command mode off, the keyboard hook skips the command chord.
 
 ## Providers and API keys
@@ -580,8 +592,8 @@ line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows
 append-only and written on a background thread after the paste, so it never
 blocks dictation. A `kind` field (`"dictation"`, `"benchmark"` or `"command"`)
 separates the kinds of row. Command rows (see
-[Command mode](#command-mode-experimental)) are in the file but not yet shown
-in the main window.
+[Command mode](#command-mode-experimental)) are listed in the main window next
+to dictations; the tray flyout shows dictations only.
 
 The main window's **History** page is the place to read and copy transcripts;
 its **Timings** page is the latency log. Each dictation's latency is split into

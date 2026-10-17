@@ -15,6 +15,7 @@ interface Stats {
   first_used_at: number | null;
   cost_usd: number;
   unpriced_audio_ms: number;
+  unpriced_llm_tokens: number;
 }
 
 const PAGE = 200;
@@ -22,7 +23,7 @@ const MAX = 2000;
 
 const PAGES = ["home", "history", "timings", "transcription", "dictation", "audio", "vocabulary", "clipboard"] as const;
 type Page = (typeof PAGES)[number];
-/** Pages that show dictation records; the others are settings pages. */
+/** Pages that show history rows; the others are settings pages. */
 const RECORD_PAGES: ReadonlySet<Page> = new Set(["home", "history", "timings"]);
 
 /** "settings" is the tray's name for the first settings page. */
@@ -104,8 +105,11 @@ function showStats(stats: Stats): void {
   dictations.textContent = number.format(stats.dictations);
   audio.textContent = formatDuration(stats.audio_ms);
   cost.textContent = formatCost(stats.cost_usd);
-  costNote.hidden = stats.unpriced_audio_ms === 0;
-  costNote.textContent = `excludes ${formatDuration(stats.unpriced_audio_ms)} with no known price`;
+  const unpriced: string[] = [];
+  if (stats.unpriced_audio_ms > 0) unpriced.push(formatDuration(stats.unpriced_audio_ms));
+  if (stats.unpriced_llm_tokens > 0) unpriced.push(`${number.format(stats.unpriced_llm_tokens)} LLM tokens`);
+  costNote.hidden = unpriced.length === 0;
+  costNote.textContent = `excludes ${unpriced.join(" and ")} with no known price`;
   if (stats.first_used_at === null) {
     projected.textContent = `vs $${WISPR_FLOW_PER_YEAR}/yr for Wispr Flow`;
     return;
@@ -173,25 +177,68 @@ function wireRetry(button: HTMLButtonElement): void {
   });
 }
 
+const isCommand = (record: DictationRecord): boolean => record.kind === "command";
+const isDictation = (record: DictationRecord): boolean => record.kind === "dictation";
+
+/** What a command run did. A missing or unreadable `url` still reads well. */
+function commandOutcome(record: DictationRecord): string {
+  switch (record.outcome) {
+    case "pasted":
+      return "Reply pasted";
+    case "opened": {
+      try {
+        return `Opened ${new URL(record.url ?? "").host}`;
+      } catch {
+        return "Opened a page";
+      }
+    }
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return record.error === null ? "Failed" : `Failed: ${record.error}`;
+  }
+}
+
+/** A command row's meta line: orange tag, outcome, LLM and instruction audio. */
+function commandMeta(record: DictationRecord): HTMLDivElement {
+  const failed = record.outcome === "failed" || record.error !== null;
+  const meta = el("div", "mt");
+  const rest = [record.llm_model, seconds(record.audio_ms)].filter((part) => part !== undefined);
+  meta.append(
+    el("span", "tag", "Command"),
+    el("span", failed ? "bad" : undefined, commandOutcome(record)),
+    ` · ${rest.join(" · ")}`,
+  );
+  return meta;
+}
+
 /** `today` is set on Home, where rows are not grouped by day: older rows
  *  then show their date instead of their time. */
 function row(record: DictationRecord, retryable: boolean, today?: number): HTMLLIElement {
-  const item = el("li", record.error === null ? undefined : "failed");
+  const command = isCommand(record);
   const ok = record.error === null;
+  const item = el("li", command ? "command" : ok ? undefined : "failed");
   const when = el("span", "tm", today !== undefined && startOfDay(record.started_at) !== today
     ? shortDayFormat.format(record.started_at)
     : clock(record.started_at));
   when.title = fullDate(record.started_at);
 
-  const text = el("p", "tx", ok ? record.text : `Failed: ${record.error}`);
+  // A command row shows its instruction; its meta line says how it ended.
+  const text = el("p", "tx", command
+    ? record.text.trim() || "No instruction"
+    : ok ? record.text : `Failed: ${record.error}`);
   // Click expands the two-line clamp, unless the click ended a text selection.
   text.addEventListener("click", () => {
     if (window.getSelection()?.isCollapsed !== false) text.classList.toggle("expanded");
   });
-  const meta = [providerName(record.provider_id), seconds(record.audio_ms)];
-  if (ok) meta.push(`${number.format(wordCount(record.text))} words`);
   const body = el("div");
-  body.append(text, el("div", "mt", meta.join(" · ")));
+  if (command) {
+    body.append(text, commandMeta(record));
+  } else {
+    const meta = [providerName(record.provider_id), seconds(record.audio_ms)];
+    if (ok) meta.push(`${number.format(wordCount(record.text))} words`);
+    body.append(text, el("div", "mt", meta.join(" · ")));
+  }
 
   const actions = el("div", "act");
   if (retryable) {
@@ -201,7 +248,13 @@ function row(record: DictationRecord, retryable: boolean, today?: number): HTMLL
     wireRetry(retry);
     actions.append(retry);
   }
-  if (ok && record.text.trim() !== "") actions.append(copyButton(record.text));
+  if (command) {
+    // Copy copies the reply; a failed run has none to offer.
+    const reply = record.reply ?? "";
+    if (ok && record.outcome !== "failed" && reply.trim() !== "") actions.append(copyButton(reply, "Copy reply"));
+  } else if (ok && record.text.trim() !== "") {
+    actions.append(copyButton(record.text));
+  }
   item.append(when, body, actions);
   return item;
 }
@@ -215,15 +268,16 @@ function render(): void {
     if (document.hidden) return;
     historyCount.textContent = !loaded ? "" : records.length >= limit ? `${records.length}+` : String(records.length);
     // Only the newest failed dictation can be retried (one clip is kept).
-    const retryable = canRetry ? records.find((r) => r.error !== null) : undefined;
+    const retryable = canRetry ? records.find((r) => isDictation(r) && r.error !== null) : undefined;
     if (page === "home") renderHome(retryable);
     else if (page === "history") renderHistory(retryable);
-    else if (page === "timings") renderTimings(records);
+    else if (page === "timings") renderTimings(records.filter(isDictation));
   });
 }
 
 function renderHome(retryable: DictationRecord | undefined): void {
-  const newest = records[0];
+  // The banner is about dictation: a failed command run already notified.
+  const newest = records.find(isDictation);
   const failed = newest !== undefined && newest.error !== null && newest.id !== dismissed;
   failure.hidden = !failed;
   if (failed) {
@@ -282,15 +336,19 @@ function renderHistory(retryable: DictationRecord | undefined): void {
   reconcile(days, groups.flatMap((group) => [group.head, group.list]));
 
   const count = records.length;
-  lede.textContent = count >= limit
-    ? `The newest ${number.format(count)} dictations kept on this PC.`
-    : `${number.format(count)} ${count === 1 ? "dictation" : "dictations"} kept on this PC.`;
+  const commands = records.filter(isCommand).length;
+  const kept = commands === 0 ? plural(count, "dictation") : `${plural(count - commands, "dictation")} and ${plural(commands, "command run")}`;
+  lede.textContent = count >= limit ? `The newest ${kept} kept on this PC.` : `${kept} kept on this PC.`;
   empty.hidden = shown.length > 0;
   empty.textContent = count === 0
     ? "No dictations yet."
     : query === "" && failedOnly ? "No failed dictations." : "No transcripts match.";
   more.hidden = count < limit || limit >= MAX;
   clear.disabled = count === 0;
+}
+
+function plural(count: number, noun: string): string {
+  return `${number.format(count)} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 async function refreshRetry(): Promise<void> {
@@ -302,7 +360,7 @@ async function load(): Promise<void> {
   const sequence = ++loadSequence;
   const before = new Set(records.map((record) => record.id));
   const [fetched, retry] = await Promise.all([
-    invoke<DictationRecord[]>("get_history", { limit }),
+    invoke<DictationRecord[]>("get_history", { limit, commands: true }),
     invoke<boolean>("has_failed_clip"),
   ]);
   if (sequence !== loadSequence) return;
@@ -417,7 +475,7 @@ void getVersion().then((version) => {
 
 const listeners = [listen<string>("navigate", (event) => show(toPage(event.payload))),
 listen<DictationRecord>("dictation://recorded", (event) => {
-  if (event.payload.kind !== "dictation") return;
+  if (!isDictation(event.payload) && !isCommand(event.payload)) return;
   records = [event.payload, ...records.filter((record) => record.id !== event.payload.id)].slice(0, limit);
   render();
 }),
