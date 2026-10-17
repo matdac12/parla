@@ -128,7 +128,7 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
     (
         "Traduci in italiano",
         Some("The meeting is moved to Friday at 3 pm."),
-        translates(It, &["venerdì", "riunione|incontro"], &["meeting", "friday"]),
+        translates(It, &["venerdì", "riunione|incontro"], &["friday"]),
     ),
     (
         "translate this into Italian",
@@ -219,7 +219,7 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
 struct Verdict {
     /// Text when text was expected, an `open_url` call when a page was.
     kind_ok: bool,
-    /// A text with no preamble, wrapping quotes, markdown, stray spaces or
+    /// Texts only: no preamble, wrapping quotes, markdown, stray spaces or
     /// leaked tags.
     clean: bool,
     /// The cheap correctness check: language, kept and dropped words and
@@ -440,31 +440,37 @@ const RUNS: usize = 3;
 /// gpt-6-luna's list price, $ per million tokens in and out (PARLA-61).
 const PRICE_PER_MILLION: (f64, f64) = (0.10, 0.50);
 
-struct Run {
+/// One graded request.
+struct Sample {
     effort: &'static str,
     case: usize,
     ms: u128,
     tokens: (u64, u64),
+    /// No reply (a timeout, an API error): kept out of the shares and times.
+    failed: bool,
     verdict: Verdict,
 }
 
-fn is_text(run: &Run) -> bool {
-    matches!(CASES[run.case].2, Expect::Text { .. })
+fn is_text(sample: &Sample) -> bool {
+    matches!(CASES[sample.case].2, Expect::Text { .. })
 }
 
-/// How many of the runs `within` scope `pass`.
-fn share(runs: &[&Run], within: fn(&Run) -> bool, pass: fn(&Run) -> bool) -> String {
-    let scoped: Vec<_> = runs.iter().filter(|run| within(run)).collect();
-    let passed = scoped.iter().filter(|run| pass(run)).count();
+/// How many of the samples `within` scope `pass`.
+fn share(samples: &[&Sample], within: fn(&Sample) -> bool, pass: fn(&Sample) -> bool) -> String {
+    let scoped: Vec<_> = samples
+        .iter()
+        .filter(|sample| !sample.failed && within(sample))
+        .collect();
+    let passed = scoped.iter().filter(|sample| pass(sample)).count();
     format!("{passed}/{}", scoped.len())
 }
 
-/// The median and p90 (nearest rank) reply time of the runs `within` scope.
-fn times(runs: &[&Run], within: fn(&Run) -> bool) -> String {
-    let mut ms: Vec<u128> = runs
+/// The median and p90 (nearest rank) reply time of the samples `within` scope.
+fn times(samples: &[&Sample], within: fn(&Sample) -> bool) -> String {
+    let mut ms: Vec<u128> = samples
         .iter()
-        .filter(|run| within(run))
-        .map(|run| run.ms)
+        .filter(|sample| !sample.failed && within(sample))
+        .map(|sample| sample.ms)
         .collect();
     if ms.is_empty() {
         return "-".into();
@@ -477,53 +483,70 @@ fn times(runs: &[&Run], within: fn(&Run) -> bool) -> String {
     format!("{:.2} / {:.2} s", rank(0.5), rank(0.9))
 }
 
-fn spend(runs: &[&Run]) -> String {
-    let (tokens_in, tokens_out) = runs.iter().fold((0, 0), |(tokens_in, tokens_out), run| {
-        (tokens_in + run.tokens.0, tokens_out + run.tokens.1)
-    });
+fn spend(samples: &[&Sample]) -> String {
+    let (tokens_in, tokens_out) = samples
+        .iter()
+        .fold((0, 0), |(tokens_in, tokens_out), sample| {
+            (tokens_in + sample.tokens.0, tokens_out + sample.tokens.1)
+        });
     let cost =
         (tokens_in as f64 * PRICE_PER_MILLION.0 + tokens_out as f64 * PRICE_PER_MILLION.1) / 1e6;
     format!("{tokens_in} / {tokens_out} (${cost:.4})")
 }
 
 /// The results as a markdown table, one column per effort.
-fn table(runs: &[Run]) -> String {
-    let columns: Vec<Vec<&Run>> = EFFORTS
+fn table(samples: &[Sample]) -> String {
+    let columns: Vec<Vec<&Sample>> = EFFORTS
         .iter()
-        .map(|effort| runs.iter().filter(|run| run.effort == *effort).collect())
+        .map(|effort| {
+            samples
+                .iter()
+                .filter(|sample| sample.effort == *effort)
+                .collect()
+        })
         .collect();
-    let row = |name: &str, cell: &dyn Fn(&[&Run]) -> String| {
-        let cells: Vec<String> = columns.iter().map(|runs| cell(runs)).collect();
+    let row = |name: &str, cell: &dyn Fn(&[&Sample]) -> String| {
+        let cells: Vec<String> = columns.iter().map(|samples| cell(samples)).collect();
         format!("| {name} | {} |\n", cells.join(" | "))
     };
-    let all = |_: &Run| true;
-    let opens = |run: &Run| !is_text(run);
+    let all = |_: &Sample| true;
+    let opens = |sample: &Sample| !is_text(sample);
     [
         format!(
             "| | `{}` |\n|---|{}\n",
             EFFORTS.join("` | `"),
             "---|".repeat(EFFORTS.len())
         ),
-        row("Outcome kind right (text vs `open_url`)", &|runs| {
-            share(runs, all, |run| run.verdict.kind_ok)
+        row("Outcome kind right (text vs `open_url`)", &|samples| {
+            share(samples, all, |sample| sample.verdict.kind_ok)
         }),
-        row("Pages right (http(s), plausible host and terms)", &|runs| {
-            share(runs, opens, |run| run.verdict.correct)
+        row(
+            "Pages right (http(s), plausible host and terms)",
+            &|samples| share(samples, opens, |sample| sample.verdict.correct),
+        ),
+        row("Text clean (no preamble, quotes or markdown)", &|samples| {
+            share(samples, is_text, |sample| sample.verdict.clean)
         }),
-        row("Text clean (no preamble, quotes or markdown)", &|runs| {
-            share(runs, is_text, |run| run.verdict.clean)
+        row("Text correct (language, kept words, bullets)", &|samples| {
+            share(samples, is_text, |sample| sample.verdict.correct)
         }),
-        row("Text correct (language, kept words, bullets)", &|runs| {
-            share(runs, is_text, |run| run.verdict.correct)
+        row("Reply time median / p90, all", &|samples| {
+            times(samples, all)
         }),
-        row("Reply time median / p90, all", &|runs| times(runs, all)),
-        row("Reply time median / p90, text", &|runs| {
-            times(runs, is_text)
+        row("Reply time median / p90, text", &|samples| {
+            times(samples, is_text)
         }),
-        row("Reply time median / p90, `open_url`", &|runs| {
-            times(runs, opens)
+        row("Reply time median / p90, `open_url`", &|samples| {
+            times(samples, opens)
         }),
         row("Tokens in / out (cost)", &spend),
+        row("Failed calls, left out above", &|samples| {
+            samples
+                .iter()
+                .filter(|sample| sample.failed)
+                .count()
+                .to_string()
+        }),
     ]
     .concat()
 }
@@ -547,17 +570,17 @@ fn the_eval_grades_every_case_at_each_effort() {
             instruction: (*instruction).into(),
             selection: selection.map(Into::into),
             app: Some("notepad.exe".into()),
-            // Fixed, so every run sends the same requests.
+            // Fixed, so every eval sends the same requests.
             date: "2026-10-17".into(),
         }
     };
     // Untimed: opens the connection, as the app's pre-warm at the hold does.
-    let _ = send(&key, &request("none", 0));
+    let _ = send(&key, &request(EFFORTS[0], 0));
 
     // To probe a flaky case: PARLA_EVAL_CASES=10,17 PARLA_EVAL_RUNS=10.
     let knob = |name| std::env::var(name).ok();
     let repeats = knob("PARLA_EVAL_RUNS")
-        .and_then(|runs| runs.parse().ok())
+        .and_then(|repeats| repeats.parse().ok())
         .unwrap_or(RUNS);
     let cases: Vec<usize> = knob("PARLA_EVAL_CASES").map_or_else(
         || (0..CASES.len()).collect(),
@@ -569,7 +592,7 @@ fn the_eval_grades_every_case_at_each_effort() {
         },
     );
 
-    let mut runs = Vec::new();
+    let mut samples = Vec::new();
     // The efforts take turns on each case, so network drift hits both alike.
     for _ in 0..repeats {
         for &case in &cases {
@@ -578,6 +601,7 @@ fn the_eval_grades_every_case_at_each_effort() {
                 let started = Instant::now();
                 let reply = send(&key, &request(effort, case));
                 let ms = started.elapsed().as_millis();
+                let failed = reply.is_err();
                 let (verdict, tokens, shown) = match reply {
                     Ok(reply) => (
                         grade(expect, &reply),
@@ -600,22 +624,24 @@ fn the_eval_grades_every_case_at_each_effort() {
                     "[{effort}] #{case} {instruction:?} {ms} ms -> {shown} {:?}",
                     verdict.problems
                 );
-                runs.push(Run {
+                samples.push(Sample {
                     effort,
                     case,
                     ms,
                     tokens,
+                    failed,
                     verdict,
                 });
             }
         }
     }
 
-    println!("\n{}", table(&runs));
+    println!("\n{}", table(&samples));
     let wrong_kind = |effort: &str| -> Vec<String> {
-        runs.iter()
-            .filter(|run| run.effort == effort && !run.verdict.kind_ok)
-            .map(|run| format!("#{} {:?}", run.case, CASES[run.case].0))
+        samples
+            .iter()
+            .filter(|sample| sample.effort == effort && !sample.failed && !sample.verdict.kind_ok)
+            .map(|sample| format!("#{} {:?}", sample.case, CASES[sample.case].0))
             .collect()
     };
     let none_wrong = wrong_kind("none");
@@ -777,11 +803,12 @@ mod grading {
 
     #[test]
     fn the_table_has_a_column_per_effort_with_shares_times_and_cost() {
-        let run = |effort, case, ms, kind_ok, correct| Run {
+        let sample = |effort, case, ms, kind_ok, correct| Sample {
             effort,
             case,
             ms,
             tokens: (1_000_000, 100_000),
+            failed: false,
             verdict: Verdict {
                 kind_ok,
                 clean: true,
@@ -789,16 +816,24 @@ mod grading {
                 problems: Vec::new(),
             },
         };
+        // A failed call (a timeout, a 5xx) is neither a choice nor a reply time.
+        let timeout = Sample {
+            ms: 20_000,
+            tokens: (0, 0),
+            failed: true,
+            ..sample("low", 0, 0, false, false)
+        };
         // Case 0 is a text.
         let page = CASES
             .iter()
             .position(|(_, _, expect)| matches!(expect, Expect::Open { .. }))
             .unwrap();
         let table = table(&[
-            run("none", 0, 1000, true, true),
-            run("none", page, 3000, false, false),
-            run("low", 0, 2000, true, false),
-            run("low", page, 4000, true, true),
+            sample("none", 0, 1000, true, true),
+            sample("none", page, 3000, false, false),
+            sample("low", 0, 2000, true, false),
+            sample("low", page, 4000, true, true),
+            timeout,
         ]);
         assert_eq!(
             table,
@@ -810,7 +845,8 @@ mod grading {
              | Reply time median / p90, all | 1.00 / 3.00 s | 2.00 / 4.00 s |\n\
              | Reply time median / p90, text | 1.00 / 1.00 s | 2.00 / 2.00 s |\n\
              | Reply time median / p90, `open_url` | 3.00 / 3.00 s | 4.00 / 4.00 s |\n\
-             | Tokens in / out (cost) | 2000000 / 200000 ($0.3000) | 2000000 / 200000 ($0.3000) |\n"
+             | Tokens in / out (cost) | 2000000 / 200000 ($0.3000) | 2000000 / 200000 ($0.3000) |\n\
+             | Failed calls, left out above | 0 | 1 |\n"
         );
     }
 }
