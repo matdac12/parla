@@ -43,11 +43,15 @@ impl OpenAiConfig {
         // Resolve at use time; never put environment secrets into persisted/UI settings.
         Self::with_key_override(settings, std::env::var("OPENAI_API_KEY").ok())
     }
-    fn with_key_override(settings: &Settings, key: Option<String>) -> Result<Self, ProviderError> {
+    fn with_key(settings: &Settings, key: Option<String>) -> Self {
         let mut config: Self = settings.provider_config("openai");
         if let Some(key) = key {
             config.api_key = key;
         }
+        config
+    }
+    fn with_key_override(settings: &Settings, key: Option<String>) -> Result<Self, ProviderError> {
+        let mut config = Self::with_key(settings, key);
         crate::settings::validate_vocabulary(&settings.vocabulary)
             .map_err(ProviderError::MissingConfig)?;
         config.vocabulary = settings.vocabulary.clone();
@@ -63,6 +67,15 @@ impl OpenAiConfig {
         }
         Ok(())
     }
+}
+
+/// The OpenAI key alone, by the same rule as dictation: `OPENAI_API_KEY`
+/// overrides `providers.openai.api_key`. Command mode uses it (PARLA-63).
+pub fn api_key(settings: &Settings) -> Option<String> {
+    key_with_override(settings, std::env::var("OPENAI_API_KEY").ok())
+}
+fn key_with_override(settings: &Settings, key: Option<String>) -> Option<String> {
+    Some(OpenAiConfig::with_key(settings, key).api_key).filter(|key| !key.trim().is_empty())
 }
 
 pub struct OpenAi;
@@ -90,7 +103,8 @@ impl SttProvider for OpenAi {
     }
 }
 
-fn client() -> Result<&'static Client, ProviderError> {
+/// Shared with command mode's Responses call, which sets its own timeout.
+pub(crate) fn client() -> Result<&'static Client, ProviderError> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -152,7 +166,7 @@ fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Reques
         .map_err(map_transport)
 }
 
-fn map_transport(error: reqwest::Error) -> ProviderError {
+pub(crate) fn map_transport(error: reqwest::Error) -> ProviderError {
     classify_transport(error.is_timeout(), error.without_url().to_string())
 }
 fn classify_transport(timeout: bool, message: String) -> ProviderError {
@@ -209,6 +223,23 @@ mod tests {
                 .api_key,
             "file-key"
         );
+    }
+    #[test]
+    fn the_bare_key_follows_the_same_override_rule() {
+        let mut settings = Settings::default();
+        assert_eq!(key_with_override(&settings, None), None);
+        settings
+            .providers
+            .insert("openai".into(), serde_json::json!({"api_key": "file-key"}));
+        assert_eq!(
+            key_with_override(&settings, None).as_deref(),
+            Some("file-key")
+        );
+        assert_eq!(
+            key_with_override(&settings, Some("env-key".into())).as_deref(),
+            Some("env-key")
+        );
+        assert_eq!(key_with_override(&settings, Some(" ".into())), None);
     }
     #[test]
     fn invalid_audio_and_missing_model_are_rejected_before_network() {

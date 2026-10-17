@@ -2,6 +2,7 @@
 //! holds while one session worker owns recording, transcription and paste.
 pub use crate::failure::on_failure;
 use crate::{
+    command_mode,
     hotkey::{Chord, Hotkey, HotkeyEvent},
     inserter,
     overlay::PillMode,
@@ -39,13 +40,16 @@ enum Phase {
     Hold(Chord, Instant),
     /// Hands-free: started or converted by the main key, ended by the next press.
     Latched,
+    /// A released command run, transcribing or waiting on the LLM: Esc still
+    /// cancels it (PARLA-63).
+    Running,
 }
 
 impl Phase {
     /// None when idle: a finished command run stays orange while transcribing.
     fn pill_mode(self) -> Option<PillMode> {
         match self {
-            Phase::Idle => None,
+            Phase::Idle | Phase::Running => None,
             Phase::Hold(Chord::Dictation, _) => Some(PillMode::Hold),
             Phase::Hold(Chord::Command, _) => Some(PillMode::Command),
             Phase::Latched => Some(PillMode::Locked),
@@ -89,10 +93,14 @@ impl Controller {
             (HotkeyEvent::ChordReleased(released), Phase::Hold(chord, since))
                 if released == chord =>
             {
-                self.phase = Phase::Idle;
                 if now.duration_since(since) < MIN_HOLD {
+                    self.phase = Phase::Idle;
                     Action::Cancel
                 } else {
+                    self.phase = match chord {
+                        Chord::Command => Phase::Running,
+                        Chord::Dictation => Phase::Idle,
+                    };
                     Action::Stop
                 }
             }
@@ -102,7 +110,7 @@ impl Controller {
                 self.phase = Phase::Idle;
                 Action::Cancel
             }
-            (HotkeyEvent::Cancel, Phase::Hold(..) | Phase::Latched) => {
+            (HotkeyEvent::Cancel, Phase::Hold(..) | Phase::Latched | Phase::Running) => {
                 self.phase = Phase::Idle;
                 Action::Cancel
             }
@@ -226,7 +234,14 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     action @ (Action::Stop | Action::Cancel) => {
-                        if let Some((sender, cancelled)) = session.take() {
+                        // A released command run keeps its handle: Esc may
+                        // still cancel it until the reply is in.
+                        let current = if controller.phase == Phase::Running {
+                            session.clone()
+                        } else {
+                            session.take()
+                        };
+                        if let Some((sender, cancelled)) = current {
                             if action == Action::Cancel {
                                 cancelled.store(true, Ordering::Release);
                             }
@@ -327,7 +342,11 @@ fn run_session(
         stream
     };
     let audio = recording.map(|recorder| recorder.stop_raw());
-    crate::hotkey::RECORDING.store(false, Ordering::Release);
+    // A command run keeps Esc armed until it ends (PARLA-63).
+    let _disarm_at_end = command.then_some(DisarmEsc);
+    if !command {
+        crate::hotkey::RECORDING.store(false, Ordering::Release);
+    }
     // On stop or cancel, not after the paste.
     drop(dimmed);
     if cancelled.load(Ordering::Acquire) {
@@ -338,11 +357,11 @@ fn run_session(
         overlay.processing();
     }
     if command {
-        // A silent instruction drops the pill without a check or a cross.
-        let ok = finish_command(
-            app, audio, &settings, started_at, key_up, hold_error, stream,
+        let outcome = finish_command(
+            app, audio, &settings, started_at, key_up, hold_error, stream, &cancelled,
         );
-        if let (Some(overlay), Some(ok)) = (overlay, ok) {
+        // Dropping the pill unfinished hides it: a silent or cancelled run.
+        if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
             overlay.finish(ok);
         }
         return;
@@ -504,11 +523,10 @@ fn combined_error(hold: Option<String>, error: Option<ProviderError>) -> Option<
     }
 }
 
-/// Command mode 1/7 (PARLA-62): the instruction is transcribed and written to
-/// history; the LLM and the paste come with PARLA-63. A failure shows the
-/// usual notification but keeps no clip for Retry, which would paste the
-/// instruction as a dictation. None for an empty or silent instruction, which
-/// ends the run with no row.
+/// A command run after key-up (PARLA-63): the orchestrator with the real
+/// ports. A failure shows the usual notification but keeps no clip for Retry,
+/// which would paste the instruction as a dictation.
+#[allow(clippy::too_many_arguments)]
 fn finish_command(
     app: &tauri::AppHandle,
     audio: Result<crate::recorder::RecoveryAudio, ProviderError>,
@@ -517,36 +535,80 @@ fn finish_command(
     key_up: Instant,
     hold_error: Option<String>,
     stream: Option<crate::streaming::Session>,
-) -> Option<bool> {
+    cancelled: &AtomicBool,
+) -> command_mode::Outcome {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     record.kind = timing::COMMAND_KIND.into();
-    let result = match audio {
-        Err(error) => Err(error),
-        Ok(clip) if clip.is_empty() => return None,
-        Ok(clip) => {
-            record.audio_ready = Some(timing::elapsed_ms(key_up));
-            record.audio_ms = clip.duration().as_millis() as u64;
-            match active_provider(settings) {
-                Ok(provider) => transcribe_instruction(
-                    provider.as_ref(),
-                    &clip,
-                    settings,
-                    key_up,
-                    &mut record,
-                    stream.map(|session| session.finish()),
-                )?,
-                Err(error) => Err(error),
-            }
-        }
+    let ports = command_mode::Ports {
+        desktop: &CommandDesktop(settings),
+        llm: &command_mode::responses::OpenAi(settings),
+        history: &AppHistory(app),
     };
-    match &result {
-        Ok(()) => crate::failure::on_success(app),
-        Err(error) => crate::failure::notify_error(app, &settings.active_provider, error),
+    let run = command_mode::Run {
+        settings: &settings.command,
+        key_up,
+        cancelled,
+        hold_error,
+    };
+    let outcome = command_mode::run(&ports, run, record, |record| {
+        let clip = match audio {
+            Err(error) => return Some(Err(error)),
+            Ok(clip) if clip.is_empty() => return None,
+            Ok(clip) => clip,
+        };
+        record.audio_ready = Some(timing::elapsed_ms(key_up));
+        record.audio_ms = clip.duration().as_millis() as u64;
+        let streamed = stream.map(|session| session.finish());
+        // Esc aborted the live session: no batch fallback, the run is cancelled.
+        if cancelled.load(Ordering::Acquire) {
+            return Some(Err(ProviderError::Other("Cancelled".into())));
+        }
+        match active_provider(settings) {
+            Ok(provider) => {
+                transcribe_instruction(provider.as_ref(), &clip, settings, key_up, record, streamed)
+            }
+            Err(error) => Some(Err(error)),
+        }
+    });
+    match &outcome {
+        command_mode::Outcome::Pasted => crate::failure::on_success(app),
+        command_mode::Outcome::Failed(command_mode::Failure::Transcription(error)) => {
+            crate::failure::notify_error(app, &settings.active_provider, error)
+        }
+        command_mode::Outcome::Failed(command_mode::Failure::Command(error)) => {
+            crate::failure::notify_command_error(app, error)
+        }
+        command_mode::Outcome::Silent | command_mode::Outcome::Cancelled => {}
     }
-    let ok = result.is_ok() && hold_error.is_none();
-    record.error = combined_error(hold_error, result.err());
-    timing::record(app, record);
-    Some(ok)
+    outcome
+}
+
+/// Disarms Esc when a command run ends, however it ends.
+struct DisarmEsc;
+impl Drop for DisarmEsc {
+    fn drop(&mut self) {
+        crate::hotkey::RECORDING.store(false, Ordering::Release);
+    }
+}
+
+/// The command run's desktop port: the inserter's paste and clipboard restore.
+struct CommandDesktop<'a>(&'a Settings);
+impl command_mode::Desktop for CommandDesktop<'_> {
+    fn paste(&self, text: &str) -> Result<Instant, String> {
+        inserter::paste_text_with_options(
+            text,
+            Duration::from_millis(self.0.restore_delay_ms),
+            self.0.paste_compatibility_mode,
+            false,
+        )
+    }
+}
+
+struct AppHistory<'a>(&'a tauri::AppHandle);
+impl command_mode::HistorySink for AppHistory<'_> {
+    fn record(&self, record: DictationRecord) {
+        timing::record(self.0, record);
+    }
 }
 
 trait RecoverySource {
@@ -617,13 +679,13 @@ fn transcribe_and_paste(
         Duration::from_millis(settings.restore_delay_ms),
     )
     .map_err(|error| ProviderError::Other(format!("Paste failed: {error}")))?;
-    record.pasted = Some(pasted.saturating_duration_since(key_up).as_millis() as u64);
+    record.pasted = Some(timing::offset_ms(key_up, pasted));
     Ok(())
 }
 
 /// A command run's instruction, transcribed by the active provider into its
-/// row; nothing is pasted (PARLA-62). None means an empty or silent
-/// instruction: the run ends with no row.
+/// row; it is never pasted. None means an empty or silent instruction: the
+/// run ends with no row.
 fn transcribe_instruction(
     provider: &dyn SttProvider,
     clip: &impl RecoverySource,
@@ -1025,6 +1087,27 @@ mod pipeline_tests {
         assert_eq!(c.on_event(HotkeyEvent::Pressed, true, t0), Action::None);
         assert_eq!(c.phase, Phase::Hold(Chord::Command, t0));
         assert_eq!(c.on_event(RELEASED, true, late), Action::Stop);
+    }
+    #[test]
+    fn esc_after_a_command_release_cancels_the_run_until_it_ends() {
+        const PRESSED: HotkeyEvent = HotkeyEvent::ChordPressed(Chord::Command);
+        const RELEASED: HotkeyEvent = HotkeyEvent::ChordReleased(Chord::Command);
+        let t0 = Instant::now();
+        let late = t0 + Duration::from_secs(2);
+        let mut c = Controller { phase: Phase::Idle };
+        c.on_event(PRESSED, false, t0);
+        assert_eq!(c.on_event(RELEASED, true, late), Action::Stop);
+        // Transcribing or waiting on the LLM: Esc cancels, once.
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::Cancel);
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::None);
+        // A run that already ended has nothing to cancel.
+        c.on_event(PRESSED, false, t0);
+        c.on_event(RELEASED, true, late);
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, false, late), Action::None);
+        // A released dictation is never cancelled by Esc.
+        c.on_event(HotkeyEvent::ChordPressed(Chord::Dictation), false, t0);
+        c.on_event(HotkeyEvent::ChordReleased(Chord::Dictation), true, late);
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::None);
     }
     #[test]
     fn hotkey_presses_during_a_command_run_or_a_dictation_are_ignored() {

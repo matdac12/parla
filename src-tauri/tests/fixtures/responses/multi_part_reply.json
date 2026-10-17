@@ -1,0 +1,57 @@
+{
+  "id": "resp_0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "object": "response",
+  "created_at": 1792236000,
+  "status": "completed",
+  "background": false,
+  "error": null,
+  "incomplete_details": null,
+  "instructions": "You are Parla's command mode.",
+  "max_output_tokens": 2000,
+  "model": "gpt-6-luna",
+  "output": [
+    {
+      "id": "rs_0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "annotations": [],
+          "logprobs": [],
+          "text": "Ciao a tutti, "
+        },
+        {
+          "type": "output_text",
+          "annotations": [],
+          "logprobs": [],
+          "text": "buona giornata!"
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "reasoning": { "effort": "low", "summary": null },
+  "store": false,
+  "temperature": 1.0,
+  "text": { "format": { "type": "text" }, "verbosity": "medium" },
+  "tool_choice": "auto",
+  "tools": [],
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 92,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 18,
+    "output_tokens_details": { "reasoning_tokens": 9 },
+    "total_tokens": 110
+  },
+  "user": null,
+  "metadata": {}
+}
