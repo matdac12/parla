@@ -1,5 +1,11 @@
 use crate::settings::{self, LocalModel, Settings, SharedSettings};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+/// Tells every window (the app's settings pages, the tray flyout) that the
+/// saved settings changed, so none of them saves a stale copy over them.
+fn announce(app: &tauri::AppHandle) {
+    let _ = app.emit("settings://changed", ());
+}
 
 #[tauri::command]
 pub async fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
@@ -44,6 +50,7 @@ pub async fn save_settings(
             |settings| settings::apply(&app, settings),
         )?;
         sync_model_residency(&shared, &previous);
+        announce(&app);
         Ok(saved)
     })
     .await
@@ -61,6 +68,7 @@ pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), St
         let previous = snapshot(&shared)?;
         select_provider_with(&shared, &id, |value| settings::save(&path, value))?;
         sync_model_residency(&shared, &previous);
+        announce(&app);
         Ok(())
     })
     .await
@@ -89,6 +97,7 @@ pub async fn select_model(app: tauri::AppHandle, id: String) -> Result<String, S
             let path = settings::path(&app)?;
             select_model_with(&shared, model, |value| settings::save(&path, value))?;
             sync_model_residency(&shared, &previous);
+            announce(&app);
         }
         Ok(snapshot(&shared)?.local_model.id().to_string())
     })

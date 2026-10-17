@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Parla</title>
+    <script type="module" src="/src/flyout.ts"></script>
+  </head>
+  <body>
+    <main class="flyout">
+      <header class="head">
+        <span class="logo" aria-hidden="true"></span>
+        <div class="who">
+          <b>Parla</b>
+          <small id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Loading…</span></small>
+        </div>
+        <span class="keys" id="hotkey"></span>
+      </header>
+      <section class="body">
+        <div class="seg" id="providers" role="radiogroup" aria-label="Transcription provider">
+          <button type="button" role="radio" data-provider="openai">OpenAI</button>
+          <button type="button" role="radio" data-provider="xai">Grok</button>
+          <button type="button" role="radio" data-provider="parakeet">Local</button>
+        </div>
+        <div class="tiles">
+          <button type="button" class="tile" data-toggle="live_captions">Live captions<small></small></button>
+          <button type="button" class="tile" data-toggle="dim_other_audio">Dim audio<small></small></button>
+          <button type="button" class="tile" data-toggle="streaming_enabled">Live mode<small></small></button>
+        </div>
+        <p class="error" id="error" role="alert" hidden></p>
+        <div class="last" id="last" hidden>
+          <div class="mt"><span id="last-when"></span><span id="last-provider"></span></div>
+          <p id="last-text"></p>
+          <div class="act" id="last-actions"></div>
+        </div>
+        <ul class="recent" id="recent" aria-label="Earlier dictations"></ul>
+        <p class="empty" id="empty" hidden>No dictations yet.</p>
+      </section>
+      <footer class="foot">
+        <button type="button" data-open="history">History</button>
+        <button type="button" data-open="timings">Timings</button>
+        <span class="sp"></span>
+        <button type="button" id="test-mic" title="Record 3 s and show the file">Test mic</button>
+        <button type="button" data-open="settings" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.8M8 12.7v1.8M14.5 8h-1.8M3.3 8H1.5M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3M12.6 12.6l-1.3-1.3M4.7 4.7 3.4 3.4"/></svg>
+        </button>
+        <button type="button" id="quit">Quit</button>
+      </footer>
+    </main>
+  </body>
+</html>

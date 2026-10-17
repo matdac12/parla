@@ -85,9 +85,10 @@ npm run tauri dev
 ```
 
 The dev app starts in the tray. Choose **Open Parla** or **Settings…** in the tray to open its
-window. Closing a secondary window destroys it; choose **Quit** to exit Parla.
-The main, history and benchmark windows are created only when opened and can
-be reopened from the tray. Only the recording pill stays loaded at startup.
+window. Closing a secondary window destroys it; choose **Quit Parla** to exit.
+The main and benchmark windows are created only when opened: the main window
+from the tray, the benchmark window from the main window's sidebar. Only the
+recording pill stays loaded at startup.
 All windows are created after their app state is registered.
 
 For a standalone executable, from the repository root:
@@ -111,17 +112,29 @@ type-checks and bundles them.
 
 ### The Parla window
 
-**Open Parla** in the tray opens the main window. It shows lifetime totals
-(**Words dictated**, **Dictations**, **Audio time**, **Total cost (est.)** and
-**Projected per year (est.)** against Wispr Flow's $144) and the transcript
-history, newest first:
-each entry has its time, provider, audio length, word count and full text, with a
-**Copy** button. A search box filters the loaded transcripts, new dictations
-appear at the top as they finish, and **Show older** loads more (200 at a time, up
-to 2000). Failed dictations are listed in red without a Copy button; the newest one,
-while its recording is still saved, has a **Retry** button that transcribes the
-saved clip and adds the result to the list (nothing is pasted, since the
-focus is Parla itself).
+**Open Parla** in the tray opens the main window: a sidebar on the left with a
+**Ready · <engine>** status line (the active provider, or the local model's name),
+then **Home**, **History**, **Timings** and five settings pages. **Benchmark ↗**
+at the bottom opens the benchmark window.
+
+- **Home** shows your shortcut (push to talk, hands-free, cancel) as set in
+  Settings, with a **Test mic** button that does what the tray item does. When the
+  newest dictation failed, a banner offers **Retry** (while its recording is
+  still saved) and **Dismiss** (hides it for that failure). Below are lifetime
+  totals (words dictated, dictations, audio time, cost with the yearly projection
+  against Wispr Flow's $144) and the five most recent dictations.
+- **History** lists dictations newest first, grouped by day: time, transcript
+  (two lines; click to expand), provider, audio length and word count, with
+  **Copy** on hover. A search box and an **All / Failed** filter narrow the loaded
+  transcripts, new dictations appear at the top as they finish, and **Show older**
+  loads more (200 at a time, up to 2000). Failed dictations are red; the newest
+  one, while its recording is still saved, has **Retry**, which transcribes the
+  saved clip and adds the result to the list (nothing is pasted, since the focus
+  is Parla itself). **Clear history…** truncates the file after a confirmation.
+- **Timings** shows the same loaded dictations as a latency log: median, fastest
+  and slowest key-up-to-pasted tiles, one stacked bar per dictation (Ready,
+  Transcribe, Paste; see [History](#history)) with its total, and the full table
+  behind **Table view**.
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a
@@ -143,24 +156,40 @@ price are left out of the total and shown as a note. The yearly projection
 older versions keep their words and get audio and cost from `history.jsonl`
 once.
 
-**Settings** opens inside the same window, with a back arrow (or **Esc**) to
-return home. The **Benchmark** and **Latency log** buttons open their own
-windows.
+Settings are split into **Transcription** (provider, keys, models, local
+model), **Dictation & hotkey** (shortcut, live transcription and captions),
+**Other audio** ([dimming](#dimming-other-audio)), **Vocabulary** and
+**Clipboard** (paste compatibility, restore delay). Switching provider or local
+model applies at once. Other edits show a **Save** bar at the bottom with
+**Discard**; it stays until you save or discard, across pages.
 
-The tray menu contains, in order:
+### Tray icon
 
-- **Open Parla** — shows or focuses the main window.
-- **Settings…** — opens the main window on its settings view (providers, keys,
-  hotkey, restore delay, Parakeet model, local model choice and
-  [dimming other audio](#dimming-other-audio)).
-- **History…** — shows the latency log window (per-stage timings; see
-  [History](#history)).
-- **Benchmark…** — shows the benchmark window.
+**Left-click** the tray icon for a small flyout in the screen corner by the
+tray (bottom-right for a bottom taskbar). It sits just above where the taskbar
+is when shown, also when the taskbar auto-hides or the icon is in the hidden
+icons overflow. It shows the **Ready ·
+<engine>** status and your push-to-talk keys; an **OpenAI / Grok / Local**
+switch (applies at once, like the provider choice in Settings; providers that
+are not set up are greyed out); three quick toggles, **Live captions**, **Dim
+audio** and **Live mode**, saved at once; the last dictation with **Copy**, and
+the three before it on one line each with **Copy** (or **Retry** on the newest
+failure while its recording is saved). The footer has **History**, **Timings**,
+**Test mic**, **⚙** (Settings) and **Quit**. Clicking anywhere else, or **Esc**,
+closes it. The flyout is created on each click and destroyed when it closes,
+so it costs nothing while closed.
+
+**Right-click** opens the menu, which contains, in order:
+
+- **Open Parla** (the default item, in bold) — shows or focuses the main window.
+- **Settings…** — opens the main window on its **Transcription** settings page.
 - **Test mic (3 s)** — records three seconds from the default microphone, saves
   it as `clips/test.wav` in the app data directory, and reveals the file in
   Explorer.
 - **Retry last failed dictation** — enabled only while a recovery clip exists.
-- **Quit** — exits Parla.
+- **Quit Parla** — exits Parla.
+
+History, Timings and Benchmark are reached from the main window's sidebar.
 
 ### Two ways to record
 
@@ -464,21 +493,23 @@ append-only and written on a background thread after the paste, so it never
 blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
 two kinds of row.
 
-The main window's list is the place to read and copy transcripts. Tray
-**History…** is the latency log: it lists dictations newest first with: wall-clock time, provider,
-captured audio length, then the latency breakdown — **Ready** (key-up to audio
-ready), **Transcribe** (audio ready to provider returned), **Paste** (provider
-returned to input injection), and **Total** (key-up to pasted). A dash means that
-stage never completed (a failed transcription has no paste time). The transcript
-is truncated, with the full text on hover or click; failures are tinted and show
-the error. The view updates live and **Clear history…** truncates the file after
-a confirmation. Reads are bounded: the view requests the newest 200 rows and the
-backend walks the file backwards, so a large history never has to fit in memory;
-corrupt lines are skipped.
+The main window's **History** page is the place to read and copy transcripts;
+its **Timings** page is the latency log. Each dictation's latency is split into
+**Ready** (key-up to audio ready), **Transcribe** (audio ready to provider
+returned), **Paste** (provider returned to input injection), and **Total**
+(key-up to pasted). A dash means that stage never completed (a failed
+transcription has no paste time). **Table view** on the Timings page lists
+wall-clock time, provider, captured audio length, the four stages, the
+transcript (full text on hover or click) and the error; failures are tinted.
+Both pages update live, and **Clear history…** on the History page truncates
+the file after a confirmation. Reads are bounded: the window requests the
+newest 200 rows at a time and the backend walks the file backwards, so a large
+history never has to fit in memory; corrupt lines are skipped.
 
 ## Benchmark
 
-Tray **Benchmark…** compares providers on your own voice and network.
+**Benchmark ↗** at the bottom of the main window's sidebar compares providers
+on your own voice and network.
 
 1. Click **Record clip**, speak, click **Stop recording** (it stops by itself
    after 30 s). Hotkey dictation is blocked while the benchmark owns the
@@ -545,11 +576,17 @@ Before windows were made lazy, measured once on a Windows 11 machine with the
 app idle in the tray and OpenAI
 as the active provider: about **610 MB** working set (**270 MB** private) in
 total, of which `parla.exe` itself is only about 40 MB. Nearly all of the rest is
-the WebView2 browser processes behind the four hidden windows (main, history,
-benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
+the WebView2 browser processes behind the four hidden windows of the time (main,
+a separate history window since retired, benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
 700 MB (about 1.4 GB working set in total). These are single measurements, not
-benchmarks. Main, history and benchmark windows are now created on demand and
-destroyed on close; the pill stays warm. The recorder drains audio every 10 ms
+benchmarks. Main and benchmark windows are now created on demand and
+destroyed on close; the pill stays warm. The tray flyout (PARLA-60, measured
+2026-10-17 on an i7-1370P at 150 % scaling, Parakeet loaded, 10 open/close
+cycles) appears 122–162 ms after the click (median ~130 ms), adds one WebView2
+renderer (about 55–75 MB private in total while open), and that renderer exits
+when it closes. Afterwards about 6–12 MB stays in WebView2's shared GPU and
+browser processes and does not grow with more opens; idle CPU and wakeups were
+unchanged. The recorder drains audio every 10 ms
 while recording and every 100 ms while idle, and start/stop commands wake it
 immediately. After 60 s idle the microphone stream is paused and the recorder
 stops polling: the open microphone was about 94 % of Parla's idle CPU, almost

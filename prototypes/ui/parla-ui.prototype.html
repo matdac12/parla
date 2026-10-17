@@ -1,0 +1,1030 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE · Parla UI touch-up (PARLA-57)</title>
+<!--
+  PROTOTYPE, throwaway (PARLA-57). Not production code: nothing here is bundled
+  (vite.config.ts lists its own inputs) and nothing calls Tauri. All data is
+  mocked in memory; reload to reset.
+
+  Question: what should Parla look like when you open it? Tray menu, the app
+  window (home + settings), the history / latency log, and the overlay pill.
+
+  Plan: four directions on one page, switchable via ?variant=current|a|b|c,
+  the arrow keys, or the floating bar at the bottom. "current" is a faithful
+  copy of what ships today, as the baseline.
+
+  Run: double-click this file, or open it in any Chromium browser.
+-->
+<style>
+/* ---------- tokens: copied from src/theme.css, plus a forced-theme switch ---------- */
+:root {
+  color-scheme: light;
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --bg: #f6f6f7; --surface: #ffffff; --surface-2: #f1f1f3;
+  --border: #e4e4e8; --border-strong: #d1d1d8;
+  --text: #16161a; --text-2: #5b5b66; --text-3: #8a8a96;
+  --accent: #4f46e5; --accent-hover: #4338ca; --on-accent: #ffffff;
+  --danger: #d92d3a; --danger-bg: #fdecee;
+  --success: #168a4a; --success-bg: #e8f6ee; --warning: #9a6700;
+  --radius: 10px; --radius-sm: 7px; --ease: cubic-bezier(0.2, 0, 0, 1);
+  /* prototype-only: the "desktop" around the windows */
+  --desk: #d9dde5; --desk-text: #3d4250;
+  --wall: linear-gradient(135deg, #8fb3e0 0%, #b9c7ea 45%, #e7d2e4 100%);
+  --taskbar: rgba(238, 240, 245, 0.92); --taskbar-text: #1b1b1f;
+  --menu: #f9f9f9; --menu-border: #d6d6d6; --menu-hover: #e8e8ea; --menu-text: #1a1a1a;
+  --flyout: rgba(243, 243, 246, 0.94);
+  /* stage colours for the timing bars: dataviz reference slots 1-3, validated */
+  --st-ready: #2a78d6; --st-transcribe: #eb6834; --st-paste: #1baf7a;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131316; --surface: #1b1b20; --surface-2: #232329;
+  --border: #2b2b33; --border-strong: #3a3a44;
+  --text: #ececf1; --text-2: #a4a4b0; --text-3: #77777f;
+  --accent: #8b85ff; --accent-hover: #a09bff; --on-accent: #101014;
+  --danger: #ff6b76; --danger-bg: #2c1b1e;
+  --success: #4cc684; --success-bg: #17261e; --warning: #e0b04a;
+  --desk: #0c0d11; --desk-text: #9aa0ae;
+  --wall: linear-gradient(135deg, #1d2a44 0%, #24203d 50%, #3a2236 100%);
+  --taskbar: rgba(28, 28, 32, 0.92); --taskbar-text: #f1f1f4;
+  --menu: #2b2b2b; --menu-border: #444; --menu-hover: #3a3a3a; --menu-text: #f2f2f2;
+  --flyout: rgba(36, 36, 40, 0.95);
+  --st-ready: #3987e5; --st-transcribe: #d95926; --st-paste: #199e70;
+}
+
+/* accent candidates: html[data-accent] wins over the base tokens; dark pairs are stepped for the dark surface */
+html[data-accent="blue"] { --accent: #0067c0; --accent-hover: #005a9e; --on-accent: #ffffff; }
+html[data-theme="dark"][data-accent="blue"] { --accent: #4cc2ff; --accent-hover: #7dd3ff; --on-accent: #002338; }
+html[data-accent="graphite"] { --accent: #27272a; --accent-hover: #3f3f46; --on-accent: #ffffff; }
+html[data-theme="dark"][data-accent="graphite"] { --accent: #e4e4e7; --accent-hover: #ffffff; --on-accent: #18181b; }
+html[data-accent="teal"] { --accent: #0f766e; --accent-hover: #115e59; --on-accent: #ffffff; }
+html[data-theme="dark"][data-accent="teal"] { --accent: #2dd4bf; --accent-hover: #5eead4; --on-accent: #042f2e; }
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font); font-size: 14px; line-height: 1.5; color: var(--text);
+  background: var(--desk); -webkit-font-smoothing: antialiased; }
+h1 { margin: 0; font-size: 1.35rem; font-weight: 650; letter-spacing: -0.015em; }
+h2 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
+p { line-height: 1.55; }
+code { font-family: var(--mono); font-size: 0.9em; background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 5px; }
+kbd { display: inline-block; font: 600 11px/1 var(--font); padding: 4px 6px 3px; border-radius: 5px;
+  border: 1px solid var(--border-strong); border-bottom-width: 2px; background: var(--surface); color: var(--text); }
+.plus { color: var(--text-3); margin: 0 3px; font-size: 11px; }
+
+.win button, .side button {
+  font: inherit; font-weight: 500; padding: 0.45rem 0.9rem; border-radius: var(--radius-sm); white-space: nowrap;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); cursor: pointer;
+  transition: background 150ms var(--ease), border-color 150ms var(--ease), opacity 150ms;
+}
+.win button:hover:not(:disabled), .side button:hover:not(:disabled) { background: var(--surface-2); }
+.win button:disabled { opacity: 0.45; cursor: not-allowed; }
+.win button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.win button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.win button.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
+.win button.ghost:hover { background: var(--surface-2); color: var(--text); }
+.win button.ghost.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.win button.small, .side button.small { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+.win button.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.win button.copied { color: var(--success); border-color: var(--success); background: var(--success-bg); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type="search"], input[type="text"], input[type="password"], input[type="number"], textarea {
+  font: inherit; color: var(--text); background: var(--surface); padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+}
+input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.muted { color: var(--text-3); }
+.status-success { color: var(--success); }
+.status-dirty { color: var(--text-3); }
+
+/* Windows-11 style toggle switch (used by B and C) */
+.sw { appearance: none; -webkit-appearance: none; margin: 0; flex: none; width: 40px; height: 20px; border-radius: 10px;
+  border: 1px solid var(--text-3); background: transparent; position: relative; cursor: pointer; transition: background 150ms var(--ease); }
+.sw::after { content: ""; position: absolute; top: 3px; left: 4px; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--text-2); transition: transform 150ms var(--ease), background 150ms; }
+.sw:checked { background: var(--accent); border-color: var(--accent); }
+.sw:checked::after { transform: translateX(19px); background: var(--on-accent); }
+
+/* ---------- stage ---------- */
+.stage { display: flex; flex-wrap: wrap; gap: 28px; padding: 22px 24px 120px; justify-content: center; align-items: flex-start; }
+.col { display: flex; flex-direction: column; gap: 10px; zoom: var(--zoom, 1); }
+.panel-title { font-size: 11px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--desk-text); margin: 0; display: flex; gap: 8px; align-items: center; }
+.panel-title .sub { text-transform: none; letter-spacing: 0; font-weight: 500; opacity: 0.85; }
+.wchips { display: flex; gap: 6px; flex-wrap: wrap; }
+.wchip { font: 500 12px var(--font); padding: 3px 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--desk-text) 35%, transparent);
+  color: var(--desk-text); background: transparent; cursor: pointer; }
+.wchip.on { background: var(--desk-text); color: var(--desk); }
+
+.win { width: 900px; height: 680px; background: var(--bg); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.14), 0 22px 60px rgba(0,0,0,0.28); position: relative; }
+.titlebar { height: 32px; flex: none; display: flex; align-items: center; padding-left: 12px; font-size: 12px; color: var(--text-2); user-select: none; }
+.titlebar .appico { width: 16px; height: 16px; border-radius: 4px; background: var(--accent); margin-right: 9px; }
+.titlebar .caps { margin-left: auto; display: flex; height: 100%; }
+.titlebar .caps span { width: 46px; display: grid; place-items: center; font-size: 13px; color: var(--text-2); }
+.win-body { flex: 1; overflow: auto; position: relative; }
+
+.side { width: 400px; }
+.screen { position: relative; border-radius: 10px; overflow: hidden; background: var(--wall); box-shadow: 0 0 0 1px rgba(0,0,0,0.1); }
+.taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: var(--taskbar); backdrop-filter: blur(20px);
+  display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 10px; color: var(--taskbar-text); font-size: 11px; }
+.taskbar .ti { width: 28px; height: 28px; border-radius: 4px; display: grid; place-items: center; opacity: 0.85; }
+.taskbar .ti.parla { background: color-mix(in srgb, var(--taskbar-text) 12%, transparent); opacity: 1; cursor: pointer; }
+.taskbar .ti.parla i { width: 14px; height: 14px; border-radius: 50%; border: 2px dashed currentColor; display: block; }
+.taskbar .clock { text-align: right; line-height: 1.25; padding: 0 6px 0 8px; }
+.native-menu { position: absolute; right: 92px; bottom: 46px; min-width: 232px; background: var(--menu); color: var(--menu-text);
+  border: 1px solid var(--menu-border); border-radius: 8px; padding: 4px; font: 12px "Segoe UI", sans-serif;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.22); }
+.native-menu .mi { padding: 6px 28px 6px 30px; border-radius: 4px; white-space: nowrap; }
+.native-menu .mi:hover:not(.dis) { background: var(--menu-hover); }
+.native-menu .mi.dis { opacity: 0.45; }
+.native-menu .mi.status { opacity: 1; color: color-mix(in srgb, var(--menu-text) 60%, transparent); font-size: 11px; padding-top: 4px; padding-bottom: 4px; }
+.native-menu .mi.bold { font-weight: 600; }
+.native-menu .sep { height: 1px; margin: 4px 8px; background: var(--menu-border); }
+.side-note { font-size: 12px; color: var(--desk-text); margin: 2px 0 0; line-height: 1.45; }
+.side-note b { font-weight: 600; }
+
+.pills { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pcell { position: relative; height: 74px; border-radius: 8px; background: var(--wall); display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; overflow: hidden; }
+.pcell.tall { grid-column: span 3; height: 168px; }
+.pcell .plabel { position: absolute; top: 5px; left: 8px; font-size: 10.5px; font-weight: 600; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.45); }
+
+/* ---------- floating prototype switcher (deliberately not part of any design) ---------- */
+.proto-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 4px;
+  padding: 5px; border-radius: 999px; background: #111; color: #fff; font: 13px/1.2 system-ui, sans-serif;
+  box-shadow: 0 0 0 2px #fde047, 0 10px 30px rgba(0,0,0,0.45); max-width: calc(100vw - 24px); }
+.proto-bar button { all: unset; cursor: pointer; padding: 7px 12px; border-radius: 999px; }
+.proto-bar button:hover { background: #2a2a2a; }
+.proto-bar .lbl { padding: 0 10px; min-width: 260px; text-align: center; }
+.proto-bar .lbl b { color: #fde047; }
+.proto-bar .lbl small { display: block; color: #bbb; font-size: 11px; margin-top: 2px; white-space: normal; max-width: 460px; }
+.proto-bar .accents { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 6px; border-left: 1px solid #333; margin-left: 2px; }
+.proto-bar button.sw-acc { width: 18px; height: 18px; padding: 0; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 1px #555; }
+.proto-bar button.sw-acc.on { box-shadow: 0 0 0 2px #111, 0 0 0 4px #fde047; }
+.proto-bar .accname { color: #bbb; font-size: 11px; min-width: 120px; }
+.proto-tag { position: fixed; top: 10px; right: 12px; z-index: 1000; font: 600 11px system-ui; letter-spacing: 0.06em; background: #fde047; color: #111; padding: 3px 8px; border-radius: 4px; }
+.toast { position: fixed; left: 50%; bottom: 92px; transform: translateX(-50%); z-index: 1001; background: #111; color: #fff; font: 13px system-ui; padding: 8px 14px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+
+/* ---------- overlay pill: copied from src/overlay.css, plus per-direction modifiers ---------- */
+.ov { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.captions { box-sizing: border-box; width: 330px; padding: 9px 13px; border-radius: 11px; background: rgba(18,18,20,0.88);
+  box-shadow: 0 0 0 0.5px rgba(255,255,255,0.1), 0 4px 13px rgba(0,0,0,0.17); font: 13px/19px "Segoe UI", sans-serif; text-align: left; }
+.captions .st, .ccard .st { color: rgba(255,255,255,0.88); } .captions .pv, .ccard .pv { color: rgba(255,255,255,0.56); }
+.pill { display: flex; align-items: center; justify-content: center; gap: 11px; width: 116px; height: 32px; border-radius: 16px;
+  background: rgba(18,18,20,0.92); box-shadow: 0 0 0 0.5px rgba(255,255,255,0.14), 0 6px 18px rgba(0,0,0,0.35);
+  position: relative; transition: width 220ms var(--ease), box-shadow 220ms var(--ease); }
+.pill:not([data-phase="recording"]) { width: 40px; }
+.pill[data-phase="error"] { width: 76px; }
+.pill button { all: unset; display: none; place-items: center; width: 26px; height: 26px; border-radius: 50%; cursor: pointer; }
+.pill .retry { background: rgba(255,255,255,0.12); color: #fff; }
+.pill[data-phase="error"] .retry, .pill[data-phase="done"] .r-ok, .pill[data-phase="error"] .r-err { display: grid; }
+.pill .r-ok { color: #7ee2a8; margin: 0 -5px; } .pill .r-err { color: #ff8f8a; margin: 0 -5px; }
+.pill:not([data-phase="recording"]) .mode, .pill:not([data-phase="recording"]) .bars, .pill:not([data-phase="processing"]) .spinner, .pill .timer, .pill .reason { display: none; }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.2); border-top-color: #fff; animation: spin 700ms linear infinite; }
+.mode { display: grid; place-items: center; width: 12px; height: 12px; color: #fff; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.85); }
+.pill[data-locked="true"] .bar, .pill[data-locked="true"] .mode { color: #b9b6ff; }
+.pill[data-locked="true"] .bar { background: #b9b6ff; }
+.bars { display: flex; align-items: center; justify-content: space-between; width: 58px; height: 100%; }
+.bar { width: 2.5px; height: 3px; border-radius: 2px; background: #fff; animation: lvl 900ms ease-in-out infinite alternate; }
+.bar:nth-child(1) { animation-delay: -100ms; } .bar:nth-child(2) { animation-delay: -420ms; } .bar:nth-child(3) { animation-delay: -250ms; }
+.bar:nth-child(4) { animation-delay: -700ms; } .bar:nth-child(5) { animation-delay: -60ms; } .bar:nth-child(6) { animation-delay: -520ms; }
+.bar:nth-child(7) { animation-delay: -330ms; } .bar:nth-child(8) { animation-delay: -800ms; } .bar:nth-child(9) { animation-delay: -180ms; }
+@keyframes lvl { 0% { height: 3px; opacity: 0.4; } 60% { height: 13px; opacity: 1; } 100% { height: 7px; opacity: 0.75; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* B: elapsed timer while locked; a short reason chip above a failed pill */
+.pv-b .timer { font: 600 11px/1 "Segoe UI", sans-serif; color: #b9b6ff; font-variant-numeric: tabular-nums; }
+.pv-b[data-phase="recording"][data-locked="true"] { width: 132px; gap: 8px; }
+.pv-b[data-phase="recording"][data-locked="true"] .timer { display: block; }
+.pv-b[data-phase="recording"][data-locked="true"] .bars { width: 46px; }
+.pv-b[data-phase="recording"][data-locked="true"] .bar:nth-child(n+8) { display: none; }
+.reason-chip { font: 12px/1 "Segoe UI", sans-serif; color: #ffd0cd; background: rgba(18,18,20,0.88); padding: 6px 10px; border-radius: 8px;
+  box-shadow: 0 0 0 0.5px rgba(255,255,255,0.1); }
+
+/* C: one surface. Mode is a ring, not a tint; captions grow out of the pill itself */
+.pv-c { width: 96px; gap: 0; }
+.pv-c .mode { display: none !important; }
+.pv-c .bars { width: 64px; }
+.pv-c[data-locked="true"] { box-shadow: 0 0 0 2px #b9b6ff, 0 6px 18px rgba(0,0,0,0.35); }
+.pv-c[data-locked="true"] .bar { background: #fff; }
+.pv-c[data-phase="done"] { box-shadow: 0 0 0 2px #7ee2a8, 0 6px 18px rgba(0,0,0,0.35); }
+.pv-c[data-phase="error"] { box-shadow: 0 0 0 2px #ff8f8a, 0 6px 18px rgba(0,0,0,0.35); }
+.ccard { width: 330px; border-radius: 16px; background: rgba(18,18,20,0.92); box-shadow: 0 0 0 0.5px rgba(255,255,255,0.14), 0 6px 18px rgba(0,0,0,0.35);
+  padding: 10px 14px 0; display: flex; flex-direction: column; align-items: center; font: 13px/19px "Segoe UI", sans-serif; }
+.ccard .txt { align-self: stretch; text-align: left; }
+.ccard .pill { box-shadow: none; background: transparent; }
+
+@media (prefers-reduced-motion: reduce) { .bar { animation: none; height: 8px; } }
+
+/* =================== CURRENT (baseline, copied from app.css / settings.css / history.css) =================== */
+.cur-home { max-width: 52rem; padding: 1.5rem 1.75rem 2.5rem; margin: auto; }
+.cur-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.cur-nav { display: flex; gap: 0.5rem; }
+.cur-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin: 1.25rem 0 1.75rem; }
+.cur-stat { display: flex; flex-direction: column; gap: 0.15rem; padding: 1rem 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.cur-stat.wide { grid-column: span 2; }
+.stat-value { font-size: 2rem; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat-label { color: var(--text-3); font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.stat-note { color: var(--text-2); font-size: 0.8rem; }
+.cur-list-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
+.cur-list-head input { width: 16rem; }
+.cur-entries { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.cur-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.5rem 0.6rem; padding: 0.85rem 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.cur-entry .meta { grid-column: 1 / -1; color: var(--text-3); font-size: 0.8rem; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.cur-entry .text { margin: 0; overflow-wrap: anywhere; }
+.cur-entry.failed { background: var(--danger-bg); } .cur-entry.failed .text { color: var(--danger); }
+.cur-entry button { align-self: start; min-width: 4.5rem; }
+.cur-set { max-width: 38rem; padding: 1.5rem 1.75rem 2.5rem; margin: auto; }
+.back-title { display: flex; align-items: center; gap: 0.6rem; }
+.win button.icon-btn { display: grid; place-items: center; width: 2rem; height: 2rem; padding: 0; border-radius: 50%; }
+.subtitle { color: var(--text-2); margin: 0.75rem 0 1.25rem; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.1rem 1.25rem; margin-bottom: 0.9rem; }
+.card > h2 { margin: 0 0 0.8rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-3); }
+.opt-list { display: flex; flex-direction: column; gap: 0.45rem; }
+.opt { display: flex; gap: 0.7rem; align-items: center; padding: 0.65rem 0.85rem; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; }
+.opt:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.opt input { accent-color: var(--accent); margin: 0; }
+.opt .ob { display: flex; flex-direction: column; flex: 1; }
+.opt .on { font-weight: 600; } .opt .om { color: var(--text-3); font-size: 0.85rem; }
+.field { margin-bottom: 1rem; } .field:last-child { margin-bottom: 0; }
+.field > label { display: block; font-weight: 550; margin-bottom: 0.35rem; }
+.field input[type="text"], .field input[type="password"], .field input[type="number"], .field textarea { width: 100%; background: var(--bg); }
+.field textarea { resize: vertical; min-height: 5rem; }
+.hint { color: var(--text-3); font-size: 0.85rem; margin: 0.4rem 0 0; line-height: 1.5; }
+.row2 { display: flex; gap: 0.5rem; } .row2 input { flex: 1; }
+.cur-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; margin-top: 0.6rem; }
+.footer-hint { color: var(--text-3); font-size: 0.8rem; margin-top: 1.5rem; }
+.cur-hist { padding: 1.5rem 1.75rem 2rem; }
+.cur-hist header { display: flex; align-items: center; justify-content: space-between; }
+.cur-hist header div { display: flex; gap: 0.5rem; }
+table { width: 100%; border-collapse: collapse; font-size: 0.93rem; margin-top: 1rem; }
+th, td { text-align: left; padding: 0.55rem 0.7rem; vertical-align: top; }
+thead th { position: sticky; top: 0; background: var(--bg); color: var(--text-3); font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border-strong); }
+tbody td { border-bottom: 1px solid var(--border); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.failed { background: var(--danger-bg); }
+.clip { max-width: 15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* =================== A · Sidebar app =================== */
+.a-shell { display: grid; grid-template-columns: 208px 1fr; height: 100%; }
+.a-rail { border-right: 1px solid var(--border); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; background: var(--bg); }
+.a-brand { display: flex; align-items: center; gap: 9px; font-weight: 650; font-size: 1.05rem; padding: 2px 8px 0; }
+.a-brand .logo { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); }
+.a-ready { font-size: 0.78rem; color: var(--text-2); padding: 0 8px 14px 39px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.okdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--success); margin-right: 5px; vertical-align: 1px; }
+.win button.a-nav { all: unset; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px; color: var(--text-2); cursor: pointer; font-weight: 500; position: relative; }
+.win button.a-nav:hover { background: var(--surface-2); color: var(--text); }
+.win button.a-nav.on { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+.win button.a-nav.on::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 2px; background: var(--accent); }
+.win button.a-nav svg { width: 16px; height: 16px; flex: none; }
+.win button.a-nav .count { margin-left: auto; font-size: 0.75rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.a-group { font-size: 0.7rem; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-3); padding: 16px 10px 4px; }
+.a-foot { margin-top: auto; padding: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--text-3); }
+.a-foot a { color: var(--text-2); cursor: pointer; text-decoration: none; } .a-foot a:hover { color: var(--accent); }
+.a-main { overflow: auto; position: relative; }
+.a-page { padding: 26px 30px 90px; max-width: 640px; }
+.a-page.wide { max-width: none; }
+.a-page > h1 { margin-bottom: 4px; } .a-page > .lede { color: var(--text-2); margin: 0 0 20px; }
+.a-hero { display: flex; align-items: center; gap: 16px; padding: 18px 20px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); margin-bottom: 14px; }
+.a-hero .how { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+.a-hero .how div { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text-2); font-size: 0.9rem; }
+.a-hero .how div span.w { width: 96px; color: var(--text-3); font-size: 0.8rem; }
+.a-strip { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 22px; }
+.a-strip > div { padding: 12px 16px; border-left: 1px solid var(--border); } .a-strip > div:first-child { border-left: 0; }
+.a-strip .v { font-size: 1.35rem; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.a-strip .l { font-size: 0.75rem; color: var(--text-3); }
+.banner { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; border-radius: var(--radius-sm); background: var(--danger-bg); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); margin-bottom: 14px; font-size: 0.9rem; }
+.banner span { flex: 1; }
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.sec-head a { font-size: 0.85rem; color: var(--accent); cursor: pointer; }
+.rows { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
+.rows li { display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: start; padding: 10px 12px 10px 14px; border-top: 1px solid var(--border); }
+.rows li:first-child { border-top: 0; }
+.rows li:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+.rows .tm { color: var(--text-3); font-size: 0.8rem; font-variant-numeric: tabular-nums; padding-top: 1px; }
+.rows .tx { margin: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rows .mt { color: var(--text-3); font-size: 0.78rem; margin-top: 2px; }
+.rows li.failed .tx { color: var(--danger); }
+.rows .act { display: flex; gap: 6px; opacity: 0.35; transition: opacity 120ms; } .rows li:hover .act, .rows .act:focus-within { opacity: 1; }
+.rows li.failed .act { opacity: 1; }
+.day { font-size: 0.75rem; font-weight: 650; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; margin: 18px 0 6px; }
+.a-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.a-tools input { flex: 1; }
+.chips { display: flex; gap: 4px; }
+.win button.chip { padding: 0.3rem 0.7rem; border-radius: 999px; font-size: 0.85rem; }
+.win button.chip.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+.savebar { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 30px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-top: 1px solid var(--border); }
+.savebar span { margin-right: auto; color: var(--text-2); font-size: 0.9rem; }
+
+/* timing chart (A) and breakdown (C) */
+.legend { display: flex; gap: 16px; font-size: 0.8rem; color: var(--text-2); margin: 4px 0 12px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
+.tile { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.tile .v { font-size: 1.6rem; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; } .tile .v small { font-size: 0.85rem; font-weight: 500; color: var(--text-3); margin-left: 3px; }
+.tile .l { font-size: 0.78rem; color: var(--text-3); }
+.tchart { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 6px 14px; }
+.trow { display: grid; grid-template-columns: 128px 1fr 64px; align-items: center; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 0.82rem; }
+.trow:first-child { border-top: 0; }
+.trow .who { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trow .tot { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.track { display: flex; height: 10px; }
+.seg { height: 100%; margin-right: 2px; position: relative; } .seg:last-child { margin-right: 0; }
+.seg:first-child { border-radius: 4px 0 0 4px; } .seg:last-child { border-radius: 0 4px 4px 0; } .seg:only-child { border-radius: 4px; }
+.seg:hover { filter: brightness(1.12); }
+.s-ready { background: var(--st-ready); } .s-transcribe { background: var(--st-transcribe); } .s-paste { background: var(--st-paste); }
+.trow .fail { color: var(--danger); }
+.tip { position: fixed; z-index: 1002; pointer-events: none; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; padding: 5px 9px; font-size: 12px; box-shadow: 0 6px 18px rgba(0,0,0,0.18); }
+
+/* =================== B · Quiet feed =================== */
+.b-wrap { max-width: 640px; margin: 0 auto; padding: 22px 28px 60px; }
+.b-top { display: flex; align-items: center; gap: 10px; }
+.b-top h1 { font-size: 1.25rem; }
+.win button.b-chip { padding: 0.25rem 0.7rem; border-radius: 999px; font-size: 0.82rem; color: var(--text-2); }
+.b-top .sp { flex: 1; }
+.b-pop { position: absolute; top: 88px; left: 98px; z-index: 5; width: 280px; padding: 6px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 30px rgba(0,0,0,0.18); }
+.b-pop .pi { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.b-pop .pi:hover { background: var(--surface-2); }
+.b-pop .pi .ck { width: 14px; color: var(--accent); }
+.b-pop .pi small { margin-left: auto; color: var(--text-3); }
+.b-pop .pi.sub { padding-left: 34px; font-size: 0.9rem; }
+.b-pop hr { border: 0; border-top: 1px solid var(--border); margin: 5px 4px; }
+.b-hint { margin: 14px 0 2px; color: var(--text-2); font-size: 0.9rem; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.b-hint span { display: inline-flex; align-items: center; gap: 6px; }
+.b-stats { margin: 4px 0 18px; color: var(--text-3); font-size: 0.85rem; }
+.b-stats b { color: var(--text-2); font-weight: 600; font-variant-numeric: tabular-nums; }
+.b-search { width: 100%; padding: 0.6rem 0.9rem !important; border-radius: 999px !important; background: var(--surface-2) !important; border-color: transparent !important; }
+.b-feed .day { margin-top: 22px; }
+.b-item { display: grid; grid-template-columns: 48px 1fr; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); position: relative; }
+.b-item .tm { color: var(--text-3); font-size: 0.8rem; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.b-item .tx { margin: 0; overflow-wrap: anywhere; font-size: 0.97rem; }
+.b-item .mt { color: var(--text-3); font-size: 0.78rem; margin-top: 3px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.b-item .hov { position: absolute; right: 0; top: 6px; opacity: 0; transition: opacity 120ms; background: var(--bg); padding-left: 8px; }
+.b-item:hover .hov, .b-item .hov:focus-within { opacity: 1; }
+.b-item.failed { border-left: 2px solid var(--danger); padding-left: 10px; margin-left: -12px; }
+.b-item.failed .tx { color: var(--danger); }
+.tchips { display: inline-flex; gap: 4px; font-variant-numeric: tabular-nums; }
+.tchips span { padding: 0 6px; border-radius: 4px; background: var(--surface-2); color: var(--text-2); font-size: 0.75rem; line-height: 1.6; }
+.tchips span i { display: inline-block; width: 6px; height: 6px; border-radius: 2px; margin-right: 4px; vertical-align: 1px; }
+.tchips span.t { font-weight: 650; color: var(--text); }
+.scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.18); z-index: 9; }
+.sheet { position: absolute; top: 0; right: 0; bottom: 0; width: 460px; z-index: 10; background: var(--bg); border-left: 1px solid var(--border-strong); box-shadow: -18px 0 40px rgba(0,0,0,0.16); overflow: auto; animation: slidein 200ms var(--ease); }
+@keyframes slidein { from { transform: translateX(30px); opacity: 0; } }
+.sheet-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 10px; padding: 16px 20px 12px; background: var(--bg); }
+.sheet-head h2 { font-size: 1.15rem; flex: 1; }
+.sheet-head .saved { font-size: 0.8rem; }
+.sgroup { margin: 0 16px 16px; }
+.sgroup > h3 { margin: 0 4px 6px; font-size: 0.8rem; font-weight: 600; color: var(--text-2); }
+.sbox { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.srow { display: flex; align-items: center; gap: 14px; padding: 11px 14px; border-top: 1px solid var(--border); }
+.srow:first-child { border-top: 0; }
+.srow .sl { flex: 1; min-width: 0; } .srow .sl b { display: block; font-weight: 550; } .srow .sl small { display: block; color: var(--text-3); font-size: 0.8rem; line-height: 1.4; margin-top: 1px; }
+.srow.radio { cursor: pointer; } .srow input[type="radio"] { accent-color: var(--accent); margin: 0; }
+.srow.indent { padding-left: 40px; }
+.srow textarea { width: 100%; min-height: 4.5rem; }
+.srow input[type="range"] { width: 130px; accent-color: var(--accent); }
+.srow .val { width: 38px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 0.85rem; }
+.srow input[type="number"] { width: 90px; }
+.srow input[type="password"], .srow input[type="text"].wide { width: 210px; }
+.sheet-foot { padding: 4px 22px 24px; color: var(--text-3); font-size: 0.8rem; display: flex; justify-content: space-between; }
+.sheet-foot a { color: var(--text-2); cursor: pointer; }
+
+/* =================== C · Tray flyout + master-detail =================== */
+.c-tabs { display: flex; align-items: center; gap: 4px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.c-seg { display: inline-flex; background: var(--surface-2); border-radius: 8px; padding: 3px; gap: 2px; }
+.win button.c-tab, .side button.c-tab { padding: 0.3rem 0.95rem; border: 0; background: transparent; color: var(--text-2); border-radius: 6px; }
+.win button.c-tab.on, .side button.c-tab.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.12), 0 0 0 1px var(--border); }
+.c-tabs .st { margin-left: auto; font-size: 0.82rem; color: var(--text-2); display: flex; gap: 12px; align-items: center; }
+.c-md { display: grid; grid-template-columns: 300px 1fr; height: calc(100% - 53px); }
+.c-list { border-right: 1px solid var(--border); overflow: auto; }
+.c-list .srch { position: sticky; top: 0; padding: 10px; background: var(--bg); z-index: 1; }
+.c-list .srch input { width: 100%; }
+.c-li { padding: 9px 14px; border-left: 3px solid transparent; cursor: pointer; }
+.c-li:hover { background: var(--surface-2); }
+.c-li.on { background: var(--surface); border-left-color: var(--accent); }
+.c-li .l1 { display: flex; gap: 8px; font-size: 0.75rem; color: var(--text-3); }
+.c-li .l1 .p { margin-left: auto; }
+.c-li .l2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-li.failed .l2 { color: var(--danger); }
+.c-list .day { padding: 0 14px; margin: 14px 0 4px; }
+.c-detail { padding: 24px 30px; overflow: auto; }
+.c-detail .when { color: var(--text-3); font-size: 0.85rem; }
+.c-detail .big { font-size: 1.15rem; line-height: 1.6; margin: 10px 0 18px; user-select: text; }
+.c-detail .big.err { color: var(--danger); }
+.c-detail .acts { display: flex; gap: 8px; margin-bottom: 26px; }
+.kv { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 22px; }
+.kv div { padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.kv b { display: block; font-size: 1.05rem; font-variant-numeric: tabular-nums; } .kv small { color: var(--text-3); font-size: 0.75rem; }
+.bd-title { font-size: 0.8rem; font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
+.bd .track { height: 14px; }
+.bd-labels { display: flex; gap: 18px; margin-top: 8px; font-size: 0.8rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.bd-labels i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.c-stats { padding: 28px 32px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 720px; }
+.c-stats .bigtile { padding: 20px 22px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.c-stats .bigtile .v { font-size: 2.4rem; font-weight: 650; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.c-stats .bigtile .l { color: var(--text-3); font-size: 0.85rem; }
+.c-stats .wide { grid-column: span 2; display: flex; align-items: center; gap: 24px; }
+.c-grid { padding: 20px 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.c-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.c-card h3 { margin: 0 0 10px; font-size: 0.85rem; font-weight: 650; }
+.c-card .r { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.c-card .r > span:first-child { flex: 1; } .c-card .r small { color: var(--text-3); }
+.c-card .hint { margin-top: 2px; }
+.c-card textarea { width: 100%; min-height: 4.2rem; background: var(--bg); }
+.c-card input[type="number"] { width: 80px; background: var(--bg); }
+.c-card.span2 { grid-column: span 2; }
+.c-segp { display: flex; background: var(--surface-2); border-radius: 8px; padding: 3px; gap: 2px; margin-bottom: 10px; }
+.win .c-segp button.c-tab, .side .c-segp button.c-tab { flex: 1; }
+.c-model { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-top: 6px; cursor: pointer; }
+.c-model:has(input:checked) { border-color: var(--accent); }
+.c-model input { accent-color: var(--accent); margin: 0; }
+.c-model span { flex: 1; } .c-model small { color: var(--text-3); }
+
+.flyout { position: absolute; right: 10px; bottom: 50px; width: 360px; background: var(--flyout); backdrop-filter: blur(30px); color: var(--text);
+  border: 1px solid var(--menu-border); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.3); overflow: hidden; font-size: 13px; }
+.fly-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
+.fly-head .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); }
+.fly-head b { display: block; font-size: 14px; } .fly-head small { color: var(--text-2); }
+.fly-head .keys { margin-left: auto; }
+.fly-body { padding: 0 16px 12px; }
+.fly-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+.side button.ftile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 9px 10px; border-radius: 8px; text-align: left; font-size: 12px; line-height: 1.3; }
+.side button.ftile.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.side button.ftile.on:hover { background: var(--accent-hover); }
+.side button.ftile small { opacity: 0.75; font-size: 11px; }
+.fly-last { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.fly-last .mt { display: flex; justify-content: space-between; color: var(--text-3); font-size: 11px; margin-bottom: 3px; }
+.fly-last p { margin: 0 0 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.fly-mini { display: flex; align-items: center; gap: 8px; padding: 5px 2px; border-top: 1px solid var(--border); }
+.fly-mini span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.fly-mini small { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.fly-mini.failed span { color: var(--danger); }
+.fly-foot { display: flex; align-items: center; gap: 4px; padding: 8px 10px; background: color-mix(in srgb, var(--text) 5%, transparent); border-top: 1px solid var(--border); }
+.side .fly-foot button { border-color: transparent; background: transparent; padding: 0.3rem 0.6rem; font-size: 12px; }
+.side .fly-foot button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.fly-foot .sp { flex: 1; }
+</style>
+</head>
+<body>
+<div class="proto-tag">PROTOTYPE · PARLA-57</div>
+<div id="root"></div>
+<div class="proto-bar" role="toolbar" aria-label="Prototype variant switcher">
+  <button type="button" id="prev" aria-label="Previous variant">◀</button>
+  <div class="lbl" id="vlabel"></div>
+  <button type="button" id="next" aria-label="Next variant">▶</button>
+  <button type="button" id="theme" title="Toggle light/dark">◐</button>
+  <span class="accents" id="accents"></span>
+</div>
+<div class="tip" id="tip" hidden></div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+// ---------------------------------------------------------------- mock data
+const MIN = 60e3, H = 3600e3, D = 86400e3;
+const now = Date.now();
+// t = [ready, transcribe, paste] in ms (key-up -> audio ready -> provider returned -> pasted)
+const RECORDS = [
+  { id: "r1", at: now - 4 * MIN, provider: "parakeet", audio: 6.2, text: "Ok, allora domani mattina sentiamo il cliente alle dieci e poi aggiorniamo il preventivo con le nuove ore.", t: [38, 212, 31] },
+  { id: "r2", at: now - 19 * MIN, provider: "parakeet", audio: 3.1, text: "Can you check whether the release build still links with rust-lld after the sccache change?", t: [41, 164, 29] },
+  { id: "r3", at: now - 47 * MIN, provider: "openai", audio: 9.8, text: "", error: "OpenAI request timed out after 15 s", t: [44, 15000, null] },
+  { id: "r4", at: now - 96 * MIN, provider: "parakeet", audio: 12.4, text: "Ricordami di chiamare Giulia per la cena di sabato, e di prenotare il tavolo da Mario per otto persone.", t: [37, 298, 33] },
+  { id: "r5", at: now - 3.2 * H, provider: "xai", audio: 4.6, text: "Let's ship the dismiss button on the failed pill and move on to the tray icon next.", t: [42, 402, 30] },
+  { id: "r6", at: now - D - 2 * H, provider: "parakeet", audio: 21.0, text: "Il punto è che la latenza conta più di tutto: se il testo arriva dopo mezzo secondo sembra già lento. Quindi niente passaggi extra dopo la trascrizione.", t: [39, 486, 34] },
+  { id: "r7", at: now - D - 5 * H, provider: "openai", audio: 7.3, text: "Draft a reply to Luca: thanks for the review, I'll push the fix this afternoon and ping you when CI is green.", t: [45, 611, 32] },
+  { id: "r8", at: now - D - 6 * H, provider: "parakeet", audio: 2.2, text: "Grazie mille, a domani!", t: [36, 121, 28] },
+  { id: "r9", at: now - 3 * D, provider: "parakeet", audio: 15.9, text: "Note for the benchmark: Parakeet v3 on the Iris Xe stays under four hundred milliseconds for short phrases, CPU only.", t: [40, 355, 31] },
+  { id: "r10", at: now - 3 * D - H, provider: "xai", audio: 5.5, text: "Mandami il file aggiornato quando hai finito, così lo giro a Marco prima della call.", t: [43, 433, 30] },
+];
+const STATS = { words: "48,210", dictations: "1,284", audio: "6 h 41 m", cost: "$0.62", projected: "$2.10" };
+const PROVIDERS = [
+  { id: "openai", name: "OpenAI", short: "OpenAI", kind: "cloud" },
+  { id: "xai", name: "xAI Grok", short: "Grok", kind: "cloud" },
+  { id: "parakeet", name: "Parakeet (local)", short: "Local", kind: "local" },
+];
+const PNAME = { openai: "OpenAI", xai: "xAI Grok", parakeet: "Parakeet" };
+const MODELS = [
+  { id: "parakeet-v3", name: "Parakeet v3", size: "670 MB", ok: true },
+  { id: "parakeet-ultra", name: "Parakeet Ultra", size: "670 MB", ok: false },
+];
+const VARIANTS = [
+  { key: "current", name: "Current (baseline)", idea: "What ships today: home + one long settings form in the app window, the latency log in a second window, a 7-item tray menu." },
+  { key: "a", name: "Sidebar app", idea: "One window with a left rail: Home, History, Timings, and Settings split into short pages with an explicit Save bar. The latency log moves in; the tray menu shrinks." },
+  { key: "b", name: "Quiet feed", idea: "Transcript-first single column grouped by day; stats in one sentence; timings as an inline toggle; provider switch in the header; settings in a slide-over sheet that saves itself." },
+  { key: "mix", name: "Chosen mix: A window + C tray", idea: "A's window + C's tray flyout (right-click keeps A's menu); pill untouched. Pick an accent with the swatches." },
+  { key: "c", name: "Tray flyout", idea: "Left-click the tray icon for a Windows-style flyout (status, provider, quick toggles, last dictations). The window becomes History master-detail, Stats and a one-screen settings grid." },
+];
+
+// Accent candidates replacing the indigo (Mattia: "too much AI vibes").
+const ACCENTS = [
+  { key: "blue", name: "Windows blue", swatch: "#0067c0" },
+  { key: "graphite", name: "Graphite (no colour)", swatch: "#3f3f46" },
+  { key: "teal", name: "Teal", swatch: "#0f766e" },
+  { key: "indigo", name: "Indigo (today, for comparison)", swatch: "#4f46e5" },
+];
+
+// ---------------------------------------------------------------- in-memory state
+const params = new URLSearchParams(location.search);
+const S = {
+  variant: VARIANTS.some((v) => v.key === params.get("variant")) ? params.get("variant") : "mix",
+  theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+  view: { current: "home", a: "home", mix: "home", b: "feed", c: "history" },
+  accent: ACCENTS.some((a) => a.key === params.get("accent")) ? params.get("accent") : "blue",
+  q: "", filter: "all", copied: null, retrying: false, dismissed: false,
+  provider: "parakeet", model: "parakeet-v3", dl: null,
+  streaming: true, captions: true, dim: true, dimLevel: 30, compat: false, delay: 250,
+  vocab: "Parla\nParakeet\nTauri\nTraccia\nWispr Flow", hotkey: "Ctrl+Alt+Space", capturing: false,
+  apiKey: "", dirty: false, savedMsg: "", savedAt: 0,
+  sheet: false, timings: false, pop: false, selected: "r1", tray: "flyout",
+};
+const theVariant = () => VARIANTS.find((v) => v.key === S.variant);
+
+// ---------------------------------------------------------------- helpers
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const words = (t) => (t.trim() ? t.trim().split(/\s+/).length : 0);
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const full = (ms) => new Date(ms).toLocaleString();
+const ago = (ms) => { const m = Math.round((now - ms) / MIN); return m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
+function dayLabel(ms) {
+  const t = new Date(); const start = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  if (ms >= start) return "Today"; if (ms >= start - D) return "Yesterday";
+  return new Date(ms).toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+}
+const total = (r) => r.t.reduce((a, b) => a + (b ?? 0), 0);
+const medianTotal = () => { const t = RECORDS.filter((r) => !r.error).map(total).sort((a, b) => a - b); return t[Math.floor(t.length / 2)]; };
+const ok = (r) => !r.error;
+const newestFailed = () => RECORDS.find((r) => r.error);
+const retryable = (r) => r === newestFailed();
+const shown = () => {
+  const q = S.q.trim().toLowerCase();
+  return RECORDS.filter((r) => (S.filter === "failed" ? r.error : true) && (!q || (r.text || r.error).toLowerCase().includes(q)));
+};
+function byDay(list) {
+  const out = []; for (const r of list) { const d = dayLabel(r.at); if (!out.length || out[out.length - 1].day !== d) out.push({ day: d, items: [] }); out[out.length - 1].items.push(r); }
+  return out;
+}
+const kbd = (combo) => combo.split("+").map((k) => `<kbd>${esc(k)}</kbd>`).join('<span class="plus">+</span>');
+const modelName = () => MODELS.find((m) => m.id === S.model).name;
+const engine = () => (S.provider === "parakeet" ? `${modelName()} · local` : PNAME[S.provider]);
+const copyBtn = (r, cls = "small") => ok(r) ? `<button type="button" class="${cls} ${S.copied === r.id ? "copied" : ""}" data-action="copy" data-id="${r.id}">${S.copied === r.id ? "Copied" : "Copy"}</button>` : "";
+const retryBtn = (r, cls = "small danger") => (retryable(r) ? `<button type="button" class="${cls}" data-action="retry" ${S.retrying ? "disabled" : ""}>${S.retrying ? "Retrying…" : "Retry"}</button>` : "");
+const textOf = (r) => (ok(r) ? esc(r.text) : `Failed: ${esc(r.error)}`);
+const metaOf = (r) => [PNAME[r.provider], `${r.audio.toFixed(1)} s`, ok(r) ? `${words(r.text)} words` : null].filter(Boolean).join(" · ");
+const ICON = {
+  home: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 7.2 8 2.8l5.5 4.4V13a.6.6 0 0 1-.6.6H3.1a.6.6 0 0 1-.6-.6Z"/></svg>',
+  history: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h10M3 8h10M3 12h6"/></svg>',
+  timings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8.8" r="5"/><path d="M8 6v3l2 1.3M6.5 2.2h3"/></svg>',
+  mic: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.8" y="2" width="4.4" height="7.5" rx="2.2"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V14"/></svg>',
+  keys: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.8" y="4" width="12.4" height="8" rx="1.5"/><path d="M4.5 9.5h7M4.5 6.8h.01M7 6.8h.01M9.5 6.8h.01M12 6.8h.01"/></svg>',
+  speaker: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6.2h2.2L8.5 3.5v9L5.2 9.8H3Z"/><path d="M11 6a3 3 0 0 1 0 4"/></svg>',
+  book: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3h4a1.5 1.5 0 0 1 1.5 1.5V13A1.5 1.5 0 0 0 7 11.5H3Zm10 0H9.5A1.5 1.5 0 0 0 8 4.5"/><path d="M13 3v8.5H9.5"/></svg>',
+  clip: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="3" width="9" height="11" rx="1.3"/><path d="M6 3V2h4v1"/></svg>',
+  gear: '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg>',
+};
+const LOCK = '<svg viewBox="0 0 12 12" width="12" height="12"><rect x="2" y="5.25" width="8" height="5.5" rx="1.6" fill="currentColor"/><path d="M3.9 5.25V3.9a2.1 2.1 0 0 1 4.2 0v1.35" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const CHECK = '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M3.6 8.4l3 3 5.8-6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const CROSS = '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M4.8 4.8l6.4 6.4M11.2 4.8l-6.4 6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+const RETRY = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M13 8a5 5 0 1 1-1.6-3.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M12.6 1.6v3.3H9.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// ---------------------------------------------------------------- shared timing chart (A list, C single)
+const STAGES = [["ready", "Ready", "key-up → audio ready"], ["transcribe", "Transcribe", "audio → text back"], ["paste", "Paste", "text → pasted"]];
+function track(r, scale) {
+  return `<div class="track" style="width:${Math.max(4, (total(r) / scale) * 100)}%">${STAGES.map(([k, name], i) =>
+    `<div class="seg s-${k}" style="flex:${r.t[i]}" data-tip="${name}: ${r.t[i]} ms"></div>`).join("")}</div>`;
+}
+const legend = () => `<div class="legend">${STAGES.map(([k, n, d]) => `<span><i class="s-${k}"></i>${n} <span class="muted">(${d})</span></span>`).join("")}</div>`;
+
+// ---------------------------------------------------------------- overlay pill
+function pill(pv, phase, locked) {
+  return `<div class="pill pv-${pv}" data-phase="${phase}" data-locked="${locked}">
+    <div class="mode">${locked ? LOCK : '<span class="dot"></span>'}</div>
+    <div class="bars">${'<div class="bar"></div>'.repeat(9)}</div>
+    <span class="timer">0:12</span>
+    <div class="spinner"></div>
+    <button type="button" class="r-ok" tabindex="-1">${CHECK}</button>
+    <button type="button" class="r-err" title="Dismiss">${CROSS}</button>
+    <button type="button" class="retry" title="Retry transcription">${RETRY}</button>
+  </div>`;
+}
+const CAP = '<span class="st">Ok, allora domani mattina sentiamo il cliente alle dieci </span><span class="pv">e poi aggiorniamo il preventivo</span>';
+function pillPanel() {
+  const pv = S.variant === "b" ? "b" : S.variant === "c" ? "c" : "cur";
+  const cell = (label, phase, locked, extra = "") => `<div class="pcell"><span class="plabel">${label}</span><div class="ov">${extra}${pill(pv, phase, locked)}</div></div>`;
+  const reason = pv === "b" ? '<div class="reason-chip">Timed out · retry or dismiss</div>' : "";
+  const captions = pv === "c"
+    ? `<div class="ccard"><div class="txt">${CAP}</div>${pill(pv, "recording", false)}</div>`
+    : `<div class="captions">${CAP}</div>${pill(pv, "recording", false)}`;
+  const notes = {
+    cur: "Unchanged from today.",
+    b: "<b>Changes:</b> locked mode shows elapsed time (0:12); a failed pill says why in a chip above it (uses the existing caption area). Same window sizes.",
+    c: "<b>Changes:</b> no mode icon: hands-free shows as a lilac ring, done/failed as a green/red ring. Live captions grow out of the pill as one card instead of a separate box.",
+  };
+  const note = S.variant === "a" ? "Unchanged from today: A keeps the current pill." : S.variant === "mix" ? "Unchanged from today (Mattia's call). The accent colour does not reach the pill." : notes[pv];
+  return `<div class="col side">
+    <p class="panel-title">Overlay pill <span class="sub">— on any wallpaper</span></p>
+    <div class="pills">
+      ${cell("Holding", "recording", false)}
+      ${cell("Hands-free", "recording", true)}
+      ${cell("Transcribing", "processing", false)}
+      ${cell("Pasted", "done", false)}
+      <div class="pcell" style="grid-column: span 2"><span class="plabel">Failed</span><div class="ov">${reason}${pill(pv, "error", false)}</div></div>
+      <div class="pcell tall"><span class="plabel">Live captions on</span><div class="ov">${captions}</div></div>
+    </div>
+    <p class="side-note">${note}</p>
+  </div>`;
+}
+
+// ---------------------------------------------------------------- tray
+function trayPanel() {
+  const fail = !!newestFailed();
+  const item = (t, cls = "") => `<div class="mi ${cls}">${t}</div>`;
+  const sep = '<div class="sep"></div>';
+  const menus = {
+    current: [item("Open Parla"), item("Settings…"), item("History…"), item("Benchmark…"), item("Test mic (3 s)"), item("Retry last failed dictation", fail ? "" : "dis"), item("Quit")].join(""),
+    a: [item("Open Parla", "bold"), item("Settings…"), sep, item("Test mic (3 s)"), item("Retry last failed dictation", fail ? "" : "dis"), sep, item("Quit Parla")].join(""),
+    b: [item(`● Ready · ${engine()}`, "status dis"), sep, item("Open Parla", "bold"), item("Settings…"), fail ? item("Retry last failed dictation") : "", sep, item("Quit Parla")].join(""),
+    c: [item("Open Parla", "bold"), item("Settings…"), sep, item("Quit Parla")].join(""),
+  };
+  const notes = {
+    current: "Seven items; History and Benchmark open their own windows.",
+    a: "History, Timings and Benchmark live inside the app now, so the menu drops to the essentials. Bold default = what a double-click does.",
+    b: "First line is a disabled status row (engine + ready), so a right-click answers \"is it working?\". Retry only appears when there is something to retry.",
+    c: "",
+  };
+  menus.mix = menus.a;
+  if (S.variant === "c" || S.variant === "mix") {
+    const mix = S.variant === "mix";
+    // In the mix the flyout links into A's window views.
+    const go = mix
+      ? `<button type="button" data-action="view" data-view="history">History</button><button type="button" data-action="view" data-view="timings">Timings</button><span class="sp"></span><button type="button" data-action="note" data-note="Records 3 s and plays it back">Test mic</button><button type="button" data-action="view" data-view="s-transcription" title="Settings">${ICON.gear}</button>`
+      : `<button type="button" data-action="cview" data-view="history">History</button><button type="button" data-action="cview" data-view="stats">Stats</button><span class="sp"></span><button type="button" data-action="cview" data-view="settings">${ICON.gear}</button>`;
+    const recent = RECORDS.slice(0, 4);
+    const last = recent[0];
+    const flyout = `<div class="flyout">
+      <div class="fly-head"><span class="logo"></span><div><b>Parla</b><small><span class="okdot"></span>Ready · ${esc(engine())}</small></div><span class="keys">${kbd("Ctrl+Alt")}</span></div>
+      <div class="fly-body">
+        <div class="c-segp">${PROVIDERS.map((p) => `<button type="button" class="c-tab ${S.provider === p.id ? "on" : ""}" data-action="provider" data-id="${p.id}">${p.short}</button>`).join("")}</div>
+        <div class="fly-tiles">
+          <button type="button" class="ftile ${S.captions ? "on" : ""}" data-action="flip" data-key="captions">Live captions<small>${S.captions ? "On" : "Off"}</small></button>
+          <button type="button" class="ftile ${S.dim ? "on" : ""}" data-action="flip" data-key="dim">Dim audio<small>${S.dim ? `${S.dimLevel} %` : "Off"}</small></button>
+          <button type="button" class="ftile ${S.streaming ? "on" : ""}" data-action="flip" data-key="streaming">Live mode<small>${S.streaming ? "On" : "Off"}</small></button>
+        </div>
+        <div class="fly-last"><div class="mt"><span>Last dictation · ${ago(last.at)}</span><span>${PNAME[last.provider]}</span></div><p>${textOf(last)}</p>${copyBtn(last)}</div>
+        ${recent.slice(1).map((r) => `<div class="fly-mini ${ok(r) ? "" : "failed"}"><small>${clock(r.at)}</small><span>${textOf(r)}</span>${ok(r) ? copyBtn(r) : retryBtn(r)}</div>`).join("")}
+      </div>
+      <div class="fly-foot">${go}<button type="button" data-action="note" data-note="Quits Parla">Quit</button></div>
+    </div>`;
+    return `<div class="col side">
+      <p class="panel-title">Tray <span class="sub">— click the Parla icon:</span>
+        <button type="button" class="wchip ${S.tray === "flyout" ? "on" : ""}" data-action="tray" data-mode="flyout">left-click</button>
+        <button type="button" class="wchip ${S.tray === "menu" ? "on" : ""}" data-action="tray" data-mode="menu">right-click</button></p>
+      <div class="screen" style="height:560px">
+        ${S.tray === "flyout" ? flyout : `<div class="native-menu">${menus[S.variant]}</div>`}
+        ${taskbar()}
+      </div>
+      <p class="side-note">${S.tray === "flyout"
+        ? `Left-click opens this flyout (a small extra webview, created on demand and kept off the hotkey path). Provider and toggles apply at once; ${mix ? "History, Timings and ⚙ open the window on that page" : "History/Stats/⚙ open the window on that tab"}.`
+        : mix ? "Right-click keeps A's short native menu (Test mic and Retry stay reachable without opening anything)." : "Right-click keeps a native menu, now just three items."}</p>
+    </div>`;
+  }
+  return `<div class="col side">
+    <p class="panel-title">Tray menu <span class="sub">— right-click the Parla icon</span></p>
+    <div class="screen" style="height:${S.variant === "current" ? 290 : 250}px"><div class="native-menu">${menus[S.variant]}</div>${taskbar()}</div>
+    <p class="side-note">${notes[S.variant]}</p>
+  </div>`;
+}
+function taskbar() {
+  return `<div class="taskbar"><span class="ti">^</span><span class="ti parla" title="Parla tray icon (placeholder: PARLA-56 is redrawing it)"><i></i></span><span class="ti">📶</span><span class="ti">🔊</span><span class="clock">08:30<br>17/10/2026</span></div>`;
+}
+
+// ---------------------------------------------------------------- settings fragments
+const check = (key, label, hint) => `<div class="field"><label><input type="checkbox" id="f-${key}" data-key="${key}" ${S[key] ? "checked" : ""}/> ${label}</label>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
+const num = (key, label, hint, min, max, step) => `<div class="field"><label for="f-${key}">${label}</label><input type="number" id="f-${key}" data-bind="${key}" min="${min}" max="${max}" step="${step}" value="${S[key]}"/>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
+const providerRadios = () => `<div class="opt-list">${PROVIDERS.map((p) => `<label class="opt"><input type="radio" name="prov-${S.variant}" data-action="provider" data-id="${p.id}" ${S.provider === p.id ? "checked" : ""}/><span class="ob"><span class="on">${p.name}</span></span></label>`).join("")}</div>`;
+function modelRows() {
+  return `<div class="opt-list">${MODELS.map((m) => {
+    const st = S.dl && S.dl.id === m.id ? `Downloading ${S.dl.pct}%` : m.ok ? "Downloaded" : "Not downloaded";
+    return `<label class="opt"><input type="radio" name="model-${S.variant}" data-action="model" data-id="${m.id}" ${S.model === m.id ? "checked" : ""} ${m.ok ? "" : "disabled"}/><span class="ob"><span class="on">${m.name}</span><span class="om">${m.size} · ${st}</span></span>${!m.ok && !S.dl ? `<button type="button" class="small" data-action="download" data-id="${m.id}">Download</button>` : ""}</label>`;
+  }).join("")}</div>`;
+}
+function cloudFields() {
+  const p = S.provider;
+  const env = p === "openai" ? "OPENAI_API_KEY" : "XAI_API_KEY";
+  const model = p === "openai" ? "gpt-transcribe" : "grok-voice-transcribe-2.0";
+  return `<div class="field"><label for="f-apiKey">API key</label><div class="row2"><input type="password" id="f-apiKey" data-bind="apiKey" value="${esc(S.apiKey)}" placeholder="Not set (or set ${env})"/><button type="button">Show</button></div></div>
+    <div class="field"><label for="f-model">Model</label><input type="text" id="f-model" value="${model}"/></div>`;
+}
+const providerConfig = () => (S.provider === "parakeet" ? `<div class="field"><label>Local model</label>${modelRows()}</div>` : cloudFields());
+const hotkeyField = (hint = true) => `<div class="field"><label for="f-hotkey">Accelerator</label><div class="row2"><input type="text" id="f-hotkey" data-bind="hotkey" value="${esc(S.capturing ? "Press keys…" : S.hotkey)}"/><button type="button" data-action="capture">${S.capturing ? "Listening…" : "Record keys"}</button></div>${hint ? `<p class="hint">With two or more modifiers (default <code>Ctrl+Alt+Space</code>), holding just the modifiers is push-to-talk and tapping the full shortcut locks it hands-free. A shortcut like <code>Ctrl+Shift+F9</code> is tap to start, tap to stop.</p>` : ""}</div>`;
+const vocabField = () => `<div class="field"><label for="f-vocab">Names and terms</label><textarea id="f-vocab" data-bind="vocab" rows="5" spellcheck="false">${esc(S.vocab)}</textarea><p class="hint">One term per line, up to 100 terms. Hints for supported cloud models; they never rewrite your transcript.</p></div>`;
+
+// ================================================================ CURRENT
+function vCurrent() {
+  const v = S.view.current;
+  if (v === "latency") return { title: "Parla History", body: curLatency() };
+  if (v === "settings") return { title: "Parla", body: curSettings() };
+  return { title: "Parla", body: curHome() };
+}
+function curHome() {
+  const stat = (v, l, note = "", wide = false) => `<div class="cur-stat ${wide ? "wide" : ""}"><span class="stat-value">${v}</span><span class="stat-label">${l}</span>${note ? `<span class="stat-note">${note}</span>` : ""}</div>`;
+  return `<main class="cur-home">
+    <header class="cur-head"><h1>Parla</h1><nav class="cur-nav"><button type="button" data-action="view" data-view="settings">Settings</button><button type="button" data-action="note" data-note="Opens the separate Benchmark window">Benchmark</button><button type="button" data-action="view" data-view="latency">Latency log</button></nav></header>
+    <section class="cur-stats">${stat(STATS.words, "Words dictated")}${stat(STATS.dictations, "Dictations")}${stat(STATS.audio, "Audio time")}${stat(STATS.cost, "Total cost (est.)")}${stat(STATS.projected, "Projected per year (est.)", "vs $144 for Wispr Flow", true)}</section>
+    <section><div class="cur-list-head"><h2>History</h2><input id="q" type="search" placeholder="Search transcripts" value="${esc(S.q)}"/></div>
+    <ol class="cur-entries">${shown().map((r) => `<li class="cur-entry ${ok(r) ? "" : "failed"}"><div class="meta"><span>${full(r.at)}</span><span>${PNAME[r.provider]}</span><span>${r.audio.toFixed(1)} s</span>${ok(r) ? `<span>${words(r.text)} words</span>` : ""}</div><p class="text">${textOf(r)}</p>${retryBtn(r, "danger")}${copyBtn(r, "")}</li>`).join("")}</ol></section>
+  </main>`;
+}
+function curSettings() {
+  return `<main class="cur-set">
+    <header class="back-title"><button type="button" class="icon-btn" data-action="view" data-view="home" aria-label="Back">‹</button><h1>Settings</h1></header>
+    <p class="subtitle">Hold Ctrl+Alt to talk, or tap Ctrl+Alt+Space to lock it hands-free (press Ctrl+Alt to stop, Esc to cancel). The transcript is pasted into the focused app.</p>
+    <section class="card"><h2>Active provider</h2>${providerRadios()}<p class="hint">Switching provider takes effect right away, with no need to press Save. Save is for the settings below.</p></section>
+    <section class="card"><h2>${PNAME[S.provider]}</h2>${providerConfig()}</section>
+    <section class="card"><h2>Live dictation</h2>${check("streaming", "Transcribe while I speak", "Cloud dictations stream as you talk; the local model transcribes each phrase at your pauses, so only the last one is left when you stop.")}${check("captions", "Show live captions above the recording bar", "A discreet two-line preview. Your text box stays untouched until the final paste.")}</section>
+    <section class="card"><h2>Other audio</h2>${check("dim", "Dim other audio while dictating", "Music and other apps play quieter while you dictate, then return to their volume.")}${num("dimLevel", "Their volume while dictating (%)", "10–90 % of each app's own volume.", 10, 90, 10)}</section>
+    <section class="card"><h2>Vocabulary</h2>${vocabField()}</section>
+    <section class="card"><h2>Hotkey</h2>${hotkeyField()}</section>
+    <section class="card"><h2>Clipboard</h2>${check("compat", "Paste compatibility mode", "Use longer paste delays if an app misses or changes pasted text.")}${num("delay", "Restore delay (ms)", "How long Parla waits after pasting before restoring your previous clipboard (50–2000 ms).", 50, 2000, 50)}</section>
+    <div class="cur-actions"><span class="${S.dirty ? "status-dirty" : "status-success"}">${S.dirty ? "Unsaved changes" : S.savedMsg}</span><button type="button" class="primary" data-action="save">Save</button></div>
+    <p class="footer-hint">Settings are stored in the Parla app config folder. Close this window to keep Parla in the tray.</p>
+  </main>`;
+}
+function curLatency() {
+  return `<main class="cur-hist"><header><h1>History</h1><div><button type="button">Refresh</button><button type="button">Clear history…</button></div></header>
+    <table><thead><tr><th>Time</th><th>Provider</th><th class="num">Audio</th><th class="num">Ready</th><th class="num">Transcribe</th><th class="num">Paste</th><th class="num">Total</th><th>Transcript</th><th>Error</th></tr></thead>
+    <tbody>${RECORDS.map((r) => `<tr class="${ok(r) ? "" : "failed"}"><td>${full(r.at)}</td><td>${PNAME[r.provider]}</td><td class="num">${r.audio.toFixed(1)} s</td><td class="num">${r.t[0]} ms</td><td class="num">${r.t[1]} ms</td><td class="num">${r.t[2] ?? "—"}${r.t[2] ? " ms" : ""}</td><td class="num">${ok(r) ? total(r) + " ms" : "—"}</td><td><div class="clip">${esc(r.text)}</div></td><td>${esc(r.error ?? "")}</td></tr>`).join("")}</tbody></table></main>`;
+}
+
+// ================================================================ A · Sidebar app
+const A_PAGES = [
+  ["s-transcription", "Transcription", ICON.mic], ["s-dictation", "Dictation & hotkey", ICON.keys],
+  ["s-audio", "Other audio", ICON.speaker], ["s-vocab", "Vocabulary", ICON.book], ["s-clipboard", "Clipboard", ICON.clip],
+];
+function vA() {
+  const v = S.view[S.variant];
+  const nav = (id, label, icon, extra = "") => `<button type="button" class="a-nav ${v === id ? "on" : ""}" data-action="view" data-view="${id}">${icon}${label}${extra}</button>`;
+  const pages = { home: aHome, history: aHistory, timings: aTimings };
+  const body = pages[v] ? pages[v]() : aSettings(v);
+  return { title: "Parla", body: `<div class="a-shell">
+    <aside class="a-rail">
+      <div class="a-brand"><span class="logo"></span>Parla</div>
+      <div class="a-ready"><span class="okdot"></span>Ready · ${esc(S.provider === "parakeet" ? modelName() : PNAME[S.provider])}</div>
+      ${nav("home", "Home", ICON.home)}${nav("history", "History", ICON.history, `<span class="count">${RECORDS.length}</span>`)}${nav("timings", "Timings", ICON.timings)}
+      <div class="a-group">Settings</div>
+      ${A_PAGES.map(([id, l, i]) => nav(id, l, i)).join("")}
+      <div class="a-foot"><a data-action="note" data-note="Opens the Benchmark window (unchanged)">Benchmark ↗</a><span>v0.1.0</span></div>
+    </aside>
+    <section class="a-main">${body}</section></div>` };
+}
+function aRow(r) {
+  return `<li class="${ok(r) ? "" : "failed"}"><span class="tm">${clock(r.at)}</span><div><p class="tx">${textOf(r)}</p><div class="mt">${metaOf(r)}</div></div><div class="act">${retryBtn(r)}${copyBtn(r)}</div></li>`;
+}
+function aHome() {
+  const f = newestFailed();
+  return `<div class="a-page">
+    <div class="a-hero"><div class="how">
+      <div><span class="w">Push to talk</span>Hold ${kbd("Ctrl+Alt")}</div>
+      <div><span class="w">Hands-free</span>Tap ${kbd("Ctrl+Alt+Space")} <span class="muted">· ${kbd("Ctrl+Alt")} stops</span></div>
+      <div><span class="w">Cancel</span>${kbd("Esc")}</div></div>
+      <button type="button" data-action="note" data-note="Records 3 s and plays it back (same as the tray item)">Test mic</button></div>
+    ${f && !S.dismissed ? `<div class="banner"><span>Last dictation failed: ${esc(f.error)}.</span>${retryBtn(f)}<button type="button" class="small" data-action="dismiss">Dismiss</button></div>` : ""}
+    <div class="a-strip"><div><div class="v">${STATS.words}</div><div class="l">words dictated</div></div><div><div class="v">${STATS.dictations}</div><div class="l">dictations</div></div><div><div class="v">${STATS.audio}</div><div class="l">of audio</div></div><div><div class="v">${STATS.cost}</div><div class="l">spent · ≈ ${STATS.projected}/yr vs $144 Wispr</div></div></div>
+    <div class="sec-head"><h2>Recent</h2><a data-action="view" data-view="history">All history →</a></div>
+    <ul class="rows">${RECORDS.slice(0, 5).map(aRow).join("")}</ul>
+  </div>`;
+}
+function aHistory() {
+  const list = shown();
+  return `<div class="a-page"><h1>History</h1><p class="lede">${RECORDS.length} dictations kept on this PC.</p>
+    <div class="a-tools"><input id="q" type="search" placeholder="Search transcripts" value="${esc(S.q)}"/><div class="chips"><button type="button" class="chip ${S.filter === "all" ? "on" : ""}" data-action="filter" data-f="all">All</button><button type="button" class="chip ${S.filter === "failed" ? "on" : ""}" data-action="filter" data-f="failed">Failed</button></div></div>
+    ${list.length ? byDay(list).map((g) => `<div class="day">${g.day}</div><ul class="rows">${g.items.map(aRow).join("")}</ul>`).join("") : '<p class="muted">No transcripts match.</p>'}
+    <p class="hint" style="margin-top:18px"><button type="button" class="small danger">Clear history…</button></p></div>`;
+}
+function aTimings() {
+  const done = RECORDS.filter(ok);
+  const totals = done.map(total).sort((a, b) => a - b);
+  const med = totals[Math.floor(totals.length / 2)];
+  const scale = Math.max(...totals);
+  return `<div class="a-page wide"><h1>Timings</h1><p class="lede">Key-up to pasted, per dictation. Replaces the separate latency-log window.</p>
+    <div class="tiles"><div class="tile"><div class="v">${med}<small>ms</small></div><div class="l">median, key-up → pasted</div></div><div class="tile"><div class="v">${totals[0]}<small>ms</small></div><div class="l">fastest</div></div><div class="tile"><div class="v">${totals[totals.length - 1]}<small>ms</small></div><div class="l">slowest that succeeded</div></div></div>
+    ${legend()}
+    <div class="tchart">${RECORDS.map((r) => `<div class="trow"><span class="who">${clock(r.at)} · ${PNAME[r.provider]}</span>${ok(r) ? track(r, scale) : `<span class="fail">Failed after ${(r.t[1] / 1000).toFixed(1)} s · ${esc(r.error)}</span>`}<span class="tot">${ok(r) ? total(r) + " ms" : "—"}</span></div>`).join("")}</div>
+    <details style="margin-top:14px"><summary class="muted" style="cursor:pointer">Table view</summary>${curLatency().replace(/<header>.*?<\/header>/s, "")}</details></div>`;
+}
+function aSettings(v) {
+  const pages = {
+    "s-transcription": ["Transcription", "Which engine turns your voice into text. Switching applies right away.", `<section class="card"><h2>Provider</h2>${providerRadios()}</section><section class="card"><h2>${PNAME[S.provider]}</h2>${providerConfig()}</section>`],
+    "s-dictation": ["Dictation & hotkey", "How you start, lock and stop a dictation, and what you see while talking.", `<section class="card"><h2>Hotkey</h2>${hotkeyField()}</section><section class="card"><h2>While I speak</h2>${check("streaming", "Transcribe while I speak", "Cloud streams as you talk; the local model transcribes each phrase at your pauses.")}${check("captions", "Show live captions above the recording bar", "Two-line preview; your text box is untouched until the paste.")}</section>`],
+    "s-audio": ["Other audio", "Music and calls while you dictate.", `<section class="card">${check("dim", "Dim other audio while dictating", "Apps play quieter, then return to their volume. Nothing is paused.")}${num("dimLevel", "Their volume while dictating (%)", "10–90 %. 30 % sounds about half as loud.", 10, 90, 10)}</section>`],
+    "s-vocab": ["Vocabulary", "Names and terms you want recognised.", `<section class="card">${vocabField()}</section>`],
+    "s-clipboard": ["Clipboard", "How Parla pastes and restores your clipboard.", `<section class="card">${check("compat", "Paste compatibility mode", "Longer paste delays for apps that miss or change pasted text.")}${num("delay", "Restore delay (ms)", "50–2000 ms. Raise it if a slow app pastes the old clipboard.", 50, 2000, 50)}</section>`],
+  };
+  const [title, lede, body] = pages[v];
+  return `<div class="a-page"><h1>${title}</h1><p class="lede">${lede}</p>${body}</div>
+    ${S.dirty || S.savedMsg ? `<div class="savebar"><span>${S.dirty ? "Unsaved changes" : `<span class="status-success">${S.savedMsg}</span>`}</span>${S.dirty ? `<button type="button" data-action="discard">Discard</button><button type="button" class="primary" data-action="save">Save</button>` : ""}</div>` : ""}`;
+}
+
+// ================================================================ B · Quiet feed
+function vB() {
+  const list = shown();
+  const feed = list.length ? byDay(list).map((g) => `<div class="day">${g.day}</div>${g.items.map(bItem).join("")}`).join("") : '<p class="muted" style="margin-top:20px">No transcripts match.</p>';
+  const pop = S.pop ? `<div class="b-pop">${PROVIDERS.map((p) => `<div class="pi" data-action="provider" data-id="${p.id}"><span class="ck">${S.provider === p.id ? "✓" : ""}</span>${p.name}<small>${p.kind}</small></div>${p.id === "parakeet" && S.provider === "parakeet" ? MODELS.map((m) => `<div class="pi sub" data-action="model" data-id="${m.id}"><span class="ck">${S.model === m.id ? "•" : ""}</span>${m.name}<small>${m.ok ? m.size : "download"}</small></div>`).join("") : ""}`).join("")}<hr/><div class="pi" data-action="sheet"><span class="ck"></span>More settings…</div></div>` : "";
+  return { title: "Parla", body: `<div class="b-wrap">
+    <header class="b-top"><h1>Parla</h1><button type="button" class="b-chip" data-action="pop"><span class="okdot"></span>${esc(engine())} ▾</button><span class="sp"></span>
+      <button type="button" class="ghost small ${S.timings ? "on" : ""}" data-action="timings">${ICON.timings.replace("<svg", '<svg width="14" height="14" style="vertical-align:-2px;margin-right:4px"')}Timings</button>
+      <button type="button" class="ghost small" data-action="sheet">${ICON.gear.replace("<svg", '<svg style="vertical-align:-3px;margin-right:4px"')}Settings</button></header>
+    ${pop}
+    <p class="b-hint"><span>Hold ${kbd("Ctrl+Alt")} to talk</span><span>${kbd("Ctrl+Alt+Space")} hands-free</span><span>${kbd("Esc")} cancels</span></p>
+    <p class="b-stats"><b>${STATS.words}</b> words in <b>${STATS.dictations}</b> dictations · <b>${STATS.audio}</b> of audio · <b>${STATS.cost}</b> so far, about ${STATS.projected} a year (Wispr Flow: $144)</p>
+    ${S.timings ? `<div class="legend">${STAGES.map(([k, n]) => `<span><i class="s-${k}"></i>${n}</span>`).join("")}<span class="muted">ms, key-up → pasted</span></div>` : ""}
+    <input id="q" class="b-search" type="search" placeholder="Search everything you've said" value="${esc(S.q)}"/>
+    <div class="b-feed">${feed}</div></div>
+    ${S.sheet ? `<div class="scrim" data-action="sheet"></div>${bSheet()}` : ""}` };
+}
+function bItem(r) {
+  const chips = S.timings ? (ok(r)
+    ? `<span class="tchips">${STAGES.map(([k, n], i) => `<span title="${n}"><i class="s-${k}"></i>${r.t[i]}</span>`).join("")}<span class="t">${total(r)} ms</span></span>`
+    : `<span class="tchips"><span>gave up after ${(r.t[1] / 1000).toFixed(0)} s</span></span>`) : "";
+  return `<div class="b-item ${ok(r) ? "" : "failed"}"><span class="tm">${clock(r.at)}</span><div><p class="tx">${ok(r) ? esc(r.text) : `Couldn't transcribe: ${esc(r.error)}`}</p><div class="mt"><span>${metaOf(r)}</span>${chips}${ok(r) ? "" : retryBtn(r)}</div></div>${ok(r) ? `<div class="hov">${copyBtn(r)}</div>` : ""}</div>`;
+}
+function bSheet() {
+  const sw = (key) => `<input type="checkbox" class="sw" id="b-${key}" data-key="${key}" ${S[key] ? "checked" : ""}/>`;
+  const row = (title, sub, ctrl, cls = "") => `<div class="srow ${cls}"><div class="sl"><b>${title}</b>${sub ? `<small>${sub}</small>` : ""}</div>${ctrl}</div>`;
+  const prov = PROVIDERS.map((p) => `<label class="srow radio"><input type="radio" name="b-prov" data-action="provider" data-id="${p.id}" ${S.provider === p.id ? "checked" : ""}/><div class="sl"><b>${p.name}</b><small>${p.kind === "local" ? "On this PC, no network, no cost" : "Needs an API key; billed per minute"}</small></div></label>`
+    + (p.id === "parakeet" && S.provider === "parakeet" ? MODELS.map((m) => row(m.name, `${m.size} · ${S.dl && S.dl.id === m.id ? `downloading ${S.dl.pct}%` : m.ok ? "downloaded" : "not downloaded"}`, m.ok ? `<input type="radio" name="b-model" data-action="model" data-id="${m.id}" ${S.model === m.id ? "checked" : ""}/>` : S.dl ? "" : `<button type="button" class="small" data-action="download" data-id="${m.id}">Download</button>`, "indent")).join("") : "")
+    + (p.id === S.provider && p.kind === "cloud" ? row("API key", p.id === "openai" ? "or set OPENAI_API_KEY" : "or set XAI_API_KEY", `<input type="password" id="b-apiKey" data-bind="apiKey" value="${esc(S.apiKey)}" placeholder="Not set"/>`, "indent") : "")).join("");
+  return `<aside class="sheet" role="dialog" aria-label="Settings">
+    <div class="sheet-head"><h2>Settings</h2><span class="saved status-success">${Date.now() - S.savedAt < 1500 ? "✓ Saved" : ""}</span><button type="button" class="ghost icon-btn" data-action="sheet" aria-label="Close">✕</button></div>
+    <div class="sgroup"><h3>Transcription</h3><div class="sbox">${prov}</div></div>
+    <div class="sgroup"><h3>While dictating</h3><div class="sbox">
+      ${row("Transcribe while I speak", "Only the last phrase is left when you stop", sw("streaming"))}
+      ${row("Live captions", "Two-line preview above the pill", sw("captions"))}
+      ${row("Dim other audio", "Apps get quieter, nothing is paused", sw("dim"))}
+      ${S.dim ? row("Their volume", "", `<input type="range" id="b-dimLevel" data-bind="dimLevel" min="10" max="90" step="10" value="${S.dimLevel}"/><span class="val">${S.dimLevel} %</span>`, "indent") : ""}
+    </div></div>
+    <div class="sgroup"><h3>Hotkey</h3><div class="sbox">
+      ${row("Push to talk / hands-free", "Hold the modifiers to talk; tap the full shortcut to lock", `<span>${S.capturing ? "<span class='muted'>Press keys…</span>" : kbd(S.hotkey)}</span><button type="button" class="small" data-action="capture">${S.capturing ? "Cancel" : "Change"}</button>`)}
+    </div></div>
+    <div class="sgroup"><h3>Vocabulary</h3><div class="sbox"><div class="srow" style="display:block"><textarea id="b-vocab" data-bind="vocab" spellcheck="false">${esc(S.vocab)}</textarea><small class="muted">One per line. Hints for cloud models; never rewrites your text.</small></div></div></div>
+    <div class="sgroup"><h3>Paste</h3><div class="sbox">
+      ${row("Compatibility mode", "Longer delays for apps that miss pasted text", sw("compat"))}
+      ${row("Restore clipboard after", "50–2000 ms", `<input type="number" id="b-delay" data-bind="delay" min="50" max="2000" step="50" value="${S.delay}"/>`)}
+    </div></div>
+    <div class="sheet-foot"><span>Changes save as you make them.</span><a data-action="note" data-note="Opens the Benchmark window (unchanged)">Benchmark ↗</a></div>
+  </aside>`;
+}
+
+// ================================================================ C · Tray flyout + master-detail
+function vC() {
+  const v = S.view.c;
+  const tab = (id, l) => `<button type="button" class="c-tab ${v === id ? "on" : ""}" data-action="cview" data-view="${id}">${l}</button>`;
+  const body = v === "stats" ? cStats() : v === "settings" ? cSettings() : cHistory();
+  return { title: "Parla", body: `<nav class="c-tabs"><div class="c-seg">${tab("history", "History")}${tab("stats", "Stats")}${tab("settings", "Settings")}</div>
+    <span class="st"><span><span class="okdot"></span>Ready · ${esc(engine())}</span><span>${kbd("Ctrl+Alt")}</span></span></nav>${body}` };
+}
+function cHistory() {
+  const list = shown();
+  const sel = RECORDS.find((r) => r.id === S.selected) || RECORDS[0];
+  const items = byDay(list).map((g) => `<div class="day">${g.day}</div>${g.items.map((r) => `<div class="c-li ${r.id === sel.id ? "on" : ""} ${ok(r) ? "" : "failed"}" data-action="select" data-id="${r.id}"><div class="l1"><span>${clock(r.at)}</span><span class="p">${PNAME[r.provider]}</span></div><div class="l2">${textOf(r)}</div></div>`).join("")}`).join("");
+  const scale = total(sel);
+  const detail = ok(sel)
+    ? `<div class="bd-title">Where the ${total(sel)} ms went</div><div class="bd">${track(sel, scale)}</div><div class="bd-labels">${STAGES.map(([k, n], i) => `<span><i class="s-${k}"></i>${n} ${sel.t[i]} ms</span>`).join("")}</div>`
+    : `<div class="bd-title">What happened</div><p class="muted" style="margin:0">Audio was ready after ${sel.t[0]} ms; ${PNAME[sel.provider]} did not answer within 15 s. The clip is kept, so Retry sends it again.</p>`;
+  return `<div class="c-md"><div class="c-list"><div class="srch"><input id="q" type="search" placeholder="Search" value="${esc(S.q)}"/></div>${items || '<p class="muted" style="padding:0 14px">No match.</p>'}</div>
+    <div class="c-detail"><div class="when">${full(sel.at)}</div><div class="big ${ok(sel) ? "" : "err"}">${textOf(sel)}</div>
+      <div class="acts">${ok(sel) ? copyBtn(sel, "primary") : retryBtn(sel, "primary")}${ok(sel) ? "" : '<button type="button">Dismiss</button>'}</div>
+      <div class="kv"><div><b>${PNAME[sel.provider]}</b><small>provider</small></div><div><b>${sel.audio.toFixed(1)} s</b><small>audio</small></div><div><b>${ok(sel) ? words(sel.text) : "—"}</b><small>words</small></div><div><b>${ok(sel) ? total(sel) + " ms" : "—"}</b><small>key-up → pasted</small></div></div>
+      ${detail}</div></div>`;
+}
+function cStats() {
+  const t = (v, l) => `<div class="bigtile"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+  return `<div class="c-stats">${t(STATS.words, "words dictated")}${t(STATS.dictations, "dictations")}${t(STATS.audio, "of audio")}${t(`${medianTotal()} ms`, "median key-up → pasted")}
+    <div class="bigtile wide"><div><div class="v">${STATS.cost}</div><div class="l">spent so far (est.)</div></div><div><div class="v">${STATS.projected}</div><div class="l">projected per year · Wispr Flow is $144</div></div></div></div>`;
+}
+function cSettings() {
+  const sw = (key) => `<input type="checkbox" class="sw" id="c-${key}" data-key="${key}" ${S[key] ? "checked" : ""}/>`;
+  const r = (label, ctrl, sub = "") => `<div class="r"><span>${label}${sub ? `<br><small>${sub}</small>` : ""}</span>${ctrl}</div>`;
+  const models = S.provider === "parakeet" ? MODELS.map((m) => `<label class="c-model"><input type="radio" name="c-model" data-action="model" data-id="${m.id}" ${S.model === m.id ? "checked" : ""} ${m.ok ? "" : "disabled"}/><span>${m.name}</span><small>${m.size} · ${S.dl && S.dl.id === m.id ? `${S.dl.pct}%` : m.ok ? "ready" : ""}</small>${!m.ok && !S.dl ? `<button type="button" class="small" data-action="download" data-id="${m.id}">Download</button>` : ""}</label>`).join("")
+    : `<div class="field" style="margin-top:6px"><input type="password" id="c-apiKey" data-bind="apiKey" placeholder="API key (or env var)" value="${esc(S.apiKey)}" style="width:100%;background:var(--bg)"/></div>`;
+  return `<div class="c-grid">
+    <div class="c-card"><h3>Transcription</h3><div class="c-segp">${PROVIDERS.map((p) => `<button type="button" class="c-tab ${S.provider === p.id ? "on" : ""}" data-action="provider" data-id="${p.id}">${p.short}</button>`).join("")}</div>${models}</div>
+    <div class="c-card"><h3>Hotkey</h3>${r("Talk / hands-free", `<span>${S.capturing ? "<span class='muted'>Press keys…</span>" : kbd(S.hotkey)}</span>`)}<div class="r"><span class="muted" style="font-size:0.8rem">Hold modifiers to talk, tap all to lock, Esc cancels.</span><button type="button" class="small" data-action="capture">${S.capturing ? "Cancel" : "Change"}</button></div></div>
+    <div class="c-card"><h3>While dictating</h3>${r("Transcribe while I speak", sw("streaming"))}${r("Live captions", sw("captions"))}${r("Dim other audio", sw("dim"))}${S.dim ? r("Their volume", `<input type="number" id="c-dimLevel" data-bind="dimLevel" min="10" max="90" step="10" value="${S.dimLevel}"/>`, "10–90 %") : ""}</div>
+    <div class="c-card"><h3>Paste</h3>${r("Compatibility mode", sw("compat"), "for apps that miss pasted text")}${r("Restore clipboard after", `<input type="number" id="c-delay" data-bind="delay" min="50" max="2000" step="50" value="${S.delay}"/>`, "ms")}</div>
+    <div class="c-card span2"><h3>Vocabulary</h3><textarea id="c-vocab" data-bind="vocab" spellcheck="false">${esc(S.vocab)}</textarea><p class="hint">One per line. Hints for cloud models; never rewrites your text. ${Date.now() - S.savedAt < 1500 ? '<span class="status-success">✓ Saved</span>' : "Saves as you type."}</p></div>
+  </div>`;
+}
+
+// ---------------------------------------------------------------- render
+const zoomFit = () => Math.min(1, (innerWidth - 48) / 900);
+function render() {
+  const focus = document.activeElement && document.activeElement.id ? { id: document.activeElement.id, a: document.activeElement.selectionStart, b: document.activeElement.selectionEnd } : null;
+  document.documentElement.dataset.theme = S.theme;
+  document.documentElement.dataset.accent = S.accent;
+  document.getElementById("accents").innerHTML = ACCENTS.map((a) => `<button type="button" class="sw-acc ${S.accent === a.key ? "on" : ""}" data-accent="${a.key}" title="${a.name}" style="--c:${a.swatch}"></button>`).join("") + `<span class="accname">${ACCENTS.find((a) => a.key === S.accent).name}</span>`;
+  const view = { current: vCurrent, a: vA, mix: vA, b: vB, c: vC }[S.variant]();
+  const chips = S.variant === "current"
+    ? `<div class="wchips"><button type="button" class="wchip ${S.view.current !== "latency" ? "on" : ""}" data-action="view" data-view="home">Parla · app.html</button><button type="button" class="wchip ${S.view.current === "latency" ? "on" : ""}" data-action="view" data-view="latency">Parla History · history.html</button></div>`
+    : `<div class="wchips"><span class="wchip on">Parla · one window</span></div>`;
+  document.getElementById("root").innerHTML = `<div class="stage" style="--zoom:${zoomFit()}">
+    <div class="col"><p class="panel-title">App window <span class="sub">— 900 × 680, as opened from the tray</span></p>${chips}
+      <div class="win"><div class="titlebar"><span class="appico"></span>${view.title}<span class="caps"><span>—</span><span>☐</span><span>✕</span></span></div><div class="win-body">${view.body}</div></div></div>
+    ${trayPanel()}${pillPanel()}</div>`;
+  const v = theVariant();
+  document.getElementById("vlabel").innerHTML = `<b>${VARIANTS.indexOf(v) + 1}/${VARIANTS.length} · ${v.key.toUpperCase()}</b> (${v.name})<small>${v.idea}</small>`;
+  if (focus) {
+    const el = document.getElementById(focus.id);
+    if (el) { el.focus(); try { el.setSelectionRange(focus.a, focus.b); } catch { /* not a text input */ } }
+  }
+}
+
+// ---------------------------------------------------------------- interaction
+function toast(msg) {
+  const t = document.getElementById("toast"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => (t.hidden = true), 1800);
+}
+const usesSaveButton = () => ["current", "a", "mix"].includes(S.variant);
+function changed() {
+  if (usesSaveButton()) { S.dirty = true; S.savedMsg = ""; }
+  else { S.savedAt = Date.now(); setTimeout(render, 1600); }
+}
+function setVariant(key) {
+  S.variant = key; S.pop = false; S.q = ""; S.filter = "all";
+  const u = new URL(location.href); u.searchParams.set("variant", key); history.replaceState(null, "", u);
+  render();
+}
+function cycle(step) { const i = VARIANTS.findIndex((v) => v.key === S.variant); setVariant(VARIANTS[(i + step + VARIANTS.length) % VARIANTS.length].key); }
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-action]"); if (!el) return;
+  const a = el.dataset.action, id = el.dataset.id;
+  if (a === "view") { S.view[S.variant] = el.dataset.view; S.q = ""; S.filter = "all"; }
+  else if (a === "cview") { S.view.c = el.dataset.view; }
+  else if (a === "copy") { S.copied = id; setTimeout(() => { S.copied = null; render(); }, 1400); }
+  else if (a === "retry") {
+    S.retrying = true;
+    setTimeout(() => { const f = newestFailed(); if (f) { f.text = "Per la demo di venerdì serve il build firmato, non quello di debug."; f.error = null; f.t = [44, 287, 31]; } S.retrying = false; render(); }, 1100);
+  }
+  else if (a === "dismiss") S.dismissed = true;
+  else if (a === "provider") { S.provider = id; S.pop = false; toast(`Switched to ${PNAME[id]} (applies at once)`); }
+  else if (a === "model") { if (!MODELS.find((m) => m.id === id).ok) return; S.model = id; S.pop = false; }
+  else if (a === "download") {
+    e.preventDefault(); S.dl = { id, pct: 0 };
+    const tick = setInterval(() => { S.dl.pct += 10; if (S.dl.pct >= 100) { clearInterval(tick); MODELS.find((m) => m.id === id).ok = true; S.dl = null; } render(); }, 180);
+  }
+  else if (a === "capture") {
+    S.capturing = !S.capturing;
+    if (S.capturing) setTimeout(() => { if (S.capturing) { S.capturing = false; S.hotkey = "Ctrl+Shift+F9"; changed(); render(); } }, 1600);
+  }
+  else if (a === "save") { S.dirty = false; S.savedMsg = "Saved"; setTimeout(() => { S.savedMsg = ""; render(); }, 1600); }
+  else if (a === "discard") { S.dirty = false; }
+  else if (a === "sheet") { S.sheet = !S.sheet; S.pop = false; }
+  else if (a === "pop") S.pop = !S.pop;
+  else if (a === "timings") S.timings = !S.timings;
+  else if (a === "filter") S.filter = el.dataset.f;
+  else if (a === "select") S.selected = id;
+  else if (a === "tray") S.tray = el.dataset.mode;
+  else if (a === "flip") { S[el.dataset.key] = !S[el.dataset.key]; }
+  else if (a === "note") { toast(el.dataset.note); return; }
+  render();
+});
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (el.dataset.key && el.type === "checkbox") { S[el.dataset.key] = el.checked; changed(); render(); }
+});
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (el.id === "q") { S.q = el.value; render(); return; }
+  // Re-rendering mid-drag would drop the slider; update its readout in place.
+  if (el.type === "range") { S[el.dataset.bind] = Number(el.value); el.nextElementSibling.textContent = `${el.value} %`; S.savedAt = Date.now(); return; }
+  if (el.dataset.bind) { S[el.dataset.bind] = el.type === "number" || el.type === "range" ? Number(el.value) : el.value; changed(); render(); }
+});
+document.addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t.closest && (t.closest("input, textarea, select, [contenteditable]"))) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  else if (e.key === "ArrowRight") cycle(1);
+  else if (e.key === "Escape" && (S.sheet || S.pop)) { S.sheet = false; S.pop = false; render(); }
+});
+document.addEventListener("mouseover", (e) => {
+  const tip = document.getElementById("tip"); const seg = e.target.closest("[data-tip]");
+  if (!seg) { tip.hidden = true; return; }
+  tip.textContent = seg.dataset.tip; tip.hidden = false;
+  const r = seg.getBoundingClientRect(); tip.style.left = `${r.left}px`; tip.style.top = `${r.top - 34}px`;
+});
+document.getElementById("prev").onclick = () => cycle(-1);
+document.getElementById("next").onclick = () => cycle(1);
+document.getElementById("accents").onclick = (e) => {
+  const b = e.target.closest("[data-accent]"); if (!b) return;
+  S.accent = b.dataset.accent;
+  const u = new URL(location.href); u.searchParams.set("accent", S.accent); history.replaceState(null, "", u);
+  render();
+};
+document.getElementById("theme").onclick = () => { S.theme = S.theme === "dark" ? "light" : "dark"; render(); };
+addEventListener("resize", render);
+render();
+</script>
+</body>
+</html>

@@ -7,169 +7,244 @@
     <script type="module" src="/src/app.ts"></script>
   </head>
   <body>
-    <main id="view-home">
-      <header class="app-head">
-        <h1>Parla</h1>
-        <nav class="nav-actions" aria-label="Windows">
-          <button type="button" id="open-settings">Settings</button>
-          <button type="button" data-open="bench">Benchmark</button>
-          <button type="button" data-open="history">Latency log</button>
-        </nav>
-      </header>
-
-      <section class="stats" aria-label="Totals">
-        <div class="stat">
-          <span class="stat-value" id="stat-words">0</span>
-          <span class="stat-label">Words dictated</span>
-        </div>
-        <div class="stat">
-          <span class="stat-value" id="stat-dictations">0</span>
-          <span class="stat-label">Dictations</span>
-        </div>
-        <div class="stat">
-          <span class="stat-value" id="stat-audio">0 m</span>
-          <span class="stat-label">Audio time</span>
-        </div>
-        <div class="stat">
-          <span class="stat-value" id="stat-cost">$0.00</span>
-          <span class="stat-label">Total cost (est.)</span>
-          <span class="stat-note" id="stat-cost-note" hidden></span>
-        </div>
-        <div class="stat stat-wide">
-          <span class="stat-value" id="stat-projected">—</span>
-          <span class="stat-label">Projected per year (est.)</span>
-          <span class="stat-note" id="stat-projected-note">vs $144 for Wispr Flow</span>
-        </div>
-      </section>
-
-      <section aria-labelledby="history-title">
-        <div class="list-head">
-          <h2 id="history-title">History</h2>
-          <input id="search" type="search" placeholder="Search transcripts" autocomplete="off" spellcheck="false" />
-        </div>
-        <p id="empty" class="status" hidden>No dictations yet. Hold Ctrl+Alt and speak.</p>
-        <ol id="list" class="entries"></ol>
-        <div class="more">
-          <button type="button" id="more" hidden>Show older</button>
-        </div>
-      </section>
-    </main>
-    <main id="view-settings" hidden>
-      <header class="app-head">
-        <div class="back-title">
-          <button type="button" id="back" class="icon-button" aria-label="Back to home">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-              <path d="M10 3.5L5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
+    <div class="shell">
+      <aside class="rail">
+        <div class="brand"><span class="logo" aria-hidden="true"></span>Parla</div>
+        <p class="ready" id="ready" role="status"><span class="ready-dot" aria-hidden="true"></span><span id="ready-text">Loading…</span></p>
+        <nav class="nav" aria-label="Parla">
+          <button type="button" data-page="home">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 7.2 8 2.8l5.5 4.4V13a.6.6 0 0 1-.6.6H3.1a.6.6 0 0 1-.6-.6Z"/></svg>Home
           </button>
-          <h1>Settings</h1>
+          <button type="button" data-page="history">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h6"/></svg>History<span class="count" id="history-count"></span>
+          </button>
+          <button type="button" data-page="timings">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8.8" r="5"/><path d="M8 6v3l2 1.3M6.5 2.2h3"/></svg>Timings
+          </button>
+          <p class="nav-group">Settings</p>
+          <button type="button" data-page="transcription">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.8" y="2" width="4.4" height="7.5" rx="2.2"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V14"/></svg>Transcription
+          </button>
+          <button type="button" data-page="dictation">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="4" width="12.4" height="8" rx="1.5"/><path d="M4.5 9.5h7M4.5 6.8h.01M7 6.8h.01M9.5 6.8h.01M12 6.8h.01"/></svg>Dictation &amp; hotkey
+          </button>
+          <button type="button" data-page="audio">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.2h2.2L8.5 3.5v9L5.2 9.8H3Z"/><path d="M11 6a3 3 0 0 1 0 4"/></svg>Other audio
+          </button>
+          <button type="button" data-page="vocabulary">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h4a1.5 1.5 0 0 1 1.5 1.5V13A1.5 1.5 0 0 0 7 11.5H3Zm10 0H9.5A1.5 1.5 0 0 0 8 4.5"/><path d="M13 3v8.5H9.5"/></svg>Vocabulary
+          </button>
+          <button type="button" data-page="clipboard">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3" width="9" height="11" rx="1.3"/><path d="M6 3V2h4v1"/></svg>Clipboard
+          </button>
+        </nav>
+        <div class="rail-foot">
+          <button type="button" class="link" data-open="bench">Benchmark ↗</button>
+          <span id="version"></span>
         </div>
-      </header>
-      <p class="subtitle">
-        Hold Ctrl+Alt to talk, or tap Ctrl+Alt+Space to lock it hands-free (press Ctrl+Alt to stop, Esc to cancel). The transcript is pasted into the focused app.
-      </p>
+      </aside>
 
-
-      <p id="load-error" class="banner banner-error" hidden></p>
-
-      <form id="settings-form">
-        <section class="card">
-          <h2>Active provider</h2>
-          <div id="providers" class="provider-list" role="radiogroup" aria-label="Active provider"></div>
-          <p id="provider-status" class="status provider-status" role="status" aria-live="polite"></p>
-          <p class="hint">Switching provider takes effect right away, with no need to press Save. Save is for the settings below.</p>
-        </section>
-
-        <div id="provider-config"></div>
-
-        <section class="card">
-          <h2>Live dictation</h2>
-          <div class="field">
-            <label><input id="streaming-enabled" type="checkbox" /> Transcribe while I speak</label>
-            <p class="hint">Cloud dictations stream as you talk; the local model transcribes each phrase at your pauses, so only the last one is left when you stop. Parla then pastes the complete transcript. If this fails, Parla uses the saved recording.</p>
+      <main class="main" id="main">
+        <section class="page" id="page-home" aria-label="Home">
+          <div class="hero">
+            <dl class="how" id="how"></dl>
+            <button type="button" id="test-mic" title="Records 3 s from the default microphone and shows the clip in Explorer">Test mic</button>
           </div>
-          <div class="field">
-            <label><input id="live-captions" type="checkbox" /> Show live captions above the recording bar</label>
-            <p class="hint">A discreet two-line preview. Your text box stays untouched until the final paste. With the local model, captions update phrase by phrase.</p>
+          <div class="banner banner-error" id="failure" role="alert" hidden>
+            <span id="failure-text"></span>
+            <button type="button" class="small danger" id="failure-retry">Retry</button>
+            <button type="button" class="small" id="failure-dismiss">Dismiss</button>
           </div>
-        </section>
-
-        <section class="card">
-          <h2>Other audio</h2>
-          <div class="field">
-            <label><input id="dim-audio" type="checkbox" /> Dim other audio while dictating</label>
-            <p class="hint">Music and other apps play quieter while you dictate, then return to their volume. Nothing is paused.</p>
-          </div>
-          <div class="field">
-            <label for="dim-level">Their volume while dictating (%)</label>
-            <input id="dim-level" type="number" min="10" max="90" step="10" inputmode="numeric" />
-            <p class="hint">10–90 % of each app's own volume. 30 % sounds about half as loud as you set it.</p>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2>Vocabulary</h2>
-          <div class="field">
-            <label for="vocabulary">Names and terms</label>
-            <textarea id="vocabulary" rows="5" spellcheck="false" aria-describedby="vocabulary-hint"></textarea>
-            <p id="vocabulary-hint" class="hint">One term per line, up to 100 terms of 50 characters. Optional recognition hints for supported cloud models. Italian and English are recognized automatically; hints do not rewrite your transcript.</p>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2>Hotkey</h2>
-          <div class="field">
-            <label for="hotkey">Accelerator</label>
-            <div class="hotkey-row">
-              <input
-                id="hotkey"
-                type="text"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="Ctrl+Alt+Space"
-                aria-describedby="hotkey-hint"
-              />
-              <button type="button" id="capture" class="secondary">Record keys</button>
+          <div class="strip" aria-label="Totals">
+            <div><span class="v" id="stat-words">0</span><span class="l">words dictated</span></div>
+            <div><span class="v" id="stat-dictations">0</span><span class="l">dictations</span></div>
+            <div><span class="v" id="stat-audio">0 m</span><span class="l">of audio</span></div>
+            <div>
+              <span class="v" id="stat-cost">$0.00</span>
+              <span class="l">spent (est.) · <span id="stat-projected"></span></span>
+              <span class="l" id="stat-cost-note" hidden></span>
             </div>
-            <p id="capture-hint" class="hint capture-hint" role="status" aria-live="polite" hidden></p>
-            <p id="hotkey-hint" class="hint">
-              With two or more modifiers (default <code>Ctrl+Alt+Space</code>), holding just the modifiers is push-to-talk and
-              tapping the full shortcut locks it hands-free (press the modifiers again to stop). A shortcut like <code>Ctrl+Shift+F9</code> is
-              tap to start, tap to stop. Press “Record keys”, then
-              hold the combination you want (Esc cancels). Rebinding takes effect immediately on save.
-            </p>
+          </div>
+          <div class="sec-head">
+            <h2>Recent</h2>
+            <button type="button" class="link" data-page="history">All history →</button>
+          </div>
+          <p class="status" id="recent-empty" hidden>No dictations yet. Use the shortcut above to start one.</p>
+          <ul class="rows" id="recent"></ul>
+        </section>
+
+        <section class="page" id="page-history" aria-labelledby="history-title" hidden>
+          <h1 id="history-title">History</h1>
+          <p class="lede" id="history-lede"></p>
+          <div class="tools">
+            <input id="search" type="search" placeholder="Search transcripts" autocomplete="off" spellcheck="false" aria-label="Search transcripts" />
+            <div class="chips" role="group" aria-label="Show">
+              <button type="button" class="chip" data-filter="all" aria-pressed="true">All</button>
+              <button type="button" class="chip" data-filter="failed" aria-pressed="false">Failed</button>
+            </div>
+          </div>
+          <p id="empty" class="status" hidden></p>
+          <div id="days"></div>
+          <div class="more"><button type="button" id="more" hidden>Show older</button></div>
+          <div class="clear-row">
+            <button type="button" class="small danger" id="clear">Clear history…</button>
+            <span class="confirm" id="confirm" hidden>
+              Clear all history? This cannot be undone.
+              <button type="button" class="small danger" id="confirm-clear">Clear</button>
+              <button type="button" class="small" id="cancel-clear">Cancel</button>
+            </span>
+            <span class="status" id="clear-status" role="status"></span>
           </div>
         </section>
 
-        <section class="card">
-          <h2>Clipboard</h2>
-          <div class="field">
-            <label><input id="paste-compatibility" type="checkbox" /> Paste compatibility mode</label>
-            <p class="hint">Use longer paste delays if an app misses or changes pasted text.</p>
+        <section class="page wide" id="page-timings" aria-labelledby="timings-title" hidden>
+          <h1 id="timings-title">Timings</h1>
+          <p class="lede">Key-up to pasted, per dictation, newest first.</p>
+          <div class="tiles">
+            <div class="tile"><span class="v" id="t-median">—</span><span class="l">median, key-up → pasted</span></div>
+            <div class="tile"><span class="v" id="t-fastest">—</span><span class="l">fastest</span></div>
+            <div class="tile"><span class="v" id="t-slowest">—</span><span class="l">slowest that succeeded</span></div>
           </div>
-          <div class="field">
-            <label><input id="auto-send" type="checkbox" /> Auto-send</label>
-            <p class="hint">End a dictation with “send” or “invia” to paste it without that word and press Enter.</p>
+          <div class="legend">
+            <span><i class="s-ready"></i>Ready <span class="muted">(key-up → audio ready)</span></span>
+            <span><i class="s-transcribe"></i>Transcribe <span class="muted">(audio → text back)</span></span>
+            <span><i class="s-paste"></i>Paste <span class="muted">(text → pasted)</span></span>
           </div>
-          <div class="field">
-            <label for="delay">Restore delay (ms)</label>
-            <input id="delay" type="number" min="50" max="2000" step="50" inputmode="numeric" />
-            <p class="hint">
-              How long Parla waits after pasting before restoring your previous clipboard (50–2000 ms).
-              Raise it if a slow app pastes the old clipboard.
-            </p>
-          </div>
+          <p class="status" id="timings-empty" hidden>No dictations recorded yet.</p>
+          <div class="tchart" id="tchart"></div>
+          <details class="table-view" id="table-view">
+            <summary>Table view</summary>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col">Provider</th>
+                  <th scope="col" class="numeric">Audio</th>
+                  <th scope="col" class="numeric" title="Key-up to audio ready">Ready</th>
+                  <th scope="col" class="numeric" title="Audio ready to provider returned">Transcribe</th>
+                  <th scope="col" class="numeric" title="Provider returned to pasted">Paste</th>
+                  <th scope="col" class="numeric" title="Key-up to pasted">Total</th>
+                  <th scope="col">Transcript</th>
+                  <th scope="col">Error</th>
+                </tr>
+              </thead>
+              <tbody id="timing-rows"></tbody>
+            </table>
+          </details>
         </section>
 
-        <div class="actions">
-          <span id="status" class="status" role="status" aria-live="polite"></span>
-          <button type="submit" id="save">Save</button>
-        </div>
-      </form>
-    
-      <p class="footer-hint">
-        Settings are stored in the Parla app config folder. Close this window to keep Parla in the tray.
-      </p>
-    </main>
+        <form id="settings-form" hidden>
+          <p id="load-error" class="banner banner-error page-banner" hidden></p>
+
+          <section class="page" id="page-transcription" aria-labelledby="transcription-title" hidden>
+            <h1 id="transcription-title">Transcription</h1>
+            <p class="lede">Which engine turns your voice into text. Switching provider or local model applies right away; keys and model names need Save.</p>
+            <section class="card">
+              <h2>Provider</h2>
+              <div id="providers" class="provider-list" role="radiogroup" aria-label="Active provider"></div>
+              <p id="provider-status" class="status provider-status" role="status" aria-live="polite"></p>
+            </section>
+            <div id="provider-config"></div>
+          </section>
+
+          <section class="page" id="page-dictation" aria-labelledby="dictation-title" hidden>
+            <h1 id="dictation-title">Dictation &amp; hotkey</h1>
+            <p class="lede">How you start, lock and stop a dictation, and what you see while talking.</p>
+            <section class="card">
+              <h2>Hotkey</h2>
+              <div class="field">
+                <label for="hotkey">Accelerator</label>
+                <div class="hotkey-row">
+                  <input
+                    id="hotkey"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="Ctrl+Alt+Space"
+                    aria-describedby="hotkey-hint"
+                  />
+                  <button type="button" id="capture" class="secondary">Record keys</button>
+                </div>
+                <p id="capture-hint" class="hint capture-hint" role="status" aria-live="polite" hidden></p>
+                <p id="hotkey-hint" class="hint">
+                  With two or more modifiers (default <code>Ctrl+Alt+Space</code>), holding just the modifiers is push-to-talk and
+                  tapping the full shortcut locks it hands-free (press the modifiers again to stop). A shortcut like <code>Ctrl+Shift+F9</code> is
+                  tap to start, tap to stop. Press “Record keys”, then
+                  hold the combination you want (Esc cancels). Rebinding takes effect immediately on save.
+                </p>
+              </div>
+            </section>
+            <section class="card">
+              <h2>While I speak</h2>
+              <div class="field">
+                <label><input id="streaming-enabled" type="checkbox" /> Transcribe while I speak</label>
+                <p class="hint">Cloud dictations stream as you talk; the local model transcribes each phrase at your pauses, so only the last one is left when you stop. Parla then pastes the complete transcript. If this fails, Parla uses the saved recording.</p>
+              </div>
+              <div class="field">
+                <label><input id="live-captions" type="checkbox" /> Show live captions above the recording bar</label>
+                <p class="hint">A discreet two-line preview. Your text box stays untouched until the final paste. With the local model, captions update phrase by phrase.</p>
+              </div>
+            </section>
+          </section>
+
+          <section class="page" id="page-audio" aria-labelledby="audio-title" hidden>
+            <h1 id="audio-title">Other audio</h1>
+            <p class="lede">Music and calls while you dictate.</p>
+            <section class="card">
+              <div class="field">
+                <label><input id="dim-audio" type="checkbox" /> Dim other audio while dictating</label>
+                <p class="hint">Music and other apps play quieter while you dictate, then return to their volume. Nothing is paused.</p>
+              </div>
+              <div class="field">
+                <label for="dim-level">Their volume while dictating (%)</label>
+                <input id="dim-level" type="number" min="10" max="90" step="10" inputmode="numeric" />
+                <p class="hint">10–90 % of each app's own volume. 30 % sounds about half as loud as you set it.</p>
+              </div>
+            </section>
+          </section>
+
+          <section class="page" id="page-vocabulary" aria-labelledby="vocabulary-title" hidden>
+            <h1 id="vocabulary-title">Vocabulary</h1>
+            <p class="lede">Names and terms you want recognised.</p>
+            <section class="card">
+              <div class="field">
+                <label for="vocabulary">Names and terms</label>
+                <textarea id="vocabulary" rows="8" spellcheck="false" aria-describedby="vocabulary-hint"></textarea>
+                <p id="vocabulary-hint" class="hint">One term per line, up to 100 terms of 50 characters. Optional recognition hints for supported cloud models. Italian and English are recognized automatically; hints do not rewrite your transcript.</p>
+              </div>
+            </section>
+          </section>
+
+          <section class="page" id="page-clipboard" aria-labelledby="clipboard-title" hidden>
+            <h1 id="clipboard-title">Clipboard</h1>
+            <p class="lede">How Parla pastes and restores your clipboard.</p>
+            <section class="card">
+              <div class="field">
+                <label><input id="paste-compatibility" type="checkbox" /> Paste compatibility mode</label>
+                <p class="hint">Use longer paste delays if an app misses or changes pasted text.</p>
+              </div>
+              <div class="field">
+                <label><input id="auto-send" type="checkbox" /> Auto-send</label>
+                <p class="hint">End a dictation with “send” or “invia” to paste it without that word and press Enter.</p>
+              </div>
+              <div class="field">
+                <label for="delay">Restore delay (ms)</label>
+                <input id="delay" type="number" min="50" max="2000" step="50" inputmode="numeric" />
+                <p class="hint">
+                  How long Parla waits after pasting before restoring your previous clipboard (50–2000 ms).
+                  Raise it if a slow app pastes the old clipboard.
+                </p>
+              </div>
+            </section>
+          </section>
+
+          <div class="savebar" id="savebar" hidden>
+            <span id="status" class="status" role="status" aria-live="polite"></span>
+            <button type="button" id="discard">Discard</button>
+            <button type="submit" id="save">Save</button>
+          </div>
+        </form>
+      </main>
+    </div>
   </body>
 </html>
