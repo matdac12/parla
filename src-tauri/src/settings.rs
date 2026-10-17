@@ -40,9 +40,9 @@ pub struct CommandSettings {
     /// Kept as typed, so the default stays byte-identical in settings.json.
     pub hotkey: String,
     pub model: String,
-    /// `none` or `low`. The default is `none`: the live eval
-    /// (`tests/command_eval.rs`, PARLA-68) found it chose text vs `open_url`
-    /// as well as `low`, no slower.
+    /// `none` or `low`. The default is `low` (Mattia's call): in the live eval
+    /// (`tests/command_eval.rs`, PARLA-68) it chose text vs `open_url` right
+    /// under every prompt tried, where `none` was sensitive to wording.
     pub reasoning_effort: String,
 }
 
@@ -54,7 +54,7 @@ impl Default for CommandSettings {
             enabled: false,
             hotkey: DEFAULT_COMMAND_HOTKEY.into(),
             model: "gpt-6-luna".into(),
-            reasoning_effort: "none".into(),
+            reasoning_effort: "low".into(),
         }
     }
 }
@@ -226,7 +226,7 @@ mod vocabulary_tests {
                 "enabled": false,
                 "hotkey": "LCtrl+Shift",
                 "model": "gpt-6-luna",
-                "reasoning_effort": "none",
+                "reasoning_effort": "low",
             })
         );
         let partial: Settings = serde_json::from_str(r#"{"command":{"enabled":true}}"#).unwrap();

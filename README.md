@@ -184,8 +184,8 @@ The **Command mode** card holds the `command` section of `settings.json`
   stays on, with the hint, until you turn it off.
 - **Command hotkey**, default `LCtrl+Shift`; see [Hotkey](#hotkey).
 - **Model**, default `gpt-6-luna`; clearing the field restores it.
-- **Reasoning effort**, `none` (default) or `low`; the
-  [live eval](#the-command-mode-eval) picked the default.
+- **Reasoning effort**, `low` (default) or `none`; see the
+  [live eval](#the-command-mode-eval).
 
 Saving arms or disarms the command chord and rebinds it at once, with no
 restart. Model and effort are read by each command run.
@@ -332,6 +332,14 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   instruction, the selection between `<selection>` tags (data to work on,
   never instructions), the app name and today's date. It also offers the
   allowlisted tools (below), `tool_choice: auto`, at most one call per reply.
+  The text comes back as `{"text": ...}` under a strict JSON schema: as free
+  text, a reply ending on a line break (`Buongiorno,` and a newline) sometimes
+  ran on into junk such as `</final`, `</|assistant|>` or stray words, and the
+  closing `"}` now ends it. The reply's trailing spaces and line breaks are
+  trimmed (a selection's own trailing line break is put back), a reply that
+  spells out a chat-template token (`<|…|>`, `</assistant>`, `</final`) fails
+  with nothing pasted, and when the model calls a tool any text beside the
+  call is dropped.
 - The text reply is **pasted once**, over the selection if there was one,
   otherwise at the cursor, the same way a dictation is pasted, so one Ctrl+Z
   brings back what was there. Your clipboard text is restored once, after the
@@ -398,9 +406,8 @@ preamble, wrapping quotes, markdown, stray spaces or leaked tags, plus a
 cheap correctness check (the language, words a rewrite must keep, the source
 words a translation must drop, the bullet count). It prints every reply, a
 markdown table per effort (shares, reply time median and p90, tokens and
-cost) and the decision rule: ship `none` if it gets every outcome kind right,
-otherwise `low`. It fails if the default effort gets an outcome kind wrong;
-the text checks only report.
+cost) and the outcome kinds each effort got wrong. It fails if the default
+effort gets an outcome kind wrong; the text checks only report.
 Re-run it after changing the system prompt (`command_mode/responses.rs`) or
 adding a tool, and read the replies too: the checks are heuristics.
 
