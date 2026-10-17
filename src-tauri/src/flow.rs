@@ -525,7 +525,7 @@ fn finish_session_with_error(
     if result.is_ok() {
         crate::failure::on_success(app);
     }
-    let (ending, error) = ending(completion.hold_error, result, clip_saved);
+    let (ending, error) = dictation_ending(completion.hold_error, result, clip_saved);
     record.error = error;
     // The one completion sink for successful and failed dictations.
     timing::record(app, record);
@@ -535,7 +535,7 @@ fn finish_session_with_error(
 /// The pill's ending and the history row's error. A paste that landed is a
 /// success even when the hold hit the cap; Retry is offered only when this
 /// run saved its clip, or it would re-run an older one (PARLA-51).
-fn ending(
+fn dictation_ending(
     hold_error: Option<String>,
     result: Result<(), ProviderError>,
     clip_saved: bool,
@@ -846,11 +846,11 @@ mod pipeline_tests {
         let cap = || Some("hold exceeded 120 s".to_string());
         // The cap ended the hold but the transcript pasted: a plain success,
         // with no error row the app window would offer to retry (PARLA-51).
-        assert_eq!(ending(cap(), Ok(()), false), (Ending::Done, None));
-        assert_eq!(ending(None, Ok(()), false), (Ending::Done, None));
+        assert_eq!(dictation_ending(cap(), Ok(()), false), (Ending::Done, None));
+        assert_eq!(dictation_ending(None, Ok(()), false), (Ending::Done, None));
         // A failed transcription saved this run's clip: Retry re-runs it.
         assert_eq!(
-            ending(cap(), Err(ProviderError::Timeout), true),
+            dictation_ending(cap(), Err(ProviderError::Timeout), true),
             (
                 Ending::Failed { retry: true },
                 Some(format!("hold exceeded 120 s; {}", ProviderError::Timeout))
@@ -859,7 +859,7 @@ mod pipeline_tests {
         // No clip saved (the microphone failed): Retry would re-run an older one.
         let mic = ProviderError::Other("microphone unavailable".into());
         assert_eq!(
-            ending(None, Err(mic.clone()), false),
+            dictation_ending(None, Err(mic.clone()), false),
             (Ending::Failed { retry: false }, Some(mic.to_string()))
         );
     }
