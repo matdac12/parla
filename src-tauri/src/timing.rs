@@ -12,7 +12,7 @@ use tauri::{Emitter, Manager};
 pub struct DictationRecord {
     pub id: String,
     /// Row origin in `history.jsonl`; PARLA-10 reuses the file for `benchmark`
-    /// rows. `#[serde(default)]` keeps older rows loadable.
+    /// rows and command mode for `command` rows. `#[serde(default)]` keeps older rows loadable.
     #[serde(default = "default_kind")]
     pub kind: String,
     pub started_at: u64,
@@ -81,6 +81,9 @@ pub fn elapsed_ms(key_up: Instant) -> u64 {
 fn default_kind() -> String {
     "dictation".into()
 }
+
+/// `kind` of a command run's row (PARLA-61). Never counted as a dictation.
+pub const COMMAND_KIND: &str = "command";
 
 /// Per-stage latencies derived from the monotonic offsets (which are relative
 /// to key-up). A stage is `None` when either endpoint is missing, so partial

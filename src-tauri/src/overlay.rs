@@ -74,10 +74,18 @@ fn set_memory_target(window: &tauri::WebviewWindow, low: bool) {
 #[cfg(not(windows))]
 fn set_memory_target(_window: &tauri::WebviewWindow, _low: bool) {}
 
-/// Tells the overlay whether the recording is locked hands-free (true) or held
-/// push-to-talk (false).
-pub fn set_mode(app: &tauri::AppHandle, locked: bool) {
-    let _ = app.emit_to(LABEL, "mode", locked);
+/// What the pill is recording: a held or locked dictation, or a command run
+/// (orange, so it never looks like dictation). Kept until the next session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PillMode {
+    Hold,
+    Locked,
+    Command,
+}
+
+pub fn set_mode(app: &tauri::AppHandle, mode: PillMode) {
+    let _ = app.emit_to(LABEL, "mode", mode);
 }
 
 fn place(app: &tauri::AppHandle) {
@@ -152,9 +160,10 @@ pub struct Overlay {
     captions_live: Arc<AtomicBool>,
 }
 
-/// Starts a session. The pill appears after a short delay (so brief or
-/// cancelled holds never flash it) and streams microphone levels.
-pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
+/// Starts a session. The pill appears once the keys have been held for a
+/// short delay (so brief or cancelled holds never flash it) and streams
+/// microphone levels. `held` is how long they were already down.
+pub fn begin(app: &tauri::AppHandle, captions: bool, held: Duration) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let metering = Arc::new(AtomicBool::new(true));
     // Back to normal well before the delayed reveal.
@@ -172,7 +181,7 @@ pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
             let live =
                 || flag.load(Ordering::Acquire) && GENERATION.load(Ordering::Acquire) == generation;
             let step = Duration::from_millis(25);
-            for _ in 0..(SHOW_DELAY.as_millis() / step.as_millis()) {
+            for _ in 0..(SHOW_DELAY.saturating_sub(held).as_millis() / step.as_millis()) {
                 if !live() {
                     return;
                 }
@@ -207,6 +216,8 @@ fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
 pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     set_interactive(app, false);
+    // A retry is a dictation, even right after an orange command pill.
+    set_mode(app, PillMode::Hold);
     configure(app, false, generation);
     let overlay = Overlay {
         app: app.clone(),
@@ -434,7 +445,7 @@ mod native_tests {
                 // SAFETY: read-only user32 queries.
                 let focused = unsafe { GetForegroundWindow() };
                 let failed_pill = || {
-                    let overlay = begin(&handle, false);
+                    let overlay = begin(&handle, false, Duration::ZERO);
                     std::thread::sleep(Duration::from_millis(400));
                     overlay.processing();
                     overlay.finish(false);

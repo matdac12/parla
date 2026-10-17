@@ -25,7 +25,34 @@ pub struct Settings {
     pub dim_other_audio: bool,
     /// Percent of each app's volume kept while dimmed.
     pub dim_audio_level: u8,
+    /// Command mode (PARLA-61), off by default and the only LLM path (ADR-0001).
+    pub command: CommandSettings,
     pub providers: BTreeMap<String, serde_json::Value>,
+}
+
+/// The `command` section. Experimental: settings.json only until PARLA-67.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandSettings {
+    pub enabled: bool,
+    /// The command hotkey. Only the default chord is recognised until PARLA-67.
+    pub hotkey: String,
+    pub model: String,
+    /// Provisional until the PARLA-68 eval picks `none` or `low`.
+    pub reasoning_effort: String,
+}
+
+pub const DEFAULT_COMMAND_HOTKEY: &str = "LCtrl+Shift";
+
+impl Default for CommandSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: DEFAULT_COMMAND_HOTKEY.into(),
+            model: "gpt-6-luna".into(),
+            reasoning_effort: "low".into(),
+        }
+    }
 }
 
 /// The local Parakeet exports Parla can run on the same engine (see models.rs).
@@ -73,6 +100,7 @@ impl Default for Settings {
             local_model: LocalModel::default(),
             dim_other_audio: true,
             dim_audio_level: crate::dim::DEFAULT_LEVEL_PERCENT,
+            command: CommandSettings::default(),
             providers: BTreeMap::new(),
         }
     }
@@ -143,6 +171,10 @@ pub fn apply(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> 
     let hotkey = app
         .try_state::<crate::hotkey::Hotkey>()
         .ok_or("Hotkey listener is unavailable; restart Parla")?;
+    hotkey.set_command_enabled(settings.command.enabled);
+    if settings.command.enabled && settings.command.hotkey != DEFAULT_COMMAND_HOTKEY {
+        eprintln!("Command hotkey rebinding is not supported yet; using {DEFAULT_COMMAND_HOTKEY}");
+    }
     hotkey.set_shortcut(&settings.hotkey)
 }
 
@@ -161,6 +193,23 @@ mod vocabulary_tests {
         assert!(s.dim_other_audio, "dimming is on for existing users");
         assert!(s.auto_send, "auto-send is on for existing users");
         assert_eq!(s.dim_audio_level, crate::dim::DEFAULT_LEVEL_PERCENT);
+    }
+    #[test]
+    fn old_settings_load_command_mode_off_with_its_defaults() {
+        let old: Settings = serde_json::from_str(r#"{"hotkey":"Ctrl+Alt+Space"}"#).unwrap();
+        let json = serde_json::to_value(&old).unwrap();
+        assert_eq!(
+            json["command"],
+            serde_json::json!({
+                "enabled": false,
+                "hotkey": "LCtrl+Shift",
+                "model": "gpt-6-luna",
+                "reasoning_effort": "low",
+            })
+        );
+        let partial: Settings = serde_json::from_str(r#"{"command":{"enabled":true}}"#).unwrap();
+        assert!(partial.command.enabled);
+        assert_eq!(partial.command.model, "gpt-6-luna");
     }
     #[test]
     fn local_model_defaults_to_v3_and_round_trips() {

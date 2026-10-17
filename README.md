@@ -271,6 +271,44 @@ Settings → Other audio has **Dim other audio while dictating** (on by default,
 killed, the next start restores them (unless you moved them since) and deletes
 the file. Dimming is Windows-only.
 
+### Command mode (experimental)
+
+Command mode is a separate mode, with its own hotkey, where what you say is an
+**instruction** rather than text to paste. It is the only place Parla will
+call an LLM; dictation always pastes the raw transcript (see
+`docs/adr/0001-command-mode-is-the-only-llm-path.md`). It is being built in
+steps (PARLA-61). **So far it records the instruction and nothing more:**
+there is no LLM call, no paste and no selection read yet.
+
+It is off by default and has no Settings card yet. To try it, quit Parla, set
+`"enabled": true` in the `command` section of `settings.json`, and start Parla
+again:
+
+```json
+"command": { "enabled": true, "hotkey": "LCtrl+Shift", "model": "gpt-6-luna", "reasoning_effort": "low" }
+```
+
+- **Hold** left **Ctrl** plus either **Shift**, say the instruction, release.
+  Right Ctrl doesn't count, and any Alt (AltGr included) or Win breaks the
+  chord. It is hold only: no hands-free lock, and Space does nothing special.
+- The pill is **orange** while recording and transcribing, then shows the
+  check. The instruction is transcribed by the active provider, the same
+  engine dictation uses, and written to history as a `kind: "command"` row
+  with its stage timings. An empty or silent instruction ends quietly with no
+  row. A failure shows the red cross and the usual notification, with no
+  Retry.
+- The dictation safeguards apply: a hold under 300 ms does nothing, any other
+  key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
+  as usual), and the hold stops after 120 s. Recording starts at key-down, but
+  the pill appears and other audio is dimmed only once the hold passes
+  300 ms, and only from then does **Esc** cancel (and get swallowed).
+- While a command run or a dictation is in flight, both hotkeys are ignored.
+- Command runs never count toward words, dictations or audio; the
+  instruction's transcription is billed in Total cost like a dictation.
+- `hotkey`, `model` and `reasoning_effort` are stored but not used yet (the
+  chord can't be rebound until the Settings card lands). With command mode
+  off, the keyboard hook ignores Ctrl+Shift entirely.
+
 ## Providers and API keys
 
 The settings view lists every provider, whether it is ready, and lets you pick
@@ -490,8 +528,10 @@ Every completed dictation (success or failure) is appended as one JSON object pe
 line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows
 (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is
 append-only and written on a background thread after the paste, so it never
-blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
-two kinds of row.
+blocks dictation. A `kind` field (`"dictation"`, `"benchmark"` or `"command"`)
+separates the kinds of row. Command rows (see
+[Command mode](#command-mode-experimental)) are in the file but not yet shown
+in the main window.
 
 The main window's **History** page is the place to read and copy transcripts;
 its **Timings** page is the latency log. Each dictation's latency is split into

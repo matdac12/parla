@@ -138,9 +138,12 @@ fn counted_words(record: &DictationRecord) -> Option<u64> {
 
 /// The (model, mode) pairs a row was billed for. A provider is assumed to bill
 /// when it returned a transcript, even if pasting then failed; a live session
-/// that fell back to batch is billed for both, with the whole clip each.
+/// that fell back to batch is billed for both, with the whole clip each. A
+/// command run's instruction is billed like a dictation, but never counted.
 fn billed_usage(record: &DictationRecord) -> Vec<(String, &'static str)> {
-    if !matches!(record.kind.as_str(), "dictation" | "benchmark") || record.text.trim().is_empty() {
+    if !matches!(record.kind.as_str(), "dictation" | "benchmark" | "command")
+        || record.text.trim().is_empty()
+    {
         return Vec::new();
     }
     // Rows written before models were recorded used the provider default.
@@ -398,6 +401,17 @@ mod tests {
         assert_eq!(counted_words(&record("dictation", "a b", Some("x"))), None);
         assert_eq!(counted_words(&record("dictation", "  ", None)), None);
         assert_eq!(counted_words(&record("benchmark", "a b c", None)), None);
+    }
+
+    #[test]
+    fn command_runs_count_toward_no_dictation_total_but_bill_their_speech() {
+        let mut stats = Stats::default();
+        let mut command = record(crate::timing::COMMAND_KIND, "make this formal", None);
+        command.model = Some("gpt-4o-transcribe".into());
+        assert!(stats.apply(&command));
+        assert_eq!(counts(&stats), (0, 0));
+        assert_eq!(stats.audio_ms, 0);
+        assert_eq!(usage(&stats, "gpt-4o-transcribe", BATCH), Some((1_000, 1)));
     }
 
     #[test]
