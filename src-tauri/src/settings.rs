@@ -36,7 +36,7 @@ pub struct Settings {
 #[serde(default)]
 pub struct CommandSettings {
     pub enabled: bool,
-    /// The command hotkey: a hold of 2+ modifiers (`hotkey::validate_command_hotkey`).
+    /// The command hotkey: a hold of 2+ modifiers (`hotkey::parse_command_hotkey`).
     /// Kept as typed, so the default stays byte-identical in settings.json.
     pub hotkey: String,
     pub model: String,
@@ -173,20 +173,29 @@ pub fn command_chord(settings: &Settings) -> Result<Option<CommandChord>, String
     if !settings.command.enabled {
         return Ok(None);
     }
-    crate::hotkey::validate_command_hotkey(&settings.command.hotkey, &settings.hotkey).map(Some)
+    crate::hotkey::parse_command_hotkey(&settings.command.hotkey, &settings.hotkey).map(Some)
 }
 
 /// Must be called on a blocking worker: Hotkey::set_shortcut waits for the main
 /// thread. Delay changes take effect through the next flow settings snapshot.
+/// The command chord was checked against `settings.hotkey`, so it changes only
+/// once that dictation hotkey is bound: a failed rebind keeps both old ones.
 /// An invalid command hotkey leaves command mode disarmed, never dictation.
 pub fn apply(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> {
     let hotkey = app
         .try_state::<crate::hotkey::Hotkey>()
         .ok_or("Hotkey listener is unavailable; restart Parla")?;
-    let command = command_chord(settings);
-    hotkey.set_command_chord(command.as_ref().ok().copied().flatten());
     hotkey.set_shortcut(&settings.hotkey)?;
-    command.map(|_| ())
+    match command_chord(settings) {
+        Ok(chord) => {
+            hotkey.set_command_chord(chord);
+            Ok(())
+        }
+        Err(error) => {
+            hotkey.set_command_chord(None);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]

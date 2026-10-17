@@ -114,18 +114,14 @@ impl Registration {
     /// The shortcut's modifiers, all down and nothing else modified. Left Alt
     /// only, so Italian-layout AltGr (Right Alt + synthetic Ctrl) never counts.
     fn chord_satisfied(&self, shortcut: Shortcut, down: impl Fn(Code) -> bool) -> bool {
-        let wanted = |left: Code, right: Code, modifier: Modifiers| {
-            let want = shortcut.mods.contains(modifier);
-            if modifier == Modifiers::ALT {
-                return want == down(left) && !down(right);
-            }
-            want == (down(left) || down(right))
-        };
         shortcut.mods.bits().count_ones() >= 2
-            && wanted(Code::ControlLeft, Code::ControlRight, Modifiers::CONTROL)
-            && wanted(Code::ShiftLeft, Code::ShiftRight, Modifiers::SHIFT)
-            && wanted(Code::AltLeft, Code::AltRight, Modifiers::ALT)
-            && wanted(Code::MetaLeft, Code::MetaRight, Modifiers::SUPER)
+            && MODIFIER_PAIRS.into_iter().all(|(left, right, modifier)| {
+                let want = shortcut.mods.contains(modifier);
+                if modifier == Modifiers::ALT {
+                    return want == down(left) && !down(right);
+                }
+                want == (down(left) || down(right))
+            })
     }
 
     /// Chord transitions for a physical key event, after `key_event` updated
@@ -161,12 +157,14 @@ impl Registration {
     }
 
     /// Hold only: any other key pressed during the hold, a modifier included,
-    /// makes it some other Ctrl+Shift shortcut, so the hold is cancelled.
+    /// makes it some other shortcut on the command hotkey's modifiers, so the
+    /// hold is cancelled.
     fn command_chord_event(&mut self, key: Code, pressed: bool) -> Option<HotkeyEvent> {
         const CHORD: Chord = Chord::Command;
         if !self.command_active {
             // `chord_event` only gets here while armed. A dictation chord on
-            // the same keys (a Ctrl+Shift rebind) wins. Cheap checks first.
+            // the same keys wins (save rejects that pairing while command
+            // mode is on). Cheap checks first.
             let start = pressed
                 && MODIFIER_KEYS.contains(&key)
                 && !self.chord_active
@@ -521,7 +519,7 @@ impl CommandChord {
 /// (AltGr types Italian characters). Rejects a chord whose modifiers equal,
 /// contain or sit inside the dictation hotkey's hold, since pressing one would
 /// pass through the other.
-pub fn validate_command_hotkey(command: &str, dictation: &str) -> Result<CommandChord, String> {
+pub fn parse_command_hotkey(command: &str, dictation: &str) -> Result<CommandChord, String> {
     if command.parse().is_ok_and(is_paste) {
         return Err(PASTE_RESERVED.into());
     }
@@ -909,7 +907,7 @@ mod tests {
 
     fn rebound(command: &str) -> Registration {
         Registration {
-            command_chord: validate_command_hotkey(command, "Ctrl+Alt+Space").unwrap(),
+            command_chord: parse_command_hotkey(command, "Ctrl+Alt+Space").unwrap(),
             ..command_registration()
         }
     }
@@ -941,7 +939,7 @@ mod tests {
     #[test]
     fn the_default_command_hotkey_parses_to_the_default_chord() {
         assert_eq!(
-            validate_command_hotkey(crate::settings::DEFAULT_COMMAND_HOTKEY, "Ctrl+Alt+Space"),
+            parse_command_hotkey(crate::settings::DEFAULT_COMMAND_HOTKEY, "Ctrl+Alt+Space"),
             Ok(CommandChord::default())
         );
     }
@@ -1203,10 +1201,7 @@ mod tests {
             "Ctrl+Alt+Shift+Win",
             "LWin+Alt",
         ] {
-            assert!(
-                validate_command_hotkey(accepted, "F9").is_ok(),
-                "{accepted}"
-            );
+            assert!(parse_command_hotkey(accepted, "F9").is_ok(), "{accepted}");
         }
         for (rejected, why) in [
             ("", "two or more"),
@@ -1218,7 +1213,7 @@ mod tests {
             ("LCtrl+RCtrl", "once"),
             ("Shift+Shift", "once"),
         ] {
-            let error = validate_command_hotkey(rejected, "F9").unwrap_err();
+            let error = parse_command_hotkey(rejected, "F9").unwrap_err();
             assert!(error.contains(why), "{rejected}: {error}");
         }
     }
@@ -1233,7 +1228,7 @@ mod tests {
             ("LCtrl+Shift", "Ctrl+Shift+F9"),
             ("LCtrl+Shift", "Ctrl+Alt+Shift+Space"),
         ] {
-            let error = validate_command_hotkey(command, dictation).unwrap_err();
+            let error = parse_command_hotkey(command, dictation).unwrap_err();
             assert!(
                 error.contains("dictation hotkey"),
                 "{command} vs {dictation}"
@@ -1247,7 +1242,7 @@ mod tests {
             ("LCtrl+Shift", "not a hotkey"),
         ] {
             assert!(
-                validate_command_hotkey(command, dictation).is_ok(),
+                parse_command_hotkey(command, dictation).is_ok(),
                 "{command} vs {dictation}"
             );
         }

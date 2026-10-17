@@ -572,7 +572,8 @@ function renderCommandAvailability(): void {
   const typed = settings.providers.openai?.api_key;
   const keySet = state.providers.some((p) => p.id === "openai" && p.available)
     || (typeof typed === "string" && typed.trim() !== "");
-  els.commandEnabled.disabled = !keySet;
+  // Without a key it can only be turned off, never on.
+  els.commandEnabled.disabled = !keySet && !settings.command.enabled;
   els.commandKeyHint.hidden = keySet;
 }
 

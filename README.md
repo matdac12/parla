@@ -168,8 +168,8 @@ The **Command mode** card holds the `command` section of `settings.json`
 
 - **Enabled**, off by default. It is greyed out, with a hint, until an OpenAI
   key is set: the one under Transcription → OpenAI (typing it is enough, both
-  save together) or `OPENAI_API_KEY`. A key that later goes away leaves the
-  setting as it was.
+  save together) or `OPENAI_API_KEY`. If the key later goes away, command mode
+  stays on, with the hint, until you turn it off.
 - **Command hotkey**, default `LCtrl+Shift`; see [Hotkey](#hotkey).
 - **Model**, default `gpt-6-luna`; clearing the field restores it.
 - **Reasoning effort**, `none` or `low`.

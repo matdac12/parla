@@ -25,7 +25,7 @@ pub async fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
 /// rejected, or null. Pure parsing, so it runs inline.
 #[tauri::command]
 pub fn check_command_hotkey(command: String, dictation: String) -> Option<String> {
-    crate::hotkey::validate_command_hotkey(&command, &dictation).err()
+    crate::hotkey::parse_command_hotkey(&command, &dictation).err()
 }
 
 /// Serializes saves without holding SharedSettings across disk or main-thread IO.
