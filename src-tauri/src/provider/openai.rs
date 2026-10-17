@@ -120,6 +120,27 @@ pub(crate) fn client() -> Result<&'static Client, ProviderError> {
         .map_err(|e| ProviderError::Other(e.clone()))
 }
 
+/// Opens TCP and TLS to api.openai.com in the shared client's pool, off the
+/// caller's thread, so command mode's request skips the handshake (PARLA-64).
+/// Unauthenticated, so OpenAI answers 401 and bills nothing. Skipped without
+/// a key: the request will not be sent.
+pub fn prewarm(settings: &Settings) {
+    if api_key(settings).is_none() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("parla-openai-prewarm".into())
+        .spawn(|| {
+            if let Ok(response) =
+                client().and_then(|client| client.get(PREWARM_URL).send().map_err(map_transport))
+            {
+                // Read to the end, or the connection is not pooled.
+                let _ = response.bytes();
+            }
+        });
+}
+const PREWARM_URL: &str = "https://api.openai.com/v1/models";
+
 fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Request, ProviderError> {
     config.validate()?;
     crate::settings::validate_vocabulary(&config.vocabulary)

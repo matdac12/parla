@@ -295,6 +295,14 @@ fn run_session(
         // From here Esc cancels and is swallowed, as in dictation.
         crate::hotkey::RECORDING.store(true, Ordering::Release);
     }
+    // While the user is still speaking, never for a dictation or a quick
+    // Ctrl+Shift shortcut: read the selection (PARLA-64) and open the
+    // connection the LLM request will use.
+    let desktop = CommandDesktop::new(&settings);
+    let selection = (command && held).then(|| {
+        crate::provider::openai::prewarm(&settings);
+        SelectionRead::start(desktop)
+    });
     // After the mic started, so it never delays the first syllable.
     let dimmed = held.then(|| crate::dim::dim(&settings));
     let captions = settings.live_captions
@@ -351,15 +359,23 @@ fn run_session(
     drop(dimmed);
     if cancelled.load(Ordering::Acquire) {
         drop(stream);
+        if let Some(selection) = selection {
+            selection.join().give_back(&desktop);
+        }
         return;
     }
     if let Some(overlay) = &overlay {
         overlay.processing();
     }
     if command {
-        let outcome = finish_command(
-            app, audio, &settings, started_at, key_up, hold_error, stream, &cancelled,
-        );
+        let run = command_mode::Run {
+            settings: &settings.command,
+            key_up,
+            date: command_mode::today(),
+            cancelled: &cancelled,
+            hold_error,
+        };
+        let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
         if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
             overlay.finish(ok);
@@ -526,31 +542,26 @@ fn combined_error(hold: Option<String>, error: Option<ProviderError>) -> Option<
 /// A command run after key-up (PARLA-63): the orchestrator with the real
 /// ports. A failure shows the usual notification but keeps no clip for Retry,
 /// which would paste the instruction as a dictation.
-#[allow(clippy::too_many_arguments)]
 fn finish_command(
     app: &tauri::AppHandle,
     audio: Result<crate::recorder::RecoveryAudio, ProviderError>,
     settings: &Settings,
     started_at: SystemTime,
-    key_up: Instant,
-    hold_error: Option<String>,
+    run: command_mode::Run,
     stream: Option<crate::streaming::Session>,
-    cancelled: &AtomicBool,
+    selection: Option<SelectionRead>,
 ) -> command_mode::Outcome {
+    let (key_up, cancelled) = (run.key_up, run.cancelled);
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     record.kind = timing::COMMAND_KIND.into();
     let ports = command_mode::Ports {
-        desktop: &CommandDesktop(settings),
+        desktop: &CommandDesktop::new(settings),
         llm: &command_mode::responses::OpenAi(settings),
         history: &AppHistory(app),
     };
-    let run = command_mode::Run {
-        settings: &settings.command,
-        key_up,
-        cancelled,
-        hold_error,
-    };
-    let outcome = command_mode::run(&ports, run, record, |record| {
+    // Joined once the instruction is in: the read finished long before.
+    let selection = || selection.map(SelectionRead::join).unwrap_or_default();
+    let outcome = command_mode::run(&ports, run, record, selection, |record| {
         let clip = match audio {
             Err(error) => return Some(Err(error)),
             Ok(clip) if clip.is_empty() => return None,
@@ -591,16 +602,67 @@ impl Drop for DisarmEsc {
     }
 }
 
-/// The command run's desktop port: the inserter's paste and clipboard restore.
-struct CommandDesktop<'a>(&'a Settings);
-impl command_mode::Desktop for CommandDesktop<'_> {
-    fn paste(&self, text: &str) -> Result<Instant, String> {
-        inserter::paste_text_with_options(
-            text,
-            Duration::from_millis(self.0.restore_delay_ms),
-            self.0.paste_compatibility_mode,
-            false,
+/// The command run's desktop port: the inserter's selection read, paste and
+/// clipboard restore.
+#[derive(Clone, Copy)]
+struct CommandDesktop {
+    restore_delay: Duration,
+    compatibility_mode: bool,
+}
+impl CommandDesktop {
+    fn new(settings: &Settings) -> Self {
+        Self {
+            restore_delay: Duration::from_millis(settings.restore_delay_ms),
+            compatibility_mode: settings.paste_compatibility_mode,
+        }
+    }
+}
+impl command_mode::Desktop for CommandDesktop {
+    fn clipboard_text(&self) -> Result<Option<String>, String> {
+        inserter::clipboard_text()
+    }
+    fn clipboard_sequence(&self) -> u32 {
+        inserter::clipboard_sequence()
+    }
+    fn send_copy(&self) -> Result<(), String> {
+        inserter::send_copy()
+    }
+    fn copied_empty_selection(&self) -> bool {
+        inserter::copied_empty_selection()
+    }
+    fn foreground_app(&self) -> Option<String> {
+        inserter::foreground_app()
+    }
+    fn wait(&self, delay: Duration) {
+        std::thread::sleep(delay);
+    }
+    fn paste(
+        &self,
+        text: &str,
+        borrowed: Option<&command_mode::Borrowed>,
+    ) -> Result<Instant, String> {
+        inserter::paste_over_borrowed(text, borrowed, self.restore_delay, self.compatibility_mode)
+    }
+    fn give_back(&self, borrowed: &command_mode::Borrowed) {
+        inserter::give_back(borrowed);
+    }
+}
+
+/// The selection read on its own thread, from the confirmed hold until the
+/// run joins it (PARLA-64).
+struct SelectionRead(Option<std::thread::JoinHandle<command_mode::Selection>>);
+impl SelectionRead {
+    fn start(desktop: CommandDesktop) -> Self {
+        let read = std::thread::Builder::new()
+            .name("parla-selection".into())
+            .spawn(move || command_mode::read_selection(&desktop));
+        Self(
+            read.map_err(|error| eprintln!("Cannot read the selection: {error}"))
+                .ok(),
         )
+    }
+    fn join(self) -> command_mode::Selection {
+        self.0.and_then(|read| read.join().ok()).unwrap_or_default()
     }
 }
 

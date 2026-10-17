@@ -1,13 +1,14 @@
 //! Command mode (PARLA-61): the command run orchestrator and its Responses
 //! client. The only code that calls an LLM (ADR-0001).
 //!
-//! The orchestrator owns a run from key-up to its outcome: the empty-instruction
-//! rule, the LLM call, cancellation, the paste (the inserter restores the
-//! clipboard) and the history row. It talks to the desktop, the LLM and
-//! history through narrow ports, so it is tested with fakes and flow.rs
-//! supplies the real ones.
+//! The orchestrator owns a run from the confirmed hold to its outcome: reading
+//! the selection (PARLA-64), the empty-instruction rule, the LLM call,
+//! cancellation, the paste, giving the user's clipboard back and the history
+//! row. It talks to the desktop, the LLM and history through narrow ports, so
+//! it is tested with fakes and flow.rs supplies the real ones.
 pub mod responses;
 
+pub use crate::inserter::Borrowed;
 use crate::{
     provider::ProviderError,
     settings::CommandSettings,
@@ -16,15 +17,30 @@ use crate::{
 use responses::{Reply, Request};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-/// The focused app, through the inserter. Selection reading (Ctrl+Insert,
-/// PARLA-64) joins here, with the clipboard saved before it.
+/// The focused app and the clipboard, through the inserter.
 pub trait Desktop {
-    /// Pastes `text` once and restores the user's clipboard afterwards.
+    /// The clipboard's text; None when it holds no text.
+    fn clipboard_text(&self) -> Result<Option<String>, String>;
+    /// Moves on whenever any app writes the clipboard.
+    fn clipboard_sequence(&self) -> u32;
+    /// Ctrl+Insert into the focused app: a copy that, unlike Ctrl+C, never
+    /// interrupts a terminal.
+    fn send_copy(&self) -> Result<(), String>;
+    /// The clipboard holds VS Code's copy of the whole line under an empty
+    /// selection.
+    fn copied_empty_selection(&self) -> bool;
+    /// The focused app's executable name.
+    fn foreground_app(&self) -> Option<String>;
+    fn wait(&self, delay: Duration);
+    /// Pastes `text` once and gives the user's clipboard back once afterwards:
+    /// `borrowed`'s saved text while the clipboard still holds the copy.
     /// Returns the instant the paste was injected.
-    fn paste(&self, text: &str) -> Result<Instant, String>;
+    fn paste(&self, text: &str, borrowed: Option<&Borrowed>) -> Result<Instant, String>;
+    /// Writes the saved text back now, unless the clipboard changed since the copy.
+    fn give_back(&self, borrowed: &Borrowed);
 }
 
 pub trait Llm {
@@ -45,10 +61,109 @@ pub struct Ports<'a> {
 pub struct Run<'a> {
     pub settings: &'a CommandSettings,
     pub key_up: Instant,
+    /// Today, local `YYYY-MM-DD`, for the request.
+    pub date: String,
     /// Set by Esc, from key-up until the reply is in.
     pub cancelled: &'a AtomicBool,
     /// The hold hit the cap: the instruction is recorded but not sent.
     pub hold_error: Option<String>,
+}
+
+/// How long the focused app gets to answer Ctrl+Insert.
+pub const COPY_WAIT: Duration = Duration::from_millis(150);
+const COPY_POLL: Duration = Duration::from_millis(5);
+
+/// What was selected when the hold was confirmed, and the user's clipboard
+/// while the copy holds it.
+#[derive(Debug, Default)]
+pub struct Selection {
+    /// Sent to the LLM as data; never written to history.
+    pub text: Option<String>,
+    pub app: Option<String>,
+    borrowed: Option<Borrowed>,
+    /// No copy within the wait: the saved text and the sequence before the
+    /// copy, for a second look once the instruction is in.
+    unanswered: Option<(Option<String>, u32)>,
+}
+
+impl Selection {
+    /// A slow app's copy that landed after the wait, while the user was still
+    /// speaking: the selection after all, and the clipboard is borrowed.
+    fn late_copy(&mut self, desktop: &dyn Desktop) {
+        if let Some((saved, before)) = self.unanswered.take() {
+            if desktop.clipboard_sequence() != before {
+                self.take_copy(desktop, saved);
+            }
+        }
+    }
+
+    /// A run that pastes nothing gives the user's clipboard back: a cancel,
+    /// a failure or a silent instruction.
+    pub fn give_back(mut self, desktop: &dyn Desktop) {
+        self.late_copy(desktop);
+        if let Some(borrowed) = &self.borrowed {
+            desktop.give_back(borrowed);
+        }
+    }
+
+    fn take_copy(&mut self, desktop: &dyn Desktop, saved: Option<String>) {
+        let copied = desktop.clipboard_text().unwrap_or_else(|error| {
+            eprintln!("Parla selection unreadable: {error}");
+            None
+        });
+        self.text = copied
+            .clone()
+            .filter(|text| !text.is_empty() && !desktop.copied_empty_selection());
+        self.borrowed = Some(Borrowed { saved, copied });
+    }
+}
+
+/// Reads the selection at the confirmed hold, while the user is still
+/// speaking: saves the clipboard, sends Ctrl+Insert and watches the clipboard
+/// sequence for up to `COPY_WAIT`. A change with text is the selection.
+pub fn read_selection(desktop: &dyn Desktop) -> Selection {
+    let mut selection = Selection {
+        app: desktop.foreground_app(),
+        ..Selection::default()
+    };
+    // Unsaved, the user's clipboard would be lost to the copy.
+    let saved = match desktop.clipboard_text() {
+        Ok(saved) => saved,
+        Err(error) => {
+            eprintln!("Parla selection skipped: clipboard unreadable ({error})");
+            return selection;
+        }
+    };
+    let before = desktop.clipboard_sequence();
+    // A failed copy leaves the sequence alone: no selection.
+    if let Err(error) = desktop.send_copy() {
+        eprintln!("Parla selection copy failed: {error}");
+    }
+    let copied = (0..COPY_WAIT.as_millis() / COPY_POLL.as_millis()).any(|_| {
+        desktop.wait(COPY_POLL);
+        desktop.clipboard_sequence() != before
+    });
+    if copied {
+        selection.take_copy(desktop, saved);
+    } else {
+        selection.unanswered = Some((saved, before));
+    }
+    selection
+}
+
+/// Today, local `YYYY-MM-DD`.
+#[cfg(windows)]
+pub fn today() -> String {
+    // SAFETY: SYSTEMTIME is plain data, and GetLocalTime only fills it.
+    let mut now = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut now) };
+    format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
+}
+
+/// Off Windows, where Parla does not run, no date.
+#[cfg(not(windows))]
+pub fn today() -> String {
+    String::new()
 }
 
 /// What the pill and the notification show.
@@ -81,38 +196,63 @@ pub enum Failure {
 }
 
 /// One command run after key-up. `transcribe` fills `record` with the
-/// instruction and returns None for an empty or silent one.
+/// instruction and returns None for an empty or silent one; `selection` then
+/// yields what the confirmed hold read.
 pub fn run(
     ports: &Ports,
     run: Run,
     mut record: DictationRecord,
+    selection: impl FnOnce() -> Selection,
     transcribe: impl FnOnce(&mut DictationRecord) -> Option<Result<(), ProviderError>>,
 ) -> Outcome {
     let cancelled = || run.cancelled.load(Ordering::Acquire);
-    let outcome = match transcribe(&mut record) {
-        None => return Outcome::Silent,
+    let transcribed = transcribe(&mut record);
+    let mut selection = selection();
+    selection.late_copy(ports.desktop);
+    // Whether there was a selection and its length, never its text.
+    record.selection_chars = Some(
+        selection
+            .text
+            .as_ref()
+            .map_or(0, |text| text.chars().count() as u64),
+    );
+    record.app = selection.app.clone();
+    let outcome = match transcribed {
+        None => Outcome::Silent,
         // Esc aborts a live transcription, so its error is the cancel.
         Some(_) if cancelled() => Outcome::Cancelled,
         Some(Err(error)) => {
             record.error = Some(error.to_string());
             Outcome::Failed(Failure::Transcription(error))
         }
-        Some(Ok(())) => reply_and_paste(ports, &run, &mut record),
+        Some(Ok(())) => reply_and_paste(ports, &run, &mut record, &selection),
     };
+    // A paste gives the clipboard back itself, once.
+    if outcome != Outcome::Pasted {
+        selection.give_back(ports.desktop);
+    }
+    if outcome == Outcome::Silent {
+        return outcome;
+    }
     if let Outcome::Failed(Failure::Command(error)) = &outcome {
         record.error = Some(crate::failure::command_message(error));
     }
     record.outcome = Some(match outcome {
+        Outcome::Silent => unreachable!("a silent run returned above"),
         Outcome::Pasted => CommandOutcome::Pasted,
         Outcome::Cancelled => CommandOutcome::Cancelled,
         Outcome::Failed(_) => CommandOutcome::Failed,
-        Outcome::Silent => unreachable!("a silent run returned above"),
     });
     ports.history.record(record);
     outcome
 }
 
-fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Outcome {
+fn reply_and_paste(
+    ports: &Ports,
+    run: &Run,
+    record: &mut DictationRecord,
+    selection: &Selection,
+) -> Outcome {
     let cancelled = || run.cancelled.load(Ordering::Acquire);
     if let Some(hold) = &run.hold_error {
         return Outcome::Failed(Failure::Command(ProviderError::Other(hold.clone())));
@@ -125,6 +265,9 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
         },
         reasoning_effort: run.settings.reasoning_effort.clone(),
         instruction: record.text.clone(),
+        selection: selection.text.clone(),
+        app: selection.app.clone(),
+        date: run.date.clone(),
     };
     record.llm_model = Some(request.model.clone());
     let reply = ports.llm.reply(&request, run.cancelled);
@@ -142,7 +285,10 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
             "the reply was empty.".into(),
         )));
     }
-    let pasted = ports.desktop.paste(&reply.text);
+    // Over the selection, which is still selected, or at the cursor.
+    let pasted = ports
+        .desktop
+        .paste(&reply.text, selection.borrowed.as_ref());
     record.reply = Some(reply.text);
     match pasted {
         Ok(at) => {
@@ -158,10 +304,26 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, time::SystemTime};
+    use std::{
+        cell::{Cell, RefCell},
+        time::SystemTime,
+    };
 
+    /// A focused app and its clipboard. Ctrl+Insert copies `selected` (None:
+    /// the app copies nothing) after `copy_lag` polls.
     struct FakeDesktop {
         clipboard: RefCell<Option<String>>,
+        sequence: Cell<u32>,
+        selected: Option<String>,
+        copy_lag: usize,
+        copy_due: Cell<Option<usize>>,
+        vscode_line: bool,
+        unreadable: bool,
+        app: Option<String>,
+        copies: Cell<usize>,
+        waited: Cell<Duration>,
+        /// Every clipboard write by Parla: pastes and restores.
+        writes: RefCell<Vec<String>>,
         pasted: RefCell<Vec<String>>,
         fail_paste: bool,
     }
@@ -169,22 +331,84 @@ mod tests {
         fn new(clipboard: Option<&str>) -> Self {
             Self {
                 clipboard: RefCell::new(clipboard.map(Into::into)),
+                sequence: Cell::new(7),
+                selected: None,
+                copy_lag: 1,
+                copy_due: Cell::new(None),
+                vscode_line: false,
+                unreadable: false,
+                app: Some("notepad.exe".into()),
+                copies: Cell::new(0),
+                waited: Cell::new(Duration::ZERO),
+                writes: RefCell::default(),
                 pasted: RefCell::default(),
                 fail_paste: false,
             }
         }
+        fn write(&self, text: &str) {
+            *self.clipboard.borrow_mut() = Some(text.into());
+            self.writes.borrow_mut().push(text.into());
+        }
     }
-    /// The inserter's contract: the clipboard is the reply while pasting,
-    /// then the user's text again once the restore delay passes.
     impl Desktop for FakeDesktop {
-        fn paste(&self, text: &str) -> Result<Instant, String> {
+        fn clipboard_text(&self) -> Result<Option<String>, String> {
+            if self.unreadable {
+                return Err("clipboard occupied".into());
+            }
+            Ok(self.clipboard.borrow().clone())
+        }
+        fn clipboard_sequence(&self) -> u32 {
+            self.sequence.get()
+        }
+        fn send_copy(&self) -> Result<(), String> {
+            self.copies.set(self.copies.get() + 1);
+            if self.selected.is_some() {
+                self.copy_due.set(Some(self.copy_lag));
+            }
+            Ok(())
+        }
+        fn copied_empty_selection(&self) -> bool {
+            self.vscode_line
+        }
+        fn foreground_app(&self) -> Option<String> {
+            self.app.clone()
+        }
+        fn wait(&self, delay: Duration) {
+            self.waited.set(self.waited.get() + delay);
+            match self.copy_due.get() {
+                Some(1) => {
+                    self.copy_due.set(None);
+                    *self.clipboard.borrow_mut() = self.selected.clone();
+                    self.sequence.set(self.sequence.get() + 1);
+                }
+                Some(left) => self.copy_due.set(Some(left - 1)),
+                None => {}
+            }
+        }
+        /// The inserter's contract: the clipboard is the reply while pasting,
+        /// then the user's text once the restore delay passes.
+        fn paste(&self, text: &str, borrowed: Option<&Borrowed>) -> Result<Instant, String> {
             if self.fail_paste {
                 return Err("clipboard unavailable".into());
             }
-            let saved = self.clipboard.replace(Some(text.into()));
+            let current = self.clipboard.borrow().clone();
+            let owed = match borrowed {
+                Some(borrowed) if current == borrowed.copied => borrowed.saved.clone(),
+                _ => current,
+            };
+            self.write(text);
             self.pasted.borrow_mut().push(text.into());
-            *self.clipboard.borrow_mut() = saved;
+            if let Some(owed) = owed {
+                self.write(&owed);
+            }
             Ok(Instant::now())
+        }
+        fn give_back(&self, borrowed: &Borrowed) {
+            if *self.clipboard.borrow() == borrowed.copied {
+                if let Some(saved) = &borrowed.saved {
+                    self.write(saved);
+                }
+            }
         }
     }
 
@@ -235,6 +459,8 @@ mod tests {
         history: FakeHistory,
         cancelled: AtomicBool,
         settings: CommandSettings,
+        /// Polls that pass between the selection read and key-up.
+        speaking: usize,
     }
     impl Harness {
         fn new(reply: Result<Reply, ProviderError>) -> Self {
@@ -244,6 +470,7 @@ mod tests {
                 history: FakeHistory::default(),
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
+                speaking: 0,
             }
         }
         fn run_with(
@@ -259,19 +486,31 @@ mod tests {
             let input = Run {
                 settings: &self.settings,
                 key_up: Instant::now(),
+                date: "2026-10-17".into(),
                 cancelled: &self.cancelled,
                 hold_error,
             };
+            // Read at the confirmed hold, before the instruction is in.
+            let selection = read_selection(&self.desktop);
+            for _ in 0..self.speaking {
+                self.desktop.wait(COPY_POLL);
+            }
             let mut record = DictationRecord::new(SystemTime::now(), "parakeet");
             record.kind = timing::COMMAND_KIND.into();
-            run(&ports, input, record, |record| {
-                transcript.map(|outcome| {
-                    outcome.map(|text| {
-                        record.text = text.into();
-                        record.provider_returned = Some(timing::elapsed_ms(Instant::now()));
+            run(
+                &ports,
+                input,
+                record,
+                || selection,
+                |record| {
+                    transcript.map(|outcome| {
+                        outcome.map(|text| {
+                            record.text = text.into();
+                            record.provider_returned = Some(timing::elapsed_ms(Instant::now()));
+                        })
                     })
-                })
-            })
+                },
+            )
         }
         fn run(&self, instruction: &str) -> Outcome {
             self.run_with(None, Some(Ok(instruction)))
@@ -296,6 +535,9 @@ mod tests {
                 model: "gpt-6-luna".into(),
                 reasoning_effort: "low".into(),
                 instruction: "Scrivi un saluto breve".into(),
+                selection: None,
+                app: Some("notepad.exe".into()),
+                date: "2026-10-17".into(),
             }]
         );
         let [row] = &h.rows()[..] else {
@@ -438,5 +680,173 @@ mod tests {
         let row = &h.rows()[0];
         assert_eq!(row.reply.as_deref(), Some("Ciao"));
         assert!(row.pasted.is_none());
+    }
+
+    impl Harness {
+        fn selecting(reply: Result<Reply, ProviderError>, selected: &str) -> Self {
+            let mut h = Self::new(reply);
+            h.desktop.selected = Some(selected.into());
+            h
+        }
+        fn clipboard(&self) -> Option<String> {
+            self.desktop.clipboard.borrow().clone()
+        }
+        fn writes(&self) -> Vec<String> {
+            self.desktop.writes.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn a_selection_is_sent_as_data_and_the_reply_replaces_it() {
+        let h = Harness::selecting(text("Buongiorno a tutti."), "ciao a tutti");
+        assert_eq!(h.run("Rendilo più formale"), Outcome::Pasted);
+        let request = &h.llm.requests.borrow()[0];
+        assert_eq!(request.selection.as_deref(), Some("ciao a tutti"));
+        assert_eq!(request.app.as_deref(), Some("notepad.exe"));
+        assert_eq!(request.date, "2026-10-17");
+        // Copied with Ctrl+Insert, then one paste over the still-selected text.
+        assert_eq!(h.desktop.copies.get(), 1);
+        assert_eq!(h.pasted(), ["Buongiorno a tutti."]);
+        // The user's clipboard comes back once, after the paste, not the selection.
+        assert_eq!(h.writes(), ["Buongiorno a tutti.", "user copy"]);
+        assert_eq!(h.clipboard().as_deref(), Some("user copy"));
+        let row = &h.rows()[0];
+        assert_eq!(row.selection_chars, Some(12));
+        assert_eq!(row.app.as_deref(), Some("notepad.exe"));
+        let json = serde_json::to_string(row).unwrap();
+        assert!(
+            !json.contains("ciao a tutti"),
+            "the selection is never kept"
+        );
+    }
+
+    #[test]
+    fn with_nothing_selected_the_reply_goes_in_at_the_cursor() {
+        let h = Harness::new(text("Ciao!"));
+        assert_eq!(h.run("Scrivi un saluto"), Outcome::Pasted);
+        assert_eq!(h.llm.requests.borrow()[0].selection, None);
+        assert_eq!(h.desktop.copies.get(), 1);
+        // The copy got the whole wait, and the clipboard was never borrowed.
+        assert_eq!(h.desktop.waited.get(), COPY_WAIT);
+        assert_eq!(h.pasted(), ["Ciao!"]);
+        assert_eq!(h.clipboard().as_deref(), Some("user copy"));
+        let row = &h.rows()[0];
+        assert_eq!(row.selection_chars, Some(0));
+    }
+
+    #[test]
+    fn a_copy_that_lands_within_the_wait_counts_and_a_later_one_does_not() {
+        let polls = (COPY_WAIT.as_millis() / COPY_POLL.as_millis()) as usize;
+        let mut h = Harness::selecting(text("Hi"), "ciao");
+        h.desktop.copy_lag = polls;
+        h.run("Traduci");
+        assert_eq!(
+            h.llm.requests.borrow()[0].selection.as_deref(),
+            Some("ciao")
+        );
+    }
+
+    #[test]
+    fn a_copy_that_lands_after_the_wait_is_picked_up_when_the_run_joins() {
+        let polls = (COPY_WAIT.as_millis() / COPY_POLL.as_millis()) as usize;
+        let mut h = Harness::selecting(text("Hello"), "ciao");
+        h.desktop.copy_lag = polls + 3;
+        // The user keeps speaking past the wait; the slow app's copy lands.
+        h.speaking = 3;
+        assert_eq!(h.run("Traduci"), Outcome::Pasted);
+        assert_eq!(
+            h.llm.requests.borrow()[0].selection.as_deref(),
+            Some("ciao")
+        );
+        assert_eq!(h.writes(), ["Hello", "user copy"]);
+        // A cancel gives the user's clipboard back over the late copy too.
+        let mut h = Harness::selecting(text("Hello"), "ciao");
+        h.desktop.copy_lag = polls + 3;
+        h.speaking = 3;
+        h.llm.late = true;
+        assert_eq!(h.run("Traduci"), Outcome::Cancelled);
+        assert_eq!(h.writes(), ["user copy"]);
+    }
+
+    #[test]
+    fn vs_codes_empty_selection_line_copy_counts_as_no_selection() {
+        let mut h = Harness::selecting(text("// hello"), "    let x = 1;\r\n");
+        h.desktop.vscode_line = true;
+        assert_eq!(h.run("Scrivi un commento"), Outcome::Pasted);
+        assert_eq!(h.llm.requests.borrow()[0].selection, None);
+        assert_eq!(h.rows()[0].selection_chars, Some(0));
+        // VS Code still overwrote the clipboard with the line: it is given back.
+        assert_eq!(h.writes(), ["// hello", "user copy"]);
+        assert_eq!(h.clipboard().as_deref(), Some("user copy"));
+    }
+
+    #[test]
+    fn an_empty_copy_counts_as_no_selection() {
+        let h = Harness::selecting(text("Hi"), "");
+        assert_eq!(h.run("Saluta"), Outcome::Pasted);
+        assert_eq!(h.llm.requests.borrow()[0].selection, None);
+        assert_eq!(h.clipboard().as_deref(), Some("user copy"));
+    }
+
+    #[test]
+    fn an_unreadable_clipboard_skips_the_copy_rather_than_lose_it() {
+        let mut h = Harness::selecting(text("Hi"), "ciao");
+        h.desktop.unreadable = true;
+        let selection = read_selection(&h.desktop);
+        assert_eq!(h.desktop.copies.get(), 0);
+        assert_eq!(selection.text, None);
+        assert_eq!(selection.app.as_deref(), Some("notepad.exe"));
+    }
+
+    #[test]
+    fn cancelled_failed_and_silent_runs_give_the_clipboard_back_once() {
+        type Setup = fn(&mut Harness) -> Option<Result<&'static str, ProviderError>>;
+        let cases: [(&str, Setup); 5] = [
+            ("esc while waiting", |h| {
+                h.llm.late = true;
+                Some(Ok("Traduci"))
+            }),
+            ("api error", |h| {
+                h.llm.reply = Err(ProviderError::Timeout);
+                Some(Ok("Traduci"))
+            }),
+            ("failed paste", |h| {
+                h.desktop.fail_paste = true;
+                Some(Ok("Traduci"))
+            }),
+            ("failed transcription", |_| {
+                Some(Err(ProviderError::Timeout))
+            }),
+            ("silent instruction", |_| None),
+        ];
+        for (case, setup) in cases {
+            let mut h = Harness::selecting(text("Hello"), "ciao");
+            let transcript = setup(&mut h);
+            assert_ne!(h.run_with(None, transcript), Outcome::Pasted, "{case}");
+            assert!(h.pasted().is_empty(), "{case}");
+            assert_eq!(h.writes(), ["user copy"], "{case}");
+        }
+        // Esc while still holding: the run never starts, flow gives it back.
+        let h = Harness::selecting(text("never"), "ciao");
+        read_selection(&h.desktop).give_back(&h.desktop);
+        assert_eq!(h.writes(), ["user copy"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn today_is_a_plain_iso_date() {
+        let today = today();
+        assert_eq!(today.len(), 10, "{today}");
+        assert!(today.starts_with("20") && today.as_bytes()[4] == b'-');
+    }
+
+    #[test]
+    fn a_copy_the_user_makes_during_the_run_is_kept() {
+        let h = Harness::selecting(Err(ProviderError::Timeout), "ciao");
+        let selection = read_selection(&h.desktop);
+        *h.desktop.clipboard.borrow_mut() = Some("newer copy".into());
+        selection.give_back(&h.desktop);
+        assert!(h.writes().is_empty());
+        assert_eq!(h.clipboard().as_deref(), Some("newer copy"));
     }
 }

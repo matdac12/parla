@@ -58,6 +58,13 @@ pub struct DictationRecord {
     /// The LLM's text reply, kept for Copy (PARLA-66) even if the paste failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
+    /// The selection's length in characters, 0 for none (PARLA-64); its
+    /// text is never kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_chars: Option<u64>,
+    /// The focused app's executable name at the confirmed hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// How a command run ended.
@@ -101,6 +108,8 @@ impl DictationRecord {
             tokens_out: None,
             llm_returned: None,
             reply: None,
+            selection_chars: None,
+            app: None,
         }
     }
 }
