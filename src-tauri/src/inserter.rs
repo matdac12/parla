@@ -33,15 +33,17 @@ pub fn paste_text(text: &str, restore_delay: Duration) -> Result<(), String> {
 /// clipboard restoration.
 #[cfg(windows)]
 pub fn paste_text_timed(text: &str, restore_delay: Duration) -> Result<Instant, String> {
-    paste_text_with_options(text, restore_delay, false)
+    paste_text_with_options(text, restore_delay, false, false)
 }
 
 /// Compatibility mode retains the original waits for applications that need them.
+/// `send` presses Enter right after a successful paste (PARLA-58).
 #[cfg(windows)]
 pub fn paste_text_with_options(
     text: &str,
     restore_delay: Duration,
     compatibility_mode: bool,
+    send: bool,
 ) -> Result<Instant, String> {
     // AudioBud also serializes capture/write/paste/restore as one transaction:
     // https://github.com/jamditis/audiobud/blob/main/src-tauri/src/clipboard.rs
@@ -52,6 +54,7 @@ pub fn paste_text_with_options(
         text,
         restore_delay,
         compatibility_mode,
+        send,
     );
     if let Some(restore) = pending.as_ref() {
         schedule_restore(restore.due);
@@ -111,8 +114,44 @@ pub fn paste_text_with_options(
     text: &str,
     restore_delay: Duration,
     _compatibility_mode: bool,
+    _send: bool,
 ) -> Result<Instant, String> {
     paste_text_timed(text, restore_delay)
+}
+
+/// Auto-send (PARLA-58): when the last word is "send" or "invia", returns the
+/// text to paste without it, and the caller presses Enter after the paste.
+/// Case and trailing punctuation are ignored; only a whole word counts
+/// ("resend" does not). A dangling comma or dash before it is dropped, a full
+/// stop is kept. A dictation that is only the trigger stays plain text.
+/// A suffix scan of the final transcript, so it costs nothing before the paste.
+pub fn strip_send_trigger(text: &str) -> Option<&str> {
+    let body = text.trim_end_matches(|c: char| !c.is_alphanumeric());
+    let start = body
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !is_word_char(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let word = &body[start..];
+    if !["send", "invia"]
+        .iter()
+        .any(|t| word.eq_ignore_ascii_case(t))
+    {
+        return None;
+    }
+    let kept = body[..start].trim_end_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';' | ':' | '-' | '–' | '—' | '(' | '[' | '«' | '“' | '‘'
+            )
+    });
+    kept.contains(char::is_alphanumeric).then_some(kept)
+}
+
+/// Apostrophes and hyphens join a word, so "re-send" is not "send".
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '\'' | '’' | '-')
 }
 
 #[cfg(any(windows, test))]
@@ -127,6 +166,8 @@ trait Desktop {
     fn write_text(&mut self, text: &str) -> Result<(), String>;
     /// Returns the instant the V click was injected, before the key-hold.
     fn send_paste(&mut self, key_hold: Duration) -> Result<Instant, String>;
+    /// A plain Enter, after the paste's Ctrl is released.
+    fn send_enter(&mut self) -> Result<(), String>;
     fn wait(&mut self, delay: Duration);
 }
 
@@ -148,6 +189,7 @@ fn paste_deferring_restore(
     text: &str,
     restore_delay: Duration,
     compatibility_mode: bool,
+    send: bool,
 ) -> Result<Instant, String> {
     let current = restorable_text(desktop.read_text()?);
     // Still our previous transcript: the user's text is the one owed back.
@@ -165,6 +207,13 @@ fn paste_deferring_restore(
     };
     desktop.wait(settle);
     let result = desktop.send_paste(key_hold);
+    // No extra delay: injected keys reach the app in order (Mattia, PARLA-58).
+    // The text is already pasted, so a failed Enter is not a failed dictation.
+    if send && result.is_ok() {
+        if let Err(error) = desktop.send_enter() {
+            eprintln!("Parla auto-send Enter failed: {error}");
+        }
+    }
     // Always attempt restoration, even if input injection failed.
     *pending = saved.map(|saved| PendingRestore {
         saved,
@@ -287,6 +336,34 @@ impl Desktop for WindowsDesktop {
         paste.and(release_v).and(release_ctrl).map(|()| pasted)
     }
 
+    fn send_enter(&mut self) -> Result<(), String> {
+        let _synthetic_input = crate::hotkey::synthetic_input_guard();
+        use enigo::{Direction, Key, Keyboard};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        // Any held modifier, including a Ctrl the paste borrowed, would turn
+        // this into Ctrl+Enter or similar. The hook ignores injected releases.
+        for (vk, key) in [
+            (0xa0, Key::LShift),
+            (0xa1, Key::RShift),
+            (0xa2, Key::LControl),
+            (0xa3, Key::RControl),
+            (0xa4, Key::LMenu),
+            (0xa5, Key::RMenu),
+            (0x5b, Key::LWin),
+            (0x5c, Key::RWin),
+        ] {
+            // SAFETY: vk is a supported Windows virtual-key code.
+            if unsafe { GetAsyncKeyState(vk) } < 0 {
+                self.input
+                    .key(key, Direction::Release)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        self.input
+            .key(Key::Return, Direction::Click)
+            .map_err(|e| e.to_string())
+    }
+
     fn wait(&mut self, delay: Duration) {
         std::thread::sleep(delay);
     }
@@ -324,6 +401,7 @@ mod tests {
         copy_after_failed_write: Option<String>,
         key_holds: Vec<Duration>,
         paste_stamp: Option<Instant>,
+        enters: usize,
     }
 
     impl MemoryDesktop {
@@ -341,6 +419,7 @@ mod tests {
                 copy_after_failed_write: None,
                 key_holds: Vec::new(),
                 paste_stamp: None,
+                enters: 0,
             }
         }
     }
@@ -383,6 +462,11 @@ mod tests {
             self.paste_stamp = Some(stamp);
             Ok(stamp)
         }
+        fn send_enter(&mut self) -> Result<(), String> {
+            assert!(!self.pasted.is_empty(), "Enter must follow the paste");
+            self.enters += 1;
+            Ok(())
+        }
         fn wait(&mut self, delay: Duration) {
             self.waits.push(delay);
         }
@@ -402,6 +486,7 @@ mod tests {
             text,
             restore_delay,
             compatibility_mode,
+            false,
         );
         desktop.wait(restore_delay);
         restore_pending(desktop, &mut pending);
@@ -414,7 +499,7 @@ mod tests {
         let mut pending = None;
         let delay = Duration::from_millis(250);
         let before = Instant::now();
-        paste_deferring_restore(&mut desktop, &mut pending, "new", delay, false).unwrap();
+        paste_deferring_restore(&mut desktop, &mut pending, "new", delay, false, false).unwrap();
         assert_eq!(desktop.waits, [Duration::from_millis(15)]);
         assert_eq!(desktop.text.as_deref(), Some("new"));
         let restore = pending.as_ref().unwrap();
@@ -427,8 +512,8 @@ mod tests {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
         let delay = Duration::from_millis(250);
-        paste_deferring_restore(&mut desktop, &mut pending, "first", delay, false).unwrap();
-        paste_deferring_restore(&mut desktop, &mut pending, "second", delay, false).unwrap();
+        paste_deferring_restore(&mut desktop, &mut pending, "first", delay, false, false).unwrap();
+        paste_deferring_restore(&mut desktop, &mut pending, "second", delay, false, false).unwrap();
         assert_eq!(desktop.pasted, ["first", "second"]);
         // No early restore, no wait: the pending restore is carried forward.
         assert_eq!(desktop.writes, ["first", "second"]);
@@ -443,11 +528,25 @@ mod tests {
     fn a_copy_between_pastes_replaces_the_pending_restore() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
-        paste_deferring_restore(&mut desktop, &mut pending, "first", Duration::ZERO, false)
-            .unwrap();
+        paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "first",
+            Duration::ZERO,
+            false,
+            false,
+        )
+        .unwrap();
         desktop.text = Some("user copy".into());
-        paste_deferring_restore(&mut desktop, &mut pending, "second", Duration::ZERO, false)
-            .unwrap();
+        paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "second",
+            Duration::ZERO,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(pending.as_ref().unwrap().saved, "user copy");
     }
 
@@ -455,7 +554,15 @@ mod tests {
     fn the_timer_restore_runs_exactly_once() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
-        paste_deferring_restore(&mut desktop, &mut pending, "new", Duration::ZERO, false).unwrap();
+        paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "new",
+            Duration::ZERO,
+            false,
+            false,
+        )
+        .unwrap();
         restore_pending(&mut desktop, &mut pending);
         assert_eq!(desktop.text.as_deref(), Some("old"));
         assert!(pending.is_none());
@@ -467,7 +574,15 @@ mod tests {
     fn nothing_is_pending_for_an_empty_or_non_text_clipboard() {
         let mut desktop = MemoryDesktop::new(None);
         let mut pending = None;
-        paste_deferring_restore(&mut desktop, &mut pending, "new", Duration::ZERO, false).unwrap();
+        paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "new",
+            Duration::ZERO,
+            false,
+            false,
+        )
+        .unwrap();
         assert!(pending.is_none());
     }
 
@@ -566,6 +681,86 @@ mod tests {
             let mut desktop = MemoryDesktop::new(original);
             paste_with_backend(&mut desktop, "new", Duration::ZERO, false).unwrap();
             assert_eq!(desktop.writes, ["new"]);
+        }
+    }
+
+    #[test]
+    fn send_presses_enter_once_right_after_the_paste_and_still_restores() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        let mut pending = None;
+        paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "hi",
+            Duration::ZERO,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!((desktop.pasted.len(), desktop.enters), (1, 1));
+        // No wait is added for the Enter: only the settle.
+        assert_eq!(desktop.waits, [CLIPBOARD_SETTLE]);
+        restore_pending(&mut desktop, &mut pending);
+        assert_eq!(desktop.text.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn no_enter_without_send_or_when_the_paste_failed() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        paste_with_backend(&mut desktop, "hi", Duration::ZERO, false).unwrap();
+        assert_eq!(desktop.enters, 0);
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        desktop.injection_error = true;
+        let mut pending = None;
+        let result = paste_deferring_restore(
+            &mut desktop,
+            &mut pending,
+            "hi",
+            Duration::ZERO,
+            false,
+            true,
+        );
+        assert!(result.is_err());
+        assert_eq!(desktop.enters, 0);
+    }
+
+    #[test]
+    fn send_trigger_is_stripped_from_the_last_word() {
+        for (said, pasted) in [
+            ("See you tomorrow, send.", "See you tomorrow"),
+            ("Ci vediamo domani, invia.", "Ci vediamo domani"),
+            ("Done. Invia.", "Done."),
+            ("Are you coming? Send!", "Are you coming?"),
+            ("ok send", "ok"),
+            ("Ok SEND", "Ok"),
+            ("Va bene invia…", "Va bene"),
+            ("Call me — send.", "Call me"),
+            ("Ciao «invia»", "Ciao"),
+            ("Perfetto, grazie; Invia ", "Perfetto, grazie"),
+            ("È già pronto, invia.", "È già pronto"),
+        ] {
+            assert_eq!(strip_send_trigger(said), Some(pasted), "{said:?}");
+        }
+    }
+
+    #[test]
+    fn other_words_and_a_lone_trigger_are_not_sent() {
+        for said in [
+            "Please resend.",
+            "re-send",
+            "L'ho inviato.",
+            "Who is the sender?",
+            "Send it to Marco.",
+            "Invia il file a Marco.",
+            "inviare",
+            "Sent.",
+            "Send.",
+            "invia",
+            " , invia!",
+            "",
+            "...",
+        ] {
+            assert_eq!(strip_send_trigger(said), None, "{said:?}");
         }
     }
 

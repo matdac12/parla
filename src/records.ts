@@ -70,6 +70,7 @@ export interface Settings {
   hotkey: string;
   restore_delay_ms: number;
   paste_compatibility_mode: boolean;
+  auto_send: boolean;
   streaming_enabled: boolean;
   live_captions: boolean;
   vocabulary: string[];
