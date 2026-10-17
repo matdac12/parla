@@ -10,10 +10,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{atomic::AtomicBool, mpsc},
     time::Duration,
 };
 
@@ -289,9 +286,6 @@ pub fn send(api_key: &str, request: &Request) -> Result<Reply, ProviderError> {
     parse(status, &text)
 }
 
-/// How soon Esc frees the pill during the wait.
-const CANCEL_POLL: Duration = Duration::from_millis(20);
-
 /// The LLM port: `send` on its own thread, so Esc returns at once and a late
 /// reply lands in a dropped channel.
 pub struct OpenAi<'a>(pub &'a Settings);
@@ -307,15 +301,9 @@ impl super::Llm for OpenAi<'_> {
                 let _ = sender.send(send(&api_key, &request));
             })
             .map_err(|error| ProviderError::Other(format!("Cannot start the request: {error}")))?;
-        while !cancelled.load(Ordering::Acquire) {
-            match receiver.recv_timeout(CANCEL_POLL) {
-                Ok(reply) => return reply,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        // Cancelled (the orchestrator discards it) or the thread died.
-        Err(ProviderError::Other("No reply.".into()))
+        // None: cancelled (the orchestrator discards it) or the thread died.
+        crate::provider::unless_cancelled(&receiver, cancelled, Duration::MAX)
+            .unwrap_or_else(|| Err(ProviderError::Other("No reply.".into())))
     }
 }
 #[cfg(test)]
