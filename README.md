@@ -303,8 +303,8 @@ Command mode is a separate mode, with its own hotkey, where what you say is an
 **instruction** rather than text to paste. It is the only place Parla will
 call an LLM; dictation always pastes the raw transcript (see
 `docs/adr/0001-command-mode-is-the-only-llm-path.md`). It is being built in
-steps (PARLA-61). **So far it answers an instruction with text pasted at the
-cursor;** it doesn't read a selection or open pages yet.
+steps (PARLA-61). **So far it applies an instruction to the selected text, or
+answers it at the cursor;** it doesn't open pages yet.
 
 It is off by default: turn it on in Settings → **Dictation & hotkey** →
 **Command mode** (see [The Parla window](#the-parla-window)). It needs an
@@ -314,15 +314,27 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - **Hold** the command hotkey (default left **Ctrl** plus either **Shift**;
   see [Hotkey](#hotkey)), say the instruction, release. It is hold only: no
   hands-free lock, and Space does nothing special.
+- **Selection:** once the hold passes 300 ms, while you are still speaking,
+  Parla saves your clipboard text, sends **Ctrl+Insert** (never Ctrl+C, so a
+  terminal is never interrupted) and watches the clipboard for about 150 ms.
+  New, non-empty text is the selection. Nothing new, or VS Code's copy of the
+  whole line when nothing is selected, means no selection. The focused app's
+  executable name is noted too, and the connection to OpenAI is opened ahead
+  of the request.
 - The pill is **orange** while recording, transcribing and waiting for the
   reply. The instruction is transcribed by the active provider, the same
   engine dictation uses, and sent to `model` (`gpt-6-luna`) through the OpenAI
   **Responses API**: one request with Parla's built-in system prompt,
   `store: false` (OpenAI keeps nothing), the configured `reasoning_effort`, a
-  cap of about 2,000 output tokens and a 20 s timeout.
-- The text reply is **pasted once at the cursor**, the same way a dictation is
-  pasted, so one Ctrl+Z removes it. Your clipboard is restored afterwards. The
-  pill then shows the check.
+  cap of about 2,000 output tokens and a 20 s timeout. The request carries the
+  instruction, the selection between `<selection>` tags (data to work on,
+  never instructions), the app name and today's date.
+- The text reply is **pasted once**, over the selection if there was one,
+  otherwise at the cursor, the same way a dictation is pasted, so one Ctrl+Z
+  brings back what was there. Your clipboard text is restored once, after the
+  paste, and also when a run is cancelled, fails or hears nothing. A copy you
+  make during the run is kept. Non-text clipboard content (an image) is not
+  restored, as with dictation. The pill then shows the check.
 - An empty or silent instruction ends quietly: no LLM call and no row.
 - A network error, a timeout, an API error, a reply cut off by the token cap
   or an empty reply shows the red cross and a "Command mode: …" notification,
@@ -335,9 +347,11 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
   `outcome` (`pasted`, `failed` or `cancelled`), `llm_model`, `tokens_in` and
-  `tokens_out`, the `reply`, and stage times from key-up (`provider_returned`
-  for the transcript, `llm_returned` for the reply, `pasted`). A cancel while
-  you are still holding leaves no row.
+  `tokens_out`, the `reply`, `selection` (whether there was one),
+  `selection_chars` (its length; its text is never kept), `app` (the focused
+  executable), and stage times from key-up (`provider_returned` for the
+  transcript, `llm_returned` for the reply, `pasted`). A cancel while you are
+  still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
   as usual), and the hold stops after 120 s. Recording starts at key-down, but

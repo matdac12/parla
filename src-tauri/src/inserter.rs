@@ -9,6 +9,14 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_RESTORE_DELAY_MS: u64 = 250;
 
+/// The user's clipboard while command mode's Ctrl+Insert holds it (PARLA-64):
+/// `saved` is owed back as long as the clipboard still holds `copied`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Borrowed {
+    pub saved: Option<String>,
+    pub copied: Option<String>,
+}
+
 /// Lets clipboard listeners (Win+V, clipboard managers) release the clipboard
 /// before Ctrl+V. 15 ms measured no more contention than 25 ms (PARLA-45).
 #[cfg(any(windows, test))]
@@ -45,12 +53,37 @@ pub fn paste_text_with_options(
     compatibility_mode: bool,
     send: bool,
 ) -> Result<Instant, String> {
+    paste_transaction(text, None, restore_delay, compatibility_mode, send)
+}
+
+/// Command mode's paste (PARLA-64): over the selection Ctrl+Insert copied, if
+/// any. The restore owes `borrowed`'s saved text while the clipboard still
+/// holds the copy, so the user's clipboard comes back once, after the paste.
+#[cfg(windows)]
+pub fn paste_over_borrowed(
+    text: &str,
+    borrowed: Option<&Borrowed>,
+    restore_delay: Duration,
+    compatibility_mode: bool,
+) -> Result<Instant, String> {
+    paste_transaction(text, borrowed, restore_delay, compatibility_mode, false)
+}
+
+#[cfg(windows)]
+fn paste_transaction(
+    text: &str,
+    borrowed: Option<&Borrowed>,
+    restore_delay: Duration,
+    compatibility_mode: bool,
+    send: bool,
+) -> Result<Instant, String> {
     // AudioBud also serializes capture/write/paste/restore as one transaction:
     // https://github.com/jamditis/audiobud/blob/main/src-tauri/src/clipboard.rs
     let mut pending = pending_restore();
-    let result = paste_deferring_restore(
+    let result = paste_over(
         &mut WindowsDesktop::new()?,
         &mut pending,
+        borrowed,
         text,
         restore_delay,
         compatibility_mode,
@@ -60,6 +93,152 @@ pub fn paste_text_with_options(
         schedule_restore(restore.due);
     }
     result
+}
+
+/// The clipboard's text for command mode's selection read. A dictation's
+/// restore still pending runs first, so the user's own text is what is read.
+#[cfg(windows)]
+pub fn clipboard_text() -> Result<Option<String>, String> {
+    read_settled(&mut WindowsDesktop::new()?, &mut pending_restore())
+}
+
+/// Writes the user's text back now, unless the clipboard moved on from the
+/// copy: a command run that pastes nothing.
+#[cfg(windows)]
+pub fn give_back(borrowed: &Borrowed) {
+    // Serialized with the restore timer, like a paste.
+    let _pending = pending_restore();
+    match WindowsDesktop::new() {
+        Ok(mut desktop) => give_back_to(&mut desktop, borrowed),
+        Err(error) => eprintln!("Parla clipboard give-back failed: {error}"),
+    }
+}
+
+/// Ctrl+Insert into the focused app, for command mode's selection read: never
+/// Ctrl+C, which would interrupt a terminal. It runs while the user still
+/// holds the command hotkey, so the modifiers it released go back down before
+/// the synthetic-input guard drops: the hook's watchdog samples the logical
+/// state and would read a missing Shift as the hotkey let go. No waits in
+/// between, so a real release can hardly slip in.
+#[cfg(windows)]
+pub fn send_copy() -> Result<(), String> {
+    use enigo::{Direction, Key, Keyboard};
+    let _synthetic_input = crate::hotkey::synthetic_input_guard();
+    // Enigo releases the keys it pressed when dropped; these stay held.
+    let settings = enigo::Settings {
+        release_keys_when_dropped: false,
+        ..enigo::Settings::default()
+    };
+    let mut input = enigo::Enigo::new(&settings).map_err(|e| e.to_string())?;
+    let (borrow_control, released) = clear_for_control(&mut input)?;
+    let press = if borrow_control {
+        Ok(())
+    } else {
+        input.key(Key::Control, Direction::Press)
+    };
+    let copy = press.and_then(|()| input.key(Key::Insert, Direction::Click));
+    let release_control = if borrow_control {
+        Ok(())
+    } else {
+        input.key(Key::Control, Direction::Release)
+    };
+    let held_again = released
+        .into_iter()
+        .try_for_each(|key| input.key(key, Direction::Press));
+    copy.and(release_control)
+        .and(held_again)
+        .map_err(|e| e.to_string())
+}
+
+/// Moves on whenever any app writes the clipboard.
+#[cfg(windows)]
+pub fn clipboard_sequence() -> u32 {
+    // SAFETY: no parameters; it only reads the window station's counter.
+    unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() }
+}
+
+/// VS Code copies the whole line when nothing is selected, and marks it in
+/// its `vscode-editor-data` (`"isFromEmptySelection":true`). Chromium keeps
+/// that web type in this format, a pickle of UTF-16 strings.
+#[cfg(windows)]
+pub fn copied_empty_selection() -> bool {
+    use windows_sys::Win32::{
+        Foundation::HGLOBAL,
+        System::{DataExchange::*, Memory::*},
+    };
+    let name: Vec<u16> = "Chromium Web Custom MIME Data Format\0"
+        .encode_utf16()
+        .collect();
+    // SAFETY: `name` is NUL-terminated UTF-16.
+    let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
+    // SAFETY: plain value parameters.
+    if format == 0 || unsafe { IsClipboardFormatAvailable(format) } == 0 {
+        return false;
+    }
+    // Listeners such as clipboard managers open it right after every copy.
+    let opened = (0..5).any(|attempt| {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // SAFETY: no owner window; closed below.
+        unsafe { OpenClipboard(std::ptr::null_mut()) != 0 }
+    });
+    if !opened {
+        return false;
+    }
+    // SAFETY: the clipboard is open; the handle is only read while locked,
+    // within its GlobalSize, and the clipboard is closed before returning.
+    let units = unsafe {
+        let handle = GetClipboardData(format) as HGLOBAL;
+        let mut units = Vec::new();
+        if !handle.is_null() {
+            let pointer = GlobalLock(handle) as *const u8;
+            if !pointer.is_null() {
+                units = std::slice::from_raw_parts(pointer, GlobalSize(handle))
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                GlobalUnlock(handle);
+            }
+        }
+        CloseClipboard();
+        units
+    };
+    String::from_utf16_lossy(&units).contains("\"isFromEmptySelection\":true")
+}
+
+/// The focused window's executable name, such as `notepad.exe`.
+#[cfg(windows)]
+pub fn foreground_app() -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+        UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+    };
+    let mut path = [0u16; 1024];
+    let mut length = path.len() as u32;
+    // SAFETY: the out pointers are valid for the given sizes, and the process
+    // handle is closed once its name is read.
+    let named = unsafe {
+        let mut process_id = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut process_id);
+        if process_id == 0 {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if process.is_null() {
+            return None;
+        }
+        let named =
+            QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut length);
+        CloseHandle(process);
+        named != 0
+    };
+    let path = String::from_utf16_lossy(&path[..length as usize]);
+    named.then(|| path.rsplit('\\').next().unwrap_or(&path).to_owned())
 }
 
 /// The paste transaction: at most one restore is pending at a time.
@@ -107,6 +286,44 @@ fn schedule_restore(due: Instant) {
 #[cfg(not(windows))]
 pub fn paste_text_timed(_text: &str, _restore_delay: Duration) -> Result<Instant, String> {
     Err("Text insertion is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn paste_over_borrowed(
+    _text: &str,
+    _borrowed: Option<&Borrowed>,
+    _restore_delay: Duration,
+    _compatibility_mode: bool,
+) -> Result<Instant, String> {
+    Err("Text insertion is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn clipboard_text() -> Result<Option<String>, String> {
+    Err("The clipboard is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn give_back(_borrowed: &Borrowed) {}
+
+#[cfg(not(windows))]
+pub fn send_copy() -> Result<(), String> {
+    Err("Input is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn clipboard_sequence() -> u32 {
+    0
+}
+
+#[cfg(not(windows))]
+pub fn copied_empty_selection() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn foreground_app() -> Option<String> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -182,7 +399,7 @@ struct PendingRestore {
 /// Pastes and returns without waiting for the restore, which is left in
 /// `pending`. Keeping the dictation busy through the restore delay dropped a
 /// dictation started right after a paste (PARLA-48).
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn paste_deferring_restore(
     desktop: &mut impl Desktop,
     pending: &mut Option<PendingRestore>,
@@ -191,10 +408,34 @@ fn paste_deferring_restore(
     compatibility_mode: bool,
     send: bool,
 ) -> Result<Instant, String> {
+    paste_over(
+        desktop,
+        pending,
+        None,
+        text,
+        restore_delay,
+        compatibility_mode,
+        send,
+    )
+}
+
+/// `paste_deferring_restore` for a clipboard command mode may have borrowed.
+#[cfg(any(windows, test))]
+fn paste_over(
+    desktop: &mut impl Desktop,
+    pending: &mut Option<PendingRestore>,
+    borrowed: Option<&Borrowed>,
+    text: &str,
+    restore_delay: Duration,
+    compatibility_mode: bool,
+    send: bool,
+) -> Result<Instant, String> {
     let current = restorable_text(desktop.read_text()?);
-    // Still our previous transcript: the user's text is the one owed back.
-    let saved = match pending.as_ref() {
-        Some(restore) if current.as_deref() == Some(restore.pasted.as_str()) => {
+    let saved = match (borrowed, pending.as_ref()) {
+        // Still command mode's copy of the selection: the user's text is owed.
+        (Some(borrowed), _) if current == borrowed.copied => borrowed.saved.clone(),
+        // Still our previous transcript: the user's text is the one owed back.
+        (_, Some(restore)) if current.as_deref() == Some(restore.pasted.as_str()) => {
             Some(restore.saved.clone())
         }
         _ => current,
@@ -229,17 +470,45 @@ fn restore_pending(desktop: &mut impl Desktop, pending: &mut Option<PendingResto
     let Some(restore) = pending.take() else {
         return;
     };
-    if let Err(error) = restore_clipboard(desktop, &restore.pasted, &restore.saved) {
+    if let Err(error) = restore_clipboard(desktop, Some(&restore.pasted), &restore.saved) {
         eprintln!("Parla clipboard restore failed after retries: {error}");
     }
 }
 
+/// Command mode's read: the pending restore first, so a dictation's
+/// transcript is never taken for the user's clipboard.
 #[cfg(any(windows, test))]
-fn restore_clipboard(desktop: &mut impl Desktop, pasted: &str, saved: &str) -> Result<(), String> {
+fn read_settled(
+    desktop: &mut impl Desktop,
+    pending: &mut Option<PendingRestore>,
+) -> Result<Option<String>, String> {
+    restore_pending(desktop, pending);
+    Ok(restorable_text(desktop.read_text()?))
+}
+
+#[cfg(any(windows, test))]
+fn give_back_to(desktop: &mut impl Desktop, borrowed: &Borrowed) {
+    let Some(saved) = &borrowed.saved else {
+        return;
+    };
+    if let Err(error) = restore_clipboard(desktop, borrowed.copied.as_deref(), saved) {
+        eprintln!("Parla clipboard give-back failed after retries: {error}");
+    }
+}
+
+/// Writes `saved` while the clipboard still holds `pasted` (None: no text).
+#[cfg(any(windows, test))]
+fn restore_clipboard(
+    desktop: &mut impl Desktop,
+    pasted: Option<&str>,
+    saved: &str,
+) -> Result<(), String> {
     for attempt in 0..5 {
         // Re-read on EVERY attempt: a user copy may arrive after a failed write.
         let result = match desktop.read_text() {
-            Ok(current) if current.as_deref() != Some(pasted) => return Ok(()),
+            Ok(current) if current.as_deref().filter(|text| !text.is_empty()) != pasted => {
+                return Ok(())
+            }
             Ok(_) => desktop.write_text(saved),
             Err(error) => Err(error),
         };
@@ -268,6 +537,37 @@ impl WindowsDesktop {
     }
 }
 
+/// Readies Ctrl+<key>: reuse a Ctrl already held by the user instead of
+/// synthetically releasing it. Other modifiers would change the shortcut, so
+/// clear only those currently down. The hook ignores all injected cleanup
+/// events. Returns whether Ctrl is borrowed and the keys released.
+#[cfg(windows)]
+fn clear_for_control(input: &mut enigo::Enigo) -> Result<(bool, Vec<enigo::Key>), String> {
+    use enigo::{Direction, Key, Keyboard};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    // SAFETY: GetAsyncKeyState has no pointer parameters; the sign bit is
+    // the current logical state, sampled outside the keyboard callback.
+    let borrow_control = unsafe { GetAsyncKeyState(0xa2) < 0 || GetAsyncKeyState(0xa3) < 0 };
+    let mut released = Vec::new();
+    for (vk, key) in [
+        (0xa0, Key::LShift),
+        (0xa1, Key::RShift),
+        (0xa4, Key::LMenu),
+        (0xa5, Key::RMenu),
+        (0x5b, Key::LWin),
+        (0x5c, Key::RWin),
+    ] {
+        // SAFETY: vk is a supported Windows virtual-key code.
+        if unsafe { GetAsyncKeyState(vk) } < 0 {
+            input
+                .key(key, Direction::Release)
+                .map_err(|e| e.to_string())?;
+            released.push(key);
+        }
+    }
+    Ok((borrow_control, released))
+}
+
 #[cfg(windows)]
 impl Desktop for WindowsDesktop {
     fn read_text(&mut self) -> Result<Option<String>, String> {
@@ -287,28 +587,7 @@ impl Desktop for WindowsDesktop {
     fn send_paste(&mut self, key_hold: Duration) -> Result<Instant, String> {
         let _synthetic_input = crate::hotkey::synthetic_input_guard();
         use enigo::{Direction, Key, Keyboard};
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-        // Reuse a Ctrl already held by the user instead of synthetically
-        // releasing it. Other modifiers would change Ctrl+V, so clear only
-        // those currently down. The hook ignores all injected cleanup events.
-        // SAFETY: GetAsyncKeyState has no pointer parameters; the sign bit is
-        // the current logical state, sampled outside the keyboard callback.
-        let borrow_control = unsafe { GetAsyncKeyState(0xa2) < 0 || GetAsyncKeyState(0xa3) < 0 };
-        for (vk, key) in [
-            (0xa0, Key::LShift),
-            (0xa1, Key::RShift),
-            (0xa4, Key::LMenu),
-            (0xa5, Key::RMenu),
-            (0x5b, Key::LWin),
-            (0x5c, Key::RWin),
-        ] {
-            // SAFETY: vk is a supported Windows virtual-key code.
-            if unsafe { GetAsyncKeyState(vk) } < 0 {
-                self.input
-                    .key(key, Direction::Release)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
+        let (borrow_control, _) = clear_for_control(&mut self.input)?;
         if !borrow_control {
             self.input
                 .key(Key::Control, Direction::Press)
@@ -762,6 +1041,90 @@ mod tests {
         ] {
             assert_eq!(strip_send_trigger(said), None, "{said:?}");
         }
+    }
+
+    fn borrowed(saved: Option<&str>, copied: Option<&str>) -> Borrowed {
+        Borrowed {
+            saved: saved.map(Into::into),
+            copied: copied.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_paste_over_a_borrowed_clipboard_owes_the_users_text_not_the_copy() {
+        let mut desktop = MemoryDesktop::new(Some("selected text"));
+        let mut pending = None;
+        let lent = borrowed(Some("user copy"), Some("selected text"));
+        paste_over(
+            &mut desktop,
+            &mut pending,
+            Some(&lent),
+            "reply",
+            Duration::ZERO,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(desktop.pasted, ["reply"]);
+        restore_pending(&mut desktop, &mut pending);
+        assert_eq!(desktop.writes, ["reply", "user copy"]);
+    }
+
+    #[test]
+    fn a_copy_made_after_the_borrow_is_what_a_paste_owes() {
+        let mut desktop = MemoryDesktop::new(Some("newer copy"));
+        let mut pending = None;
+        let lent = borrowed(Some("user copy"), Some("selected text"));
+        paste_over(
+            &mut desktop,
+            &mut pending,
+            Some(&lent),
+            "reply",
+            Duration::ZERO,
+            false,
+            false,
+        )
+        .unwrap();
+        restore_pending(&mut desktop, &mut pending);
+        assert_eq!(desktop.text.as_deref(), Some("newer copy"));
+    }
+
+    #[test]
+    fn giving_back_writes_the_users_text_unless_the_clipboard_moved_on() {
+        for (clipboard, lent, after) in [
+            (
+                Some("line"),
+                borrowed(Some("user"), Some("line")),
+                Some("user"),
+            ),
+            (
+                Some("newer"),
+                borrowed(Some("user"), Some("line")),
+                Some("newer"),
+            ),
+            (Some("line"), borrowed(None, Some("line")), Some("line")),
+            // A copy with no text (an image): the user's text still comes back.
+            (None, borrowed(Some("user"), None), Some("user")),
+        ] {
+            let mut desktop = MemoryDesktop::new(clipboard);
+            give_back_to(&mut desktop, &lent);
+            assert_eq!(desktop.text.as_deref(), after, "{lent:?}");
+            assert!(desktop.writes.len() <= 1);
+        }
+    }
+
+    #[test]
+    fn reading_for_command_mode_runs_a_pending_dictation_restore_first() {
+        let mut desktop = MemoryDesktop::new(Some("user copy"));
+        let mut pending = None;
+        let delay = Duration::from_secs(1);
+        paste_deferring_restore(&mut desktop, &mut pending, "dictated", delay, false, false)
+            .unwrap();
+        assert_eq!(
+            read_settled(&mut desktop, &mut pending),
+            Ok(Some("user copy".into()))
+        );
+        assert!(pending.is_none());
     }
 
     #[test]
