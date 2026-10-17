@@ -77,6 +77,8 @@ export interface Settings {
   local_model: string;
   dim_other_audio: boolean;
   dim_audio_level: number;
+  /** Command mode; edited in settings.json only until PARLA-67. */
+  command: { enabled: boolean; hotkey: string; model: string; reasoning_effort: string };
   providers: Record<string, Record<string, unknown>>;
 }
 

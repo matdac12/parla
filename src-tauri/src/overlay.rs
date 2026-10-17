@@ -74,10 +74,18 @@ fn set_memory_target(window: &tauri::WebviewWindow, low: bool) {
 #[cfg(not(windows))]
 fn set_memory_target(_window: &tauri::WebviewWindow, _low: bool) {}
 
-/// Tells the overlay whether the recording is locked hands-free (true) or held
-/// push-to-talk (false).
-pub fn set_mode(app: &tauri::AppHandle, locked: bool) {
-    let _ = app.emit_to(LABEL, "mode", locked);
+/// What the pill is recording: a held or locked dictation, or a command run
+/// (orange, so it never looks like dictation). Kept until the next session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PillMode {
+    Hold,
+    Locked,
+    Command,
+}
+
+pub fn set_mode(app: &tauri::AppHandle, mode: PillMode) {
+    let _ = app.emit_to(LABEL, "mode", mode);
 }
 
 fn place(app: &tauri::AppHandle) {
@@ -207,6 +215,8 @@ fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
 pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     set_interactive(app, false);
+    // A retry is a dictation, even right after an orange command pill.
+    set_mode(app, PillMode::Hold);
     configure(app, false, generation);
     let overlay = Overlay {
         app: app.clone(),
