@@ -338,8 +338,8 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   closing `"}` now ends it. The reply's trailing spaces and line breaks are
   trimmed (a selection's own trailing line break is put back), a reply that
   spells out a chat-template token (`<|…|>`, `</assistant>`, `</final`) fails
-  with nothing pasted, and when the model calls a tool any text beside the
-  call is dropped.
+  with nothing pasted, as does a refusal, and when the model calls a tool any
+  text beside the call is dropped.
 - The text reply is **pasted once**, over the selection if there was one,
   otherwise at the cursor, the same way a dictation is pasted, so one Ctrl+Z
   brings back what was there. Your clipboard text is restored once, after the

@@ -187,6 +187,14 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
                     "the reply was cut off ({reason})."
                 )));
             }
+            let refused = response
+                .output
+                .iter()
+                .flat_map(|item| &item.content)
+                .any(|content| content.kind == "refusal");
+            if refused {
+                return Err(ProviderError::Other("the model refused.".into()));
+            }
             let json: String = response
                 .output
                 .iter()
@@ -247,13 +255,15 @@ fn leaks_chat_token(text: &str) -> bool {
     text.match_indices('<').any(|(at, _)| {
         let tag = &text[at + 1..];
         let piped = tag.strip_prefix('/').unwrap_or(tag).strip_prefix('|');
-        tag.starts_with("/assistant")
-            || tag.starts_with("/final")
-            || piped
-                .and_then(|rest| rest.split_once("|>"))
-                .is_some_and(|(name, _)| {
-                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                })
+        // `</final` alone: one leak was cut off right there.
+        ["/assistant", "/final"].iter().any(|role| {
+            tag.strip_prefix(role)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('>'))
+        }) || piped
+            .and_then(|rest| rest.split_once("|>"))
+            .is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
     })
 }
 
@@ -390,6 +400,19 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_fails_instead_of_reading_as_empty() {
+        // Under structured outputs a refusal is its own content part.
+        let refusal = fixture("text_reply").replace(
+            r#""type": "output_text","#,
+            r#""type": "refusal", "refusal": "I can't help with that.","#,
+        );
+        assert_eq!(
+            parse(200, &refusal),
+            Err(ProviderError::Other("the model refused.".into()))
+        );
+    }
+
+    #[test]
     fn chat_tokens_are_caught_but_html_and_code_pass() {
         // Every leak the live eval saw (PARLA-68).
         for leaked in [
@@ -409,6 +432,7 @@ mod tests {
             "x |> f",
             "1 < 2 e 3 > 2",
             "<|>",
+            "<finalPrice>10</finalPrice>",
             "Grazie, a presto.",
         ] {
             assert!(!leaks_chat_token(clean), "{clean:?}");
