@@ -274,16 +274,18 @@ enum Request {
 }
 
 /// Serves requests until Parla quits. `sessions(active_only)` lists the
-/// default output device's sessions.
+/// default output device's sessions. The fade follows `clock`, `Instant::now`
+/// but in tests.
 fn serve<V: Volume>(
     file: PathBuf,
     requests: mpsc::Receiver<Request>,
     own_pid: u32,
     sessions: impl Fn(bool) -> Vec<Found<V>>,
+    clock: impl Fn() -> Instant,
 ) {
     restore_crashed(&file, || sessions(false));
     let mut dimmer = Dimmer::new(file);
-    let mut last = Instant::now();
+    let mut last = clock();
     loop {
         let fading = dimmer.fading();
         let request = if fading {
@@ -295,7 +297,7 @@ fn serve<V: Volume>(
         };
         if !fading {
             // A fade starts now, not when the last one ended.
-            last = Instant::now();
+            last = clock();
         }
         match request {
             Ok(Request::Dim(level)) => {
@@ -306,7 +308,7 @@ fn serve<V: Volume>(
                     Vec::new()
                 };
                 dimmer.dim(found, own_pid, level);
-                last = Instant::now();
+                last = clock();
             }
             Ok(Request::Restore) => dimmer.restore(),
             Ok(Request::Exit(done)) => {
@@ -320,7 +322,7 @@ fn serve<V: Volume>(
                 return;
             }
         }
-        let now = Instant::now();
+        let now = clock();
         dimmer.step(now.saturating_duration_since(last));
         last = now;
     }
@@ -432,12 +434,18 @@ mod wasapi {
                     return;
                 }
             };
-        super::serve(file, requests, std::process::id(), |active_only| {
-            list(&devices, active_only).unwrap_or_else(|error| {
-                eprintln!("dim: listing audio sessions failed: {error}");
-                Vec::new()
-            })
-        });
+        super::serve(
+            file,
+            requests,
+            std::process::id(),
+            |active_only| {
+                list(&devices, active_only).unwrap_or_else(|error| {
+                    eprintln!("dim: listing audio sessions failed: {error}");
+                    Vec::new()
+                })
+            },
+            std::time::Instant::now,
+        );
     }
 
     fn list(
@@ -525,7 +533,10 @@ mod tests {
     use std::{
         cell::Cell,
         rc::Rc,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc, Mutex,
+        },
     };
 
     /// A fake session volume shared with the test, which plays the user.
@@ -736,6 +747,27 @@ mod tests {
         assert!(!file.exists());
     }
 
+    /// The worker's clock: each read is one `STEP` on, however long the
+    /// worker really took, so a fade's steps never depend on scheduling
+    /// (PARLA-83). A quarter of the fade is exact in f32, so each fade takes
+    /// exactly four steps and ends on its exact target.
+    #[derive(Clone)]
+    struct StepClock(Arc<(Instant, AtomicU32)>);
+    const STEP: Duration = Duration::from_millis(FADE.as_millis() as u64 / 4);
+    impl StepClock {
+        fn new() -> Self {
+            Self(Arc::new((Instant::now(), AtomicU32::new(0))))
+        }
+        fn read(&self) -> Instant {
+            self.0 .0 + STEP * self.0 .1.fetch_add(1, Ordering::SeqCst)
+        }
+        /// Time passes with no reads: the worker sits idle.
+        fn skip(&self, idle: Duration) {
+            let steps = (idle.as_millis() / STEP.as_millis()) as u32;
+            self.0 .1.fetch_add(steps, Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn worker_fades_both_ways_over_the_channel() {
         let dir = tempfile::tempdir().unwrap();
@@ -743,36 +775,46 @@ mod tests {
         let history = Arc::new(Mutex::new(vec![1.0f32]));
         let (sender, requests) = mpsc::channel();
         let worker_history = history.clone();
+        let clock = StepClock::new();
+        let worker_clock = clock.clone();
         let worker = std::thread::spawn(move || {
-            serve(dir.path().join(FILE_NAME), requests, OWN, |_| {
-                vec![Found {
-                    pid: 1,
-                    system_sounds: false,
-                    instance: "a".into(),
-                    app: "a".into(),
-                    volume: Locked(worker_history.clone()),
-                }]
-            })
+            serve(
+                dir.path().join(FILE_NAME),
+                requests,
+                OWN,
+                |_| {
+                    vec![Found {
+                        pid: 1,
+                        system_sounds: false,
+                        instance: "a".into(),
+                        app: "a".into(),
+                        volume: Locked(worker_history.clone()),
+                    }]
+                },
+                move || worker_clock.read(),
+            )
         });
-        // Waits for `target`, then returns whether the way there was a fade.
-        let fades_to = |target: f32| {
+        // Sends `request`, waits for exactly `target`, the fade's last step,
+        // then returns the values set on the way there.
+        let fades_to = |request: Request, target: f32| {
             let from = history.lock().unwrap().len();
+            sender.send(request).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
-            while !close(*history.lock().unwrap().last().unwrap(), target) {
+            while *history.lock().unwrap().last().unwrap() != target {
                 assert!(Instant::now() < deadline, "never reached {target}");
                 std::thread::sleep(TICK);
             }
-            history.lock().unwrap()[from..]
-                .iter()
-                .any(|&value| value > 0.51 && value < 0.99)
+            history.lock().unwrap()[from..].to_vec()
         };
-        sender.send(Request::Dim(0.5)).unwrap();
-        assert!(fades_to(0.5), "fades down");
-        // Dimmed for a while: the fade up still takes its own time.
-        std::thread::sleep(FADE * 2);
-        sender.send(Request::Restore).unwrap();
-        assert!(fades_to(1.0), "fades up");
-        assert_eq!(*history.lock().unwrap().last().unwrap(), 1.0);
+        let down = fades_to(Request::Dim(0.5), 0.5);
+        assert_eq!(down.len(), 4, "fades down in steps: {down:?}");
+        assert!(down.windows(2).all(|pair| pair[1] < pair[0]), "{down:?}");
+        // Dimmed for a while: the fade up still starts from the request,
+        // not from the end of the fade down.
+        clock.skip(FADE * 2);
+        let up = fades_to(Request::Restore, 1.0);
+        assert_eq!(up.len(), 4, "fades up in steps: {up:?}");
+        assert!(up.windows(2).all(|pair| pair[1] > pair[0]), "{up:?}");
         sender.send(Request::Dim(0.5)).unwrap();
         let (done, finished) = mpsc::channel();
         sender.send(Request::Exit(done)).unwrap();
