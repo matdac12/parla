@@ -40,8 +40,8 @@ enum Phase {
     Hold(Chord, Instant),
     /// Hands-free: started or converted by the main key, ended by the next press.
     Latched,
-    /// A released command run, transcribing or waiting on the LLM: Esc still
-    /// cancels it (PARLA-63).
+    /// A stopped session, transcribing or (a command run) waiting on the LLM:
+    /// Esc still cancels it (PARLA-63, PARLA-15).
     Running,
 }
 
@@ -87,7 +87,7 @@ impl Controller {
                 HotkeyEvent::Pressed | HotkeyEvent::ChordPressed(Chord::Dictation),
                 Phase::Latched,
             ) => {
-                self.phase = Phase::Idle;
+                self.phase = Phase::Running;
                 Action::Stop
             }
             (HotkeyEvent::ChordReleased(released), Phase::Hold(chord, since))
@@ -97,10 +97,7 @@ impl Controller {
                     self.phase = Phase::Idle;
                     Action::Cancel
                 } else {
-                    self.phase = match chord {
-                        Chord::Command => Phase::Running,
-                        Chord::Dictation => Phase::Idle,
-                    };
+                    self.phase = Phase::Running;
                     Action::Stop
                 }
             }
@@ -341,6 +338,15 @@ fn run_session(
         // Batch-only local dictation still gets the key-down warm-up.
         crate::provider::parakeet::wake_in_background(&settings);
     }
+    // Parked while the user speaks, so key-up pays no thread spawn.
+    let batch = (held && !command)
+        .then(|| active_provider(&settings).ok())
+        .flatten()
+        .and_then(|provider| {
+            BatchWorker::start(provider, settings.clone(), cancelled.clone())
+                .map_err(|error| eprintln!("Cannot start the batch worker: {error}"))
+                .ok()
+        });
     let (key_up, hold_error) =
         early_release.unwrap_or_else(|| wait_for_release(&released, HOLD_CAP - confirm_after));
     let stream = if cancelled.load(Ordering::Acquire) {
@@ -350,11 +356,9 @@ fn run_session(
         stream
     };
     let audio = recording.map(|recorder| recorder.stop_raw());
-    // A command run keeps Esc armed until it ends (PARLA-63).
-    let _disarm_at_end = command.then_some(DisarmEsc);
-    if !command {
-        crate::hotkey::RECORDING.store(false, Ordering::Release);
-    }
+    // Esc stays armed until the run ends (PARLA-63), or a dictation's paste
+    // (PARLA-15).
+    let _disarm_at_end = DisarmEsc;
     // On stop or cancel, not after the paste.
     drop(dimmed);
     if cancelled.load(Ordering::Acquire) {
@@ -396,9 +400,12 @@ fn run_session(
             paste: true,
             auto_send: settings.auto_send,
             stream,
+            batch,
         },
     );
-    if let Some(overlay) = overlay {
+    // Cancelled after key-up: the pill hides unfinished, as for Esc while
+    // recording.
+    if let (Some(overlay), Some(ok)) = (overlay, ok) {
         overlay.finish(ok);
     }
 }
@@ -444,6 +451,7 @@ pub fn finish_session(
             // A retry never sends: focus may have moved since (PARLA-58).
             auto_send: false,
             stream: None,
+            batch: None,
         },
     );
 }
@@ -453,6 +461,8 @@ struct Completion {
     paste: bool,
     auto_send: bool,
     stream: Option<crate::streaming::Session>,
+    /// A hotkey dictation's: Esc may cancel it until the paste.
+    batch: Option<BatchWorker>,
 }
 
 fn finish_session_with_error(
@@ -462,7 +472,7 @@ fn finish_session_with_error(
     started_at: SystemTime,
     key_up: Instant,
     mut completion: Completion,
-) -> bool {
+) -> Option<bool> {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     let result = match audio {
         Err(error) => {
@@ -472,7 +482,13 @@ fn finish_session_with_error(
         Ok(clip) => {
             record.audio_ready = Some(timing::elapsed_ms(key_up));
             record.audio_ms = clip.duration().as_millis() as u64;
-            let result = if clip.is_empty() {
+            let clip = BatchClip {
+                audio: Arc::new(clip),
+                worker: completion.batch.take(),
+            };
+            let cancelled = clip.worker.as_ref().map(BatchWorker::cancelled);
+            let is_cancelled = || cancelled.is_some_and(|c| c.load(Ordering::Acquire));
+            let result = if clip.audio.is_empty() {
                 Err(ProviderError::Other("No audio captured".into()))
             } else {
                 active_provider(settings).and_then(|provider| {
@@ -484,6 +500,14 @@ fn finish_session_with_error(
                         &mut record,
                         completion.stream.take().map(|session| session.finish()),
                         |text, delay| {
+                            if cancelled.is_some() {
+                                // Esc reaches the app again: the paste is not
+                                // cancelled, and an earlier Esc wins.
+                                crate::hotkey::RECORDING.store(false, Ordering::Release);
+                                if is_cancelled() {
+                                    return Err("cancelled".into());
+                                }
+                            }
                             if completion.paste {
                                 // History keeps the raw text; only the paste drops the trigger.
                                 let stripped = completion
@@ -506,6 +530,11 @@ fn finish_session_with_error(
                     )
                 })
             };
+            // Cancelled after key-up: no notice, no clip for Retry and no row,
+            // as for Esc while recording.
+            if result.is_err() && is_cancelled() {
+                return None;
+            }
             if let Err(error) = &result {
                 on_failure(
                     app,
@@ -524,7 +553,7 @@ fn finish_session_with_error(
     record.error = combined_error(completion.hold_error, result.err());
     // The one completion sink for successful and failed dictations.
     timing::record(app, record);
-    ok
+    Some(ok)
 }
 
 fn active_provider(settings: &Settings) -> Result<Arc<dyn SttProvider>, ProviderError> {
@@ -681,6 +710,14 @@ impl command_mode::HistorySink for AppHistory<'_> {
 
 trait RecoverySource {
     fn batch_clip(&self) -> &crate::clip::Clip;
+    /// The batch request, on the calling thread unless the source says otherwise.
+    fn transcribe_batch(
+        &self,
+        provider: &dyn SttProvider,
+        settings: &Settings,
+    ) -> Result<String, ProviderError> {
+        provider.transcribe(self.batch_clip(), settings)
+    }
 }
 impl RecoverySource for crate::clip::Clip {
     fn batch_clip(&self) -> &crate::clip::Clip {
@@ -690,6 +727,93 @@ impl RecoverySource for crate::clip::Clip {
 impl RecoverySource for crate::recorder::RecoveryAudio {
     fn batch_clip(&self) -> &crate::clip::Clip {
         self.clip()
+    }
+}
+
+type BatchJob = Box<dyn FnOnce(&dyn SttProvider, &Settings) + Send>;
+
+/// A thread parked from key-down for a hotkey dictation's batch request, so
+/// Esc can drop the request mid-flight (PARLA-15) and key-up pays no spawn. A
+/// local Parakeet inference cannot be interrupted: it runs to the end and its
+/// result is discarded.
+struct BatchWorker {
+    jobs: mpsc::Sender<BatchJob>,
+    cancelled: Arc<AtomicBool>,
+}
+impl BatchWorker {
+    fn start(
+        provider: Arc<dyn SttProvider>,
+        settings: Settings,
+        cancelled: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let (jobs, receiver) = mpsc::channel::<BatchJob>();
+        std::thread::Builder::new()
+            .name("parla-batch".into())
+            .spawn(move || {
+                // No job when the live final was pasted or the run ended early.
+                if let Ok(job) = receiver.recv() {
+                    job(provider.as_ref(), &settings);
+                }
+            })?;
+        Ok(Self { jobs, cancelled })
+    }
+    fn cancelled(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+}
+
+/// A dictation's audio; with a worker, the batch request runs on it.
+struct BatchClip {
+    audio: Arc<crate::recorder::RecoveryAudio>,
+    worker: Option<BatchWorker>,
+}
+impl BatchClip {
+    /// The clip for Retry. A request Esc dropped may still hold the audio:
+    /// then it is copied, but a cancelled run keeps no clip anyway.
+    fn into_clip(self) -> crate::clip::Clip {
+        drop(self.worker);
+        Arc::try_unwrap(self.audio)
+            .map(crate::recorder::RecoveryAudio::into_clip)
+            .unwrap_or_else(|audio| crate::clip::Clip::new(audio.clip().samples.clone()))
+    }
+}
+impl RecoverySource for BatchClip {
+    fn batch_clip(&self) -> &crate::clip::Clip {
+        self.audio.clip()
+    }
+    fn transcribe_batch(
+        &self,
+        provider: &dyn SttProvider,
+        settings: &Settings,
+    ) -> Result<String, ProviderError> {
+        let Some(worker) = &self.worker else {
+            return provider.transcribe(self.batch_clip(), settings);
+        };
+        let cancelled = || worker.cancelled.load(Ordering::Acquire);
+        let cancel = || ProviderError::Other("Cancelled".into());
+        // Esc aborted the live session: no batch fallback.
+        if cancelled() {
+            return Err(cancel());
+        }
+        let (sender, result) = mpsc::channel();
+        let audio = self.audio.clone();
+        // The worker's provider is this one, from the same settings snapshot.
+        let job: BatchJob = Box::new(move |provider, settings| {
+            let transcript = provider.transcribe(audio.clip(), settings);
+            // Before the answer, so a finished request never keeps the clip.
+            drop(audio);
+            let _ = sender.send(transcript);
+        });
+        if let Err(mpsc::SendError(job)) = worker.jobs.send(job) {
+            // The worker is gone: run the request here, uncancellable.
+            job(provider, settings);
+        }
+        match crate::provider::unless_cancelled(&result, &worker.cancelled) {
+            // An answer that lands after Esc is discarded.
+            _ if cancelled() => Err(cancel()),
+            Some(transcript) => transcript,
+            None => Err(ProviderError::Other("The transcription stopped".into())),
+        }
     }
 }
 
@@ -805,7 +929,7 @@ fn transcribe(
                 Err(error) => error.to_string(),
                 Ok(_) => "Live transcription returned an empty final transcript".into(),
             });
-            provider.transcribe(clip.batch_clip(), settings)
+            clip.transcribe_batch(provider, settings)
         }
     };
     record.provider_returned = Some(timing::elapsed_ms(key_up));
@@ -994,6 +1118,120 @@ mod pipeline_tests {
             self.0.clone()
         }
     }
+    /// Blocks its batch request until the test lets it answer.
+    struct GatedProvider {
+        answer: std::sync::Mutex<mpsc::Receiver<()>>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl SttProvider for GatedProvider {
+        fn id(&self) -> &'static str {
+            "gated"
+        }
+        fn display_name(&self) -> &'static str {
+            "Gated"
+        }
+        fn availability(&self, _: &Settings) -> Availability {
+            Availability::Available
+        }
+        fn transcribe(&self, _: &crate::clip::Clip, _: &Settings) -> Result<String, ProviderError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let _ = self.answer.lock().unwrap().recv();
+            Ok("Late".into())
+        }
+    }
+    fn gated() -> (Arc<GatedProvider>, mpsc::Sender<()>) {
+        let (answer, gate) = mpsc::channel();
+        let provider = GatedProvider {
+            answer: std::sync::Mutex::new(gate),
+            calls: Arc::default(),
+        };
+        (Arc::new(provider), answer)
+    }
+    fn cancellable_clip(provider: Arc<dyn SttProvider>, cancelled: &Arc<AtomicBool>) -> BatchClip {
+        let worker = BatchWorker::start(provider, Settings::default(), cancelled.clone());
+        BatchClip {
+            audio: Arc::new(crate::clip::Clip::new(vec![1; 160]).into()),
+            worker: Some(worker.unwrap()),
+        }
+    }
+    #[test]
+    fn esc_drops_an_in_flight_batch_request_and_nothing_is_pasted() {
+        let (provider, answer) = gated();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let clip = cancellable_clip(provider.clone(), &cancelled);
+        let esc = {
+            let cancelled = cancelled.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                cancelled.store(true, Ordering::Release);
+            })
+        };
+        let started = Instant::now();
+        let mut record = DictationRecord::new(SystemTime::now(), "gated");
+        let result = transcribe_and_paste(
+            provider.as_ref(),
+            &clip,
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            None,
+            |_, _| panic!("a cancelled dictation must not paste"),
+        );
+        // The request is still blocked: Esc returned without its answer.
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+        esc.join().unwrap();
+        // Its late answer lands in a dropped channel.
+        answer.send(()).unwrap();
+        drop(clip);
+        assert!(record.text.is_empty());
+    }
+    #[test]
+    fn esc_before_the_batch_request_never_sends_it() {
+        let (provider, _answer) = gated();
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let clip = cancellable_clip(provider.clone(), &cancelled);
+        let mut record = DictationRecord::new(SystemTime::now(), "gated");
+        let result = transcribe_and_paste(
+            provider.as_ref(),
+            &clip,
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            // A live session Esc aborted: no batch fallback.
+            Some(Err(ProviderError::Other("Live dictation cancelled".into()))),
+            |_, _| panic!("a cancelled dictation must not paste"),
+        );
+        assert!(result.is_err());
+        drop(clip);
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    }
+    #[test]
+    fn an_uncancelled_batch_request_on_the_worker_pastes_its_transcript() {
+        let provider: Arc<dyn SttProvider> = Arc::new(FakeProvider(Ok("Ciao".into())));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let clip = cancellable_clip(provider.clone(), &cancelled);
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        let mut pastes = Vec::new();
+        transcribe_and_paste(
+            provider.as_ref(),
+            &clip,
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            None,
+            |text, _| {
+                pastes.push(text.to_owned());
+                Ok(Instant::now())
+            },
+        )
+        .unwrap();
+        assert_eq!(pastes, ["Ciao"]);
+        assert_eq!(record.transcription_mode.as_deref(), Some("batch"));
+        // The clip comes back whole for a failure's Retry.
+        assert_eq!(clip.into_clip().samples, vec![1; 160]);
+    }
     #[test]
     fn unavailable_provider_never_transcribes_or_pastes() {
         struct Unavailable;
@@ -1172,10 +1410,27 @@ mod pipeline_tests {
         c.on_event(PRESSED, false, t0);
         c.on_event(RELEASED, true, late);
         assert_eq!(c.on_event(HotkeyEvent::Cancel, false, late), Action::None);
-        // A released dictation is never cancelled by Esc.
+    }
+    #[test]
+    fn esc_after_a_dictation_stops_cancels_its_transcription_until_it_ends() {
+        let t0 = Instant::now();
+        let late = t0 + Duration::from_secs(2);
+        let mut c = Controller { phase: Phase::Idle };
+        // Released hold, then a stopped hands-free recording.
+        c.on_event(HotkeyEvent::ChordPressed(Chord::Dictation), false, t0);
+        assert_eq!(
+            c.on_event(HotkeyEvent::ChordReleased(Chord::Dictation), true, late),
+            Action::Stop
+        );
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::Cancel);
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::None);
+        c.on_event(HotkeyEvent::Pressed, false, t0);
+        assert_eq!(c.on_event(HotkeyEvent::Pressed, true, late), Action::Stop);
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::Cancel);
+        // Pasted and done: Esc has nothing to cancel.
         c.on_event(HotkeyEvent::ChordPressed(Chord::Dictation), false, t0);
         c.on_event(HotkeyEvent::ChordReleased(Chord::Dictation), true, late);
-        assert_eq!(c.on_event(HotkeyEvent::Cancel, true, late), Action::None);
+        assert_eq!(c.on_event(HotkeyEvent::Cancel, false, late), Action::None);
     }
     #[test]
     fn hotkey_presses_during_a_command_run_or_a_dictation_are_ignored() {

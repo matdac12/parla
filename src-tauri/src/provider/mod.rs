@@ -6,12 +6,37 @@ pub mod xai;
 
 use crate::{clip::Clip, settings::Settings};
 use serde::Serialize;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 pub trait SttProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn availability(&self, settings: &Settings) -> Availability;
     fn transcribe(&self, clip: &Clip, settings: &Settings) -> Result<String, ProviderError>;
+}
+
+/// How soon Esc frees the pill while a blocking request runs.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
+
+/// Waits for the result of a request running on its own thread until
+/// `cancelled` is set, so Esc returns at once and a late result lands in a
+/// dropped channel. None when cancelled or the thread died. A result wakes the
+/// wait at once: the poll only bounds how long Esc takes.
+pub fn unless_cancelled<T>(result: &mpsc::Receiver<T>, cancelled: &AtomicBool) -> Option<T> {
+    while !cancelled.load(Ordering::Acquire) {
+        match result.recv_timeout(CANCEL_POLL) {
+            Ok(result) => return Some(result),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
