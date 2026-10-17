@@ -31,7 +31,8 @@ Cloud streaming and live captions are enabled by default. The original recording
 pill keeps its appearance and position; a separate, subdued two-line preview
 appears above it once words arrive. Recent words can change as recognition
 settles. Nothing is typed into the focused app during recording: Parla pastes
-the complete final transcript once you stop. Esc cancels while recording.
+the complete final transcript once you stop. Esc cancels while recording, and
+after you stop until the paste.
 
 Settings → Live dictation lets you disable captions independently of streaming,
 or return to whole-clip transcription. OpenAI uses `gpt-live-transcribe` for
@@ -230,10 +231,12 @@ Both use the same shortcut, **Ctrl+Alt+Space** by default (left Alt):
   **Ctrl+Alt** again (the full shortcut also works) to stop, transcribe, and
   paste.
 - **Cancel.** Press **Esc** at any point while recording to discard the clip
-  without transcribing or pasting anything. Esc is swallowed only while a
-  recording is in progress, so the focused app does not also see it, and behaves
-  normally otherwise. Esc does not cancel a transcription that is already
-  running.
+  without transcribing or pasting anything. After you stop, Esc still cancels
+  until the paste starts: a cloud request is dropped mid-flight, and a local
+  Parakeet transcription runs to the end with its result discarded. A cancelled
+  dictation pastes nothing, shows no notice and writes no history row. Esc is
+  swallowed only from the start of a recording until the paste, so the focused
+  app does not also see it, and behaves normally otherwise.
 
 Safeguards: a hold shorter than 300 ms is discarded silently, so a stray
 Ctrl+Alt press does nothing; pressing any other key during the hold (another
