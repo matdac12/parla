@@ -184,9 +184,9 @@ pub fn apply(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> 
         .try_state::<crate::hotkey::Hotkey>()
         .ok_or("Hotkey listener is unavailable; restart Parla")?;
     let command = command_chord(settings);
-    hotkey.set_command_chord(command.clone().ok().flatten());
+    hotkey.set_command_chord(command.as_ref().ok().copied().flatten());
     hotkey.set_shortcut(&settings.hotkey)?;
-    command.map(drop)
+    command.map(|_| ())
 }
 
 #[cfg(test)]

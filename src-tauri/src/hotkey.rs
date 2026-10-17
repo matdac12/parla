@@ -96,12 +96,7 @@ impl Registration {
             return None;
         }
         let mut modifiers = Modifiers::empty();
-        for (left, right, modifier) in [
-            (Code::ControlLeft, Code::ControlRight, Modifiers::CONTROL),
-            (Code::ShiftLeft, Code::ShiftRight, Modifiers::SHIFT),
-            (Code::AltLeft, Code::AltRight, Modifiers::ALT),
-            (Code::MetaLeft, Code::MetaRight, Modifiers::SUPER),
-        ] {
+        for (left, right, modifier) in MODIFIER_PAIRS {
             if self.keys.contains(&left) || self.keys.contains(&right) {
                 modifiers |= modifier;
             }
@@ -449,18 +444,32 @@ fn parse_shortcut(accelerator: &str) -> Result<Shortcut, String> {
     if !supported_code(shortcut.key) {
         return Err("Key is not supported by the Windows listener".into());
     }
-    // RegisterHotKey would consume our synthetic paste and retrigger the flow.
-    if shortcut == Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV) {
-        return Err("Ctrl+V is reserved for pasting".into());
+    if is_paste(shortcut) {
+        return Err(PASTE_RESERVED.into());
     }
     Ok(shortcut)
 }
 
-/// Which physical key of a modifier pair a command chord wants down.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+const PASTE_RESERVED: &str = "Ctrl+V is reserved for pasting";
+
+/// RegisterHotKey would consume our synthetic paste and retrigger the flow.
+fn is_paste(shortcut: Shortcut) -> bool {
+    shortcut == Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV)
+}
+
+/// Ctrl, Shift, Alt, Win: each modifier's two keys and its flag. Also the
+/// order of `CommandChord`'s sides.
+const MODIFIER_PAIRS: [(Code, Code, Modifiers); 4] = [
+    (Code::ControlLeft, Code::ControlRight, Modifiers::CONTROL),
+    (Code::ShiftLeft, Code::ShiftRight, Modifiers::SHIFT),
+    (Code::AltLeft, Code::AltRight, Modifiers::ALT),
+    (Code::MetaLeft, Code::MetaRight, Modifiers::SUPER),
+];
+
+/// Which key of a modifier pair a command chord wants down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
     /// Neither key may be down.
-    #[default]
     Off,
     Either,
     Left,
@@ -471,15 +480,6 @@ enum Side {
 /// compares four pairs per keystroke and never touches the string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandChord([Side; 4]);
-
-/// Ctrl, Shift, Alt, Win: the order of `CommandChord`'s sides.
-#[cfg(any(windows, test))]
-const MODIFIER_PAIRS: [(Code, Code); 4] = [
-    (Code::ControlLeft, Code::ControlRight),
-    (Code::ShiftLeft, Code::ShiftRight),
-    (Code::AltLeft, Code::AltRight),
-    (Code::MetaLeft, Code::MetaRight),
-];
 
 impl Default for CommandChord {
     /// Left Ctrl plus either Shift (`settings::DEFAULT_COMMAND_HOTKEY`).
@@ -496,7 +496,7 @@ impl CommandChord {
         self.0
             .into_iter()
             .zip(MODIFIER_PAIRS)
-            .all(|(side, (left, right))| match side {
+            .all(|(side, (left, right, _))| match side {
                 Side::Off => !down(left) && !down(right),
                 Side::Either => down(left) || down(right),
                 Side::Left => down(left) && !down(right),
@@ -504,18 +504,15 @@ impl CommandChord {
             })
     }
 
-    /// The modifier pairs in use, as `Modifiers` for comparing with a shortcut.
+    /// The modifiers in use, for comparing with a shortcut's.
     fn modifiers(self) -> Modifiers {
-        [
-            Modifiers::CONTROL,
-            Modifiers::SHIFT,
-            Modifiers::ALT,
-            Modifiers::SUPER,
-        ]
-        .into_iter()
-        .zip(self.0)
-        .filter(|(_, side)| *side != Side::Off)
-        .fold(Modifiers::empty(), |all, (modifier, _)| all | modifier)
+        self.0
+            .into_iter()
+            .zip(MODIFIER_PAIRS)
+            .filter(|(side, _)| *side != Side::Off)
+            .fold(Modifiers::empty(), |all, (_, (_, _, modifier))| {
+                all | modifier
+            })
     }
 }
 
@@ -525,8 +522,10 @@ impl CommandChord {
 /// contain or sit inside the dictation hotkey's hold, since pressing one would
 /// pass through the other.
 pub fn validate_command_hotkey(command: &str, dictation: &str) -> Result<CommandChord, String> {
+    if command.parse().is_ok_and(is_paste) {
+        return Err(PASTE_RESERVED.into());
+    }
     let mut sides = [Side::Off; 4];
-    let mut count = 0;
     for token in command.split('+').map(str::trim).filter(|t| !t.is_empty()) {
         let (index, side) = match token.to_ascii_lowercase().as_str() {
             "ctrl" | "control" => (0, Side::Either),
@@ -542,25 +541,20 @@ pub fn validate_command_hotkey(command: &str, dictation: &str) -> Result<Command
             "win" | "super" => (3, Side::Either),
             "lwin" => (3, Side::Left),
             "rwin" => (3, Side::Right),
-            _ if command.parse::<Shortcut>().ok()
-                == Some(Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV)) =>
-            {
-                return Err("Ctrl+V is reserved for pasting".into());
-            }
             _ => return Err("The command hotkey takes modifiers only, like LCtrl+Shift".into()),
         };
         if sides[index] != Side::Off {
             return Err("Name each modifier once in the command hotkey".into());
         }
         sides[index] = side;
-        count += 1;
-    }
-    if count < 2 {
-        return Err("The command hotkey needs two or more modifiers, like LCtrl+Shift".into());
     }
     let chord = CommandChord(sides);
+    let command = chord.modifiers();
+    if command.bits().count_ones() < 2 {
+        return Err("The command hotkey needs two or more modifiers, like LCtrl+Shift".into());
+    }
     if let Ok(shortcut) = parse_shortcut(dictation) {
-        let (held, command) = (shortcut.mods, chord.modifiers());
+        let held = shortcut.mods;
         if held.bits().count_ones() >= 2 && (held.contains(command) || command.contains(held)) {
             return Err("The command hotkey overlaps the dictation hotkey's hold".into());
         }

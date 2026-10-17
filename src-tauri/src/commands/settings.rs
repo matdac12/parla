@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn command_mode_saves_reloads_and_applies_without_a_dictation_rebind() {
+    fn command_mode_saves_reloads_and_applies_when_only_command_mode_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let shared = RwLock::new(Settings::default());
