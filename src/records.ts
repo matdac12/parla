@@ -77,7 +77,8 @@ export interface Settings {
   local_model: string;
   dim_other_audio: boolean;
   dim_audio_level: number;
-  /** Command mode; edited in settings.json only until PARLA-67. */
+  /** Command mode (the Settings "Command mode" card). `hotkey` is a modifier
+   *  hold such as "LCtrl+Shift"; `reasoning_effort` is "none" or "low". */
   command: { enabled: boolean; hotkey: string; model: string; reasoning_effort: string };
   providers: Record<string, Record<string, unknown>>;
 }

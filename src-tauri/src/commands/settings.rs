@@ -20,6 +20,14 @@ pub async fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The Settings card's inline check of a command hotkey against the dictation
+/// hotkey, as typed or recorded and before saving: the reason it would be
+/// rejected, or null. Pure parsing, so it runs inline.
+#[tauri::command]
+pub fn check_command_hotkey(command: String, dictation: String) -> Option<String> {
+    crate::hotkey::validate_command_hotkey(&command, &dictation).err()
+}
+
 /// Serializes saves without holding SharedSettings across disk or main-thread IO.
 #[derive(Default)]
 pub struct SaveLock(std::sync::Mutex<()>);
@@ -27,7 +35,7 @@ pub struct SaveLock(std::sync::Mutex<()>);
 /// PARLA-8 IPC result: { "warning": null | string }. Persistence failure rejects
 /// the invoke. A hotkey failure resolves with a warning: requested settings are
 /// saved, while the previous runtime binding remains until a successful rebind.
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct SaveResult {
     pub warning: Option<String>,
 }
@@ -157,9 +165,14 @@ fn save_with(
     apply: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<SaveResult, String> {
     settings::validate_vocabulary(&requested.vocabulary)?;
+    settings::command_chord(&requested)?;
     let previous = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
     persist(&requested)?;
-    let warning = if previous.hotkey != requested.hotkey {
+    // Model and effort are read per command run; only the chord needs applying.
+    let rebind = previous.hotkey != requested.hotkey
+        || previous.command.enabled != requested.command.enabled
+        || previous.command.hotkey != requested.command.hotkey;
+    let warning = if rebind {
         apply(&requested).err().map(|error| {
             crate::provider::redact_secrets(&format!(
                 "Settings saved, but hotkey was not applied: {error}"
@@ -329,6 +342,90 @@ mod tests {
             crate::hotkey::DEFAULT_SHORTCUT
         );
     }
+    fn command_mode(enabled: bool, hotkey: &str) -> Settings {
+        Settings {
+            command: settings::CommandSettings {
+                enabled,
+                hotkey: hotkey.into(),
+                model: "gpt-6-luna-test".into(),
+                reasoning_effort: "none".into(),
+            },
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn command_mode_saves_reloads_and_applies_without_a_dictation_rebind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let shared = RwLock::new(Settings::default());
+        for requested in [
+            command_mode(true, "LCtrl+Shift"),
+            command_mode(true, "Ctrl+Win"),
+            command_mode(false, "Ctrl+Win"),
+        ] {
+            let applied = AtomicBool::new(false);
+            save_with(
+                &shared,
+                requested.clone(),
+                |value| settings::save(&path, value),
+                |value| {
+                    assert_eq!(value.command, requested.command);
+                    applied.store(true, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(applied.load(Ordering::Relaxed), "{:?}", requested.command);
+            assert_eq!(settings::load(&path).unwrap().command, requested.command);
+            assert_eq!(shared.read().unwrap().command, requested.command);
+        }
+    }
+
+    #[test]
+    fn the_default_command_hotkey_is_written_back_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let shared = RwLock::new(Settings::default());
+        save_with(
+            &shared,
+            command_mode(true, "LCtrl+Shift"),
+            |value| settings::save(&path, value),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(file.contains(r#""hotkey": "LCtrl+Shift""#), "{file}");
+    }
+
+    #[test]
+    fn an_enabled_command_hotkey_that_collides_is_rejected_and_not_saved() {
+        let shared = RwLock::new(Settings::default());
+        for hotkey in ["Ctrl+Alt", "Ctrl+V", "LCtrl"] {
+            let error = save_with(
+                &shared,
+                command_mode(true, hotkey),
+                |_| panic!("a colliding command hotkey persisted"),
+                |_| panic!("a colliding command hotkey applied"),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("command hotkey") || error.contains("Ctrl+V"),
+                "{error}"
+            );
+        }
+        assert_eq!(shared.read().unwrap().command, Default::default());
+        // Off, it cannot collide with anything, so it never blocks a save.
+        save_with(
+            &shared,
+            command_mode(false, "Ctrl+Alt"),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(shared.read().unwrap().command.hotkey, "Ctrl+Alt");
+    }
+
     #[test]
     fn warning_shape_is_documented_json() {
         assert_eq!(

@@ -1,4 +1,5 @@
 //! Shared persisted settings. Provider sections remain owned by their providers.
+use crate::hotkey::CommandChord;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -30,12 +31,13 @@ pub struct Settings {
     pub providers: BTreeMap<String, serde_json::Value>,
 }
 
-/// The `command` section. Experimental: settings.json only until PARLA-67.
+/// The `command` section, edited in the Settings "Command mode" card.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommandSettings {
     pub enabled: bool,
-    /// The command hotkey. Only the default chord is recognised until PARLA-67.
+    /// The command hotkey: a hold of 2+ modifiers (`hotkey::validate_command_hotkey`).
+    /// Kept as typed, so the default stays byte-identical in settings.json.
     pub hotkey: String,
     pub model: String,
     /// Provisional until the PARLA-68 eval picks `none` or `low`.
@@ -165,17 +167,26 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     result
 }
 
+/// The chord to arm: `None` while command mode is off, so a command hotkey
+/// that is off can never block saving the rest of the settings.
+pub fn command_chord(settings: &Settings) -> Result<Option<CommandChord>, String> {
+    if !settings.command.enabled {
+        return Ok(None);
+    }
+    crate::hotkey::validate_command_hotkey(&settings.command.hotkey, &settings.hotkey).map(Some)
+}
+
 /// Must be called on a blocking worker: Hotkey::set_shortcut waits for the main
 /// thread. Delay changes take effect through the next flow settings snapshot.
+/// An invalid command hotkey leaves command mode disarmed, never dictation.
 pub fn apply(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> {
     let hotkey = app
         .try_state::<crate::hotkey::Hotkey>()
         .ok_or("Hotkey listener is unavailable; restart Parla")?;
-    hotkey.set_command_enabled(settings.command.enabled);
-    if settings.command.enabled && settings.command.hotkey != DEFAULT_COMMAND_HOTKEY {
-        eprintln!("Command hotkey rebinding is not supported yet; using {DEFAULT_COMMAND_HOTKEY}");
-    }
-    hotkey.set_shortcut(&settings.hotkey)
+    let command = command_chord(settings);
+    hotkey.set_command_chord(command.clone().ok().flatten());
+    hotkey.set_shortcut(&settings.hotkey)?;
+    command.map(drop)
 }
 
 #[cfg(test)]

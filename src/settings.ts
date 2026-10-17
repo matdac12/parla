@@ -91,6 +91,13 @@ const els = {
   liveCaptions: byId<HTMLInputElement>("live-captions"),
   dimAudio: byId<HTMLInputElement>("dim-audio"),
   dimLevel: byId<HTMLInputElement>("dim-level"),
+  commandEnabled: byId<HTMLInputElement>("command-enabled"),
+  commandKeyHint: byId<HTMLParagraphElement>("command-key-hint"),
+  commandHotkey: byId<HTMLInputElement>("command-hotkey"),
+  commandCapture: byId<HTMLButtonElement>("command-capture"),
+  commandWarning: byId<HTMLParagraphElement>("command-hotkey-warning"),
+  commandModel: byId<HTMLInputElement>("command-model"),
+  commandEffort: byId<HTMLSelectElement>("command-effort"),
   status: byId<HTMLSpanElement>("status"),
   savebar: byId<HTMLDivElement>("savebar"),
   discard: byId<HTMLButtonElement>("discard"),
@@ -163,6 +170,8 @@ function setProviderStatus(text: string, kind: "success" | "error" | "" = ""): v
 
 function updateDirty(): void {
   if (!state.settings) return;
+  // An OpenAI key typed on the Transcription page enables the toggle before saving.
+  renderCommandAvailability();
   const dirty = JSON.stringify(state.settings) !== state.baseline;
   els.save.disabled = saving || switchingProvider || !dirty;
   els.discard.disabled = els.save.disabled;
@@ -551,6 +560,116 @@ async function refreshProviders(): Promise<void> {
   }
 }
 
+const DEFAULT_COMMAND_MODEL = "gpt-6-luna";
+
+/** Command mode needs an OpenAI key: the saved one or OPENAI_API_KEY (the
+ *  OpenAI provider is available), or one typed in this form. */
+function renderCommandAvailability(): void {
+  const settings = state.settings;
+  if (!settings) return;
+  const typed = settings.providers.openai?.api_key;
+  const keySet = state.providers.some((p) => p.id === "openai" && p.available)
+    || (typeof typed === "string" && typed.trim() !== "");
+  els.commandEnabled.disabled = !keySet;
+  els.commandKeyHint.hidden = keySet;
+}
+
+let commandCheck = 0;
+
+/** Shows inline why the command hotkey would be rejected (the backend's rule,
+ *  which save_settings enforces while command mode is enabled). */
+async function checkCommandHotkey(): Promise<void> {
+  const settings = state.settings;
+  if (!settings) return;
+  const token = ++commandCheck;
+  let warning: string | null;
+  try {
+    warning = await invoke<string | null>("check_command_hotkey", {
+      command: settings.command.hotkey,
+      dictation: settings.hotkey,
+    });
+  } catch (error) {
+    warning = String(error);
+  }
+  if (token !== commandCheck) return;
+  showCommandWarning(warning);
+}
+
+function showCommandWarning(text: string | null): void {
+  els.commandWarning.textContent = text ?? "";
+  els.commandWarning.hidden = text === null;
+}
+
+let commandCaptureActive = false;
+/** Modifiers down now, and every modifier down since the hold began. */
+const commandHeld = new Set<string>();
+const commandPeak = new Set<string>();
+
+function stopCommandCapture(): void {
+  if (!commandCaptureActive) return;
+  commandCaptureActive = false;
+  commandHeld.clear();
+  commandPeak.clear();
+  els.commandCapture.textContent = "Record keys";
+  els.commandCapture.classList.remove("capturing");
+  window.removeEventListener("keydown", onCommandCaptureKey, true);
+  window.removeEventListener("keyup", onCommandCaptureKey, true);
+}
+
+/** The chord as hotkey.rs parses it. Ctrl keeps its side (the default is left
+ *  Ctrl only); Shift and Win are either side; Alt is left Alt. */
+function commandChord(codes: Set<string>): string {
+  const ctrl = codes.has("ControlLeft") && codes.has("ControlRight")
+    ? "Ctrl"
+    : codes.has("ControlLeft") ? "LCtrl" : codes.has("ControlRight") ? "RCtrl" : null;
+  const shift = codes.has("ShiftLeft") || codes.has("ShiftRight") ? "Shift" : null;
+  const alt = codes.has("AltLeft") ? "Alt" : null;
+  const win = ["MetaLeft", "MetaRight", "OSLeft", "OSRight"].some((code) => codes.has(code)) ? "Win" : null;
+  return [ctrl, shift, alt, win].filter((part) => part !== null).join("+");
+}
+
+function onCommandCaptureKey(event: KeyboardEvent): void {
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.type === "keydown") {
+    if (event.key === "Escape") {
+      stopCommandCapture();
+      void checkCommandHotkey();
+    } else if (!MODIFIER_CODES.has(event.code)) {
+      showCommandWarning("The command hotkey takes modifiers only: hold them, then release.");
+    } else if (event.code === "AltRight") {
+      showCommandWarning("AltGr (right Alt) cannot be part of the command hotkey.");
+    } else {
+      commandHeld.add(event.code);
+      commandPeak.add(event.code);
+    }
+    return;
+  }
+  // Recorded on the first release, from everything held together.
+  if (!commandHeld.delete(event.code)) return;
+  if (commandPeak.size >= 2 && state.settings) {
+    const chord = commandChord(commandPeak);
+    els.commandHotkey.value = chord;
+    state.settings.command.hotkey = chord;
+    stopCommandCapture();
+    updateDirty();
+    void checkCommandHotkey();
+  } else if (commandHeld.size === 0) {
+    commandPeak.clear();
+  }
+}
+
+function startCommandCapture(): void {
+  if (commandCaptureActive) return;
+  stopCapture();
+  commandCaptureActive = true;
+  els.commandCapture.textContent = "Hold modifiers… (Esc cancels)";
+  els.commandCapture.classList.add("capturing");
+  showCommandWarning(null);
+  window.addEventListener("keydown", onCommandCaptureKey, true);
+  window.addEventListener("keyup", onCommandCaptureKey, true);
+}
+
 let captureActive = false;
 
 function showCaptureHint(text: string): void {
@@ -598,10 +717,12 @@ function onCaptureKey(event: KeyboardEvent): void {
   if (state.settings) state.settings.hotkey = accelerator;
   updateDirty();
   stopCapture();
+  void checkCommandHotkey();
 }
 
 function startCapture(): void {
   if (captureActive) return;
+  stopCommandCapture();
   captureActive = true;
   els.capture.textContent = "Press keys… (Esc cancels)";
   els.capture.classList.add("capturing");
@@ -641,6 +762,7 @@ async function save(): Promise<void> {
     await refreshParakeetStatus?.();
   } catch (error) {
     setStatus(String(error), "error");
+    void checkCommandHotkey();
   } finally {
     saving = false;
     renderProviderRadios();
@@ -653,6 +775,7 @@ async function save(): Promise<void> {
 function discard(): void {
   if (!state.settings || saving || switchingProvider) return;
   stopCapture();
+  stopCommandCapture();
   state.settings = JSON.parse(state.baseline) as Settings;
   fillForm(state.settings);
   for (const sync of fieldSyncs) sync();
@@ -678,7 +801,10 @@ async function onSettingsChanged(): Promise<void> {
   }
   state.baseline = JSON.stringify(saved);
   // Text being edited keeps what was typed (spaces, blank lines), not its parsed value.
-  const texts = [[els.hotkey, "hotkey"], [els.delay, "restore_delay_ms"], [els.vocabulary, "vocabulary"]] as const;
+  const texts = [
+    [els.hotkey, "hotkey"], [els.delay, "restore_delay_ms"], [els.vocabulary, "vocabulary"],
+    [els.commandHotkey, "command"], [els.commandModel, "command"],
+  ] as const;
   const typed = texts.map(([input]) => input.value);
   fillForm(state.settings);
   texts.forEach(([input, key], index) => {
@@ -702,6 +828,12 @@ function fillForm(settings: Settings): void {
   els.dimLevel.value = String(settings.dim_audio_level);
   els.dimLevel.disabled = !settings.dim_other_audio;
   els.vocabulary.value = settings.vocabulary.join("\n");
+  els.commandEnabled.checked = settings.command.enabled;
+  els.commandHotkey.value = settings.command.hotkey;
+  els.commandModel.value = settings.command.model || DEFAULT_COMMAND_MODEL;
+  els.commandEffort.value = settings.command.reasoning_effort;
+  renderCommandAvailability();
+  void checkCommandHotkey();
 }
 
 function wireForm(): void {
@@ -713,6 +845,33 @@ function wireForm(): void {
   els.hotkey.addEventListener("input", () => {
     if (!state.settings) return;
     state.settings.hotkey = els.hotkey.value.trim();
+    updateDirty();
+    void checkCommandHotkey();
+  });
+  els.commandEnabled.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.command.enabled = els.commandEnabled.checked;
+    updateDirty();
+  });
+  els.commandHotkey.addEventListener("input", () => {
+    if (!state.settings) return;
+    state.settings.command.hotkey = els.commandHotkey.value.trim();
+    updateDirty();
+    void checkCommandHotkey();
+  });
+  els.commandCapture.addEventListener("click", startCommandCapture);
+  els.commandModel.addEventListener("input", () => {
+    if (!state.settings) return;
+    state.settings.command.model = els.commandModel.value.trim() || DEFAULT_COMMAND_MODEL;
+    updateDirty();
+  });
+  // A cleared model shows the default again once the field is left.
+  els.commandModel.addEventListener("change", () => {
+    if (els.commandModel.value.trim() === "") els.commandModel.value = DEFAULT_COMMAND_MODEL;
+  });
+  els.commandEffort.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.command.reasoning_effort = els.commandEffort.value;
     updateDirty();
   });
   els.delay.addEventListener("input", () => {

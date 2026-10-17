@@ -68,6 +68,8 @@ struct Registration {
     command_armed: bool,
     #[cfg(any(windows, test))]
     command_active: bool,
+    #[cfg(any(windows, test))]
+    command_chord: CommandChord,
     shortcut: Option<Shortcut>,
     hold: HoldState,
 }
@@ -163,22 +165,6 @@ impl Registration {
         None
     }
 
-    /// Left Ctrl plus either Shift, nothing else modified. Right Ctrl never
-    /// counts, and any Alt (AltGr included) or Win breaks it.
-    fn command_satisfied(down: impl Fn(Code) -> bool) -> bool {
-        down(Code::ControlLeft)
-            && (down(Code::ShiftLeft) || down(Code::ShiftRight))
-            && ![
-                Code::ControlRight,
-                Code::AltLeft,
-                Code::AltRight,
-                Code::MetaLeft,
-                Code::MetaRight,
-            ]
-            .into_iter()
-            .any(down)
-    }
-
     /// Hold only: any other key pressed during the hold, a modifier included,
     /// makes it some other Ctrl+Shift shortcut, so the hold is cancelled.
     fn command_chord_event(&mut self, key: Code, pressed: bool) -> Option<HotkeyEvent> {
@@ -189,11 +175,15 @@ impl Registration {
             let start = pressed
                 && MODIFIER_KEYS.contains(&key)
                 && !self.chord_active
-                && Self::command_satisfied(|code| self.keys.contains(&code));
+                && self
+                    .command_chord
+                    .satisfied(|code| self.keys.contains(&code));
             self.command_active = start;
             return start.then_some(HotkeyEvent::ChordPressed(CHORD));
         }
-        let satisfied = Self::command_satisfied(|code| self.keys.contains(&code));
+        let satisfied = self
+            .command_chord
+            .satisfied(|code| self.keys.contains(&code));
         if pressed && (!satisfied || !MODIFIER_KEYS.contains(&key)) {
             self.command_active = false;
             return Some(HotkeyEvent::ChordCancelled(CHORD));
@@ -215,7 +205,7 @@ impl Registration {
             }
             _ => None,
         };
-        let command = (self.command_active && !Self::command_satisfied(is_down)).then(|| {
+        let command = (self.command_active && !self.command_chord.satisfied(is_down)).then(|| {
             self.command_active = false;
             HotkeyEvent::ChordReleased(Chord::Command)
         });
@@ -369,18 +359,20 @@ impl Hotkey {
         response.recv().map_err(|e| e.to_string())?
     }
 
-    /// Arms or disarms the command chord (`command.enabled`). A hold already
-    /// in progress still ends with its release.
-    pub fn set_command_enabled(&self, enabled: bool) {
+    /// Arms the command chord with `chord`, or disarms it with `None`
+    /// (`command.enabled` off). A hold already in progress still ends with
+    /// its release.
+    pub fn set_command_chord(&self, chord: Option<CommandChord>) {
         #[cfg(windows)]
         {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .command_armed = enabled;
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.command_armed = chord.is_some();
+            if let Some(chord) = chord {
+                state.command_chord = chord;
+            }
         }
         #[cfg(not(windows))]
-        let _ = enabled;
+        let _ = chord;
     }
 
     #[cfg(windows)]
@@ -462,6 +454,118 @@ fn parse_shortcut(accelerator: &str) -> Result<Shortcut, String> {
         return Err("Ctrl+V is reserved for pasting".into());
     }
     Ok(shortcut)
+}
+
+/// Which physical key of a modifier pair a command chord wants down.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Side {
+    /// Neither key may be down.
+    #[default]
+    Off,
+    Either,
+    Left,
+    Right,
+}
+
+/// The command hotkey as plain data, parsed once when it is set, so the hook
+/// compares four pairs per keystroke and never touches the string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandChord([Side; 4]);
+
+/// Ctrl, Shift, Alt, Win: the order of `CommandChord`'s sides.
+#[cfg(any(windows, test))]
+const MODIFIER_PAIRS: [(Code, Code); 4] = [
+    (Code::ControlLeft, Code::ControlRight),
+    (Code::ShiftLeft, Code::ShiftRight),
+    (Code::AltLeft, Code::AltRight),
+    (Code::MetaLeft, Code::MetaRight),
+];
+
+impl Default for CommandChord {
+    /// Left Ctrl plus either Shift (`settings::DEFAULT_COMMAND_HOTKEY`).
+    fn default() -> Self {
+        Self([Side::Left, Side::Either, Side::Off, Side::Off])
+    }
+}
+
+impl CommandChord {
+    /// Every wanted modifier down on its side, every other modifier key up:
+    /// a sided modifier's other key, and AltGr, break the hold.
+    #[cfg(any(windows, test))]
+    fn satisfied(self, down: impl Fn(Code) -> bool) -> bool {
+        self.0
+            .into_iter()
+            .zip(MODIFIER_PAIRS)
+            .all(|(side, (left, right))| match side {
+                Side::Off => !down(left) && !down(right),
+                Side::Either => down(left) || down(right),
+                Side::Left => down(left) && !down(right),
+                Side::Right => down(right) && !down(left),
+            })
+    }
+
+    /// The modifier pairs in use, as `Modifiers` for comparing with a shortcut.
+    fn modifiers(self) -> Modifiers {
+        [
+            Modifiers::CONTROL,
+            Modifiers::SHIFT,
+            Modifiers::ALT,
+            Modifiers::SUPER,
+        ]
+        .into_iter()
+        .zip(self.0)
+        .filter(|(_, side)| *side != Side::Off)
+        .fold(Modifiers::empty(), |all, (modifier, _)| all | modifier)
+    }
+}
+
+/// Parses `command.hotkey` ("LCtrl+Shift"): two or more modifiers and no main
+/// key, so it is a hold like the dictation chord. Alt means left Alt only
+/// (AltGr types Italian characters). Rejects a chord whose modifiers equal,
+/// contain or sit inside the dictation hotkey's hold, since pressing one would
+/// pass through the other.
+pub fn validate_command_hotkey(command: &str, dictation: &str) -> Result<CommandChord, String> {
+    let mut sides = [Side::Off; 4];
+    let mut count = 0;
+    for token in command.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        let (index, side) = match token.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => (0, Side::Either),
+            "lctrl" => (0, Side::Left),
+            "rctrl" => (0, Side::Right),
+            "shift" => (1, Side::Either),
+            "lshift" => (1, Side::Left),
+            "rshift" => (1, Side::Right),
+            "alt" | "lalt" => (2, Side::Left),
+            "ralt" | "altgr" => {
+                return Err("AltGr (right Alt) cannot be part of the command hotkey".into())
+            }
+            "win" | "super" => (3, Side::Either),
+            "lwin" => (3, Side::Left),
+            "rwin" => (3, Side::Right),
+            _ if command.parse::<Shortcut>().ok()
+                == Some(Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV)) =>
+            {
+                return Err("Ctrl+V is reserved for pasting".into());
+            }
+            _ => return Err("The command hotkey takes modifiers only, like LCtrl+Shift".into()),
+        };
+        if sides[index] != Side::Off {
+            return Err("Name each modifier once in the command hotkey".into());
+        }
+        sides[index] = side;
+        count += 1;
+    }
+    if count < 2 {
+        return Err("The command hotkey needs two or more modifiers, like LCtrl+Shift".into());
+    }
+    let chord = CommandChord(sides);
+    if let Ok(shortcut) = parse_shortcut(dictation) {
+        let (held, command) = (shortcut.mods, chord.modifiers());
+        if held.bits().count_ones() >= 2 && (held.contains(command) || command.contains(held)) {
+            return Err("The command hotkey overlaps the dictation hotkey's hold".into());
+        }
+    }
+    Ok(chord)
 }
 
 // Virtual-key table adapted from rdev 0.5.3's Windows keycodes.rs (MIT).
@@ -809,6 +913,45 @@ mod tests {
         assert_eq!(feed(&mut state, Code::ShiftLeft, true), None);
     }
 
+    fn rebound(command: &str) -> Registration {
+        Registration {
+            command_chord: validate_command_hotkey(command, "Ctrl+Alt+Space").unwrap(),
+            ..command_registration()
+        }
+    }
+
+    #[test]
+    fn a_rebound_command_hotkey_fires_on_its_own_keys_only() {
+        let mut state = rebound("Ctrl+Win");
+        feed(&mut state, Code::ControlRight, true);
+        assert_eq!(feed(&mut state, Code::MetaLeft, true), COMMAND_PRESSED);
+        assert_eq!(
+            feed(&mut state, Code::ControlRight, false),
+            COMMAND_RELEASED
+        );
+        // The old default no longer fires.
+        let mut state = rebound("Ctrl+Win");
+        feed(&mut state, Code::ControlLeft, true);
+        assert_eq!(feed(&mut state, Code::ShiftLeft, true), None);
+        // A sided modifier wants that key: left Shift neither starts the
+        // chord nor counts as its right Shift.
+        let mut state = rebound("LCtrl+RShift");
+        feed(&mut state, Code::ControlLeft, true);
+        assert_eq!(feed(&mut state, Code::ShiftLeft, true), None);
+        let mut state = rebound("LCtrl+RShift");
+        feed(&mut state, Code::ControlLeft, true);
+        assert_eq!(feed(&mut state, Code::ShiftRight, true), COMMAND_PRESSED);
+        assert_eq!(feed(&mut state, Code::ShiftLeft, true), COMMAND_CANCELLED);
+    }
+
+    #[test]
+    fn the_default_command_hotkey_parses_to_the_default_chord() {
+        assert_eq!(
+            validate_command_hotkey(crate::settings::DEFAULT_COMMAND_HOTKEY, "Ctrl+Alt+Space"),
+            Ok(CommandChord::default())
+        );
+    }
+
     #[test]
     fn command_watchdog_ends_a_missed_release() {
         let mut state = command_registration();
@@ -1055,6 +1198,65 @@ mod tests {
         }
         assert!(parse_shortcut("Ctrl+Space").is_ok());
         assert!(parse_shortcut("Ctrl+Shift+F9").is_ok());
+    }
+
+    #[test]
+    fn command_hotkey_is_two_or_more_modifiers_and_nothing_else() {
+        for accepted in [
+            "LCtrl+Shift",
+            "Ctrl+Shift",
+            "rctrl + lshift",
+            "Ctrl+Alt+Shift+Win",
+            "LWin+Alt",
+        ] {
+            assert!(
+                validate_command_hotkey(accepted, "F9").is_ok(),
+                "{accepted}"
+            );
+        }
+        for (rejected, why) in [
+            ("", "two or more"),
+            ("LCtrl", "two or more"),
+            ("Ctrl+V", "reserved for pasting"),
+            ("Ctrl+Shift+F9", "modifiers only"),
+            ("Ctrl+RAlt", "AltGr"),
+            ("Ctrl+AltGr", "AltGr"),
+            ("LCtrl+RCtrl", "once"),
+            ("Shift+Shift", "once"),
+        ] {
+            let error = validate_command_hotkey(rejected, "F9").unwrap_err();
+            assert!(error.contains(why), "{rejected}: {error}");
+        }
+    }
+
+    #[test]
+    fn command_hotkey_may_not_overlap_the_dictation_hold() {
+        // Equal, contained or containing modifier sets pass through each other.
+        for (command, dictation) in [
+            ("Ctrl+Alt", "Ctrl+Alt+Space"),
+            ("RCtrl+Alt", "Ctrl+Alt+Space"),
+            ("Ctrl+Alt+Shift", "Ctrl+Alt+Space"),
+            ("LCtrl+Shift", "Ctrl+Shift+F9"),
+            ("LCtrl+Shift", "Ctrl+Alt+Shift+Space"),
+        ] {
+            let error = validate_command_hotkey(command, dictation).unwrap_err();
+            assert!(
+                error.contains("dictation hotkey"),
+                "{command} vs {dictation}"
+            );
+        }
+        // Disjoint holds, or a dictation hotkey with no hold, are fine.
+        for (command, dictation) in [
+            ("LCtrl+Shift", "Ctrl+Alt+Space"),
+            ("Ctrl+Win", "Ctrl+Alt+Space"),
+            ("LCtrl+Shift", "Ctrl+F9"),
+            ("LCtrl+Shift", "not a hotkey"),
+        ] {
+            assert!(
+                validate_command_hotkey(command, dictation).is_ok(),
+                "{command} vs {dictation}"
+            );
+        }
     }
 
     #[test]
