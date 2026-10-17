@@ -104,14 +104,16 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
     match status {
         200..=299 => {
             let response: Response = serde_json::from_str(body)
-                .map_err(|_| ProviderError::Other("Invalid OpenAI Responses JSON".into()))?;
+                .map_err(|_| ProviderError::Other("the reply could not be read.".into()))?;
             if response.status.as_deref() != Some("completed") {
                 let reason = response
                     .incomplete_details
                     .and_then(|details| details.reason)
                     .or(response.status)
                     .unwrap_or_else(|| "no status".into());
-                return Err(ProviderError::Other(format!("Reply incomplete ({reason})")));
+                return Err(ProviderError::Other(format!(
+                    "the reply was cut off ({reason})."
+                )));
             }
             let text = response
                 .output
@@ -148,7 +150,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(20);
 /// The one HTTP call, blocking: run it off the flow thread.
 pub fn send(api_key: &str, request: &Request) -> Result<Reply, ProviderError> {
     let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-        .map_err(|_| ProviderError::MissingConfig("Invalid OpenAI API key header".into()))?;
+        .map_err(|_| ProviderError::Auth("Invalid OpenAI API key header".into()))?;
     authorization.set_sensitive(true);
     let response = openai::client()?
         .post(ENDPOINT)
@@ -162,6 +164,9 @@ pub fn send(api_key: &str, request: &Request) -> Result<Reply, ProviderError> {
     let text = response.text().map_err(openai::map_transport)?;
     parse(status, &text)
 }
+
+/// How soon Esc frees the pill during the wait.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
 
 /// The LLM port: `send` on its own thread, so Esc returns at once and a late
 /// reply lands in a dropped channel.
@@ -189,9 +194,6 @@ impl super::Llm for OpenAi<'_> {
         Err(ProviderError::Other("No reply.".into()))
     }
 }
-/// How soon Esc frees the pill during the wait.
-const CANCEL_POLL: Duration = Duration::from_millis(20);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,7 +223,7 @@ mod tests {
         assert_eq!(
             parse(200, &fixture("incomplete")),
             Err(ProviderError::Other(
-                "Reply incomplete (max_output_tokens)".into()
+                "the reply was cut off (max_output_tokens).".into()
             ))
         );
     }

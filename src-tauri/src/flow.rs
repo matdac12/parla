@@ -343,9 +343,9 @@ fn run_session(
     };
     let audio = recording.map(|recorder| recorder.stop_raw());
     // A command run keeps Esc armed until it ends (PARLA-63).
-    let esc = DisarmEsc;
+    let _disarm_at_end = command.then_some(DisarmEsc);
     if !command {
-        drop(esc);
+        crate::hotkey::RECORDING.store(false, Ordering::Release);
     }
     // On stop or cancel, not after the paste.
     drop(dimmed);
@@ -558,15 +558,15 @@ fn finish_command(
         };
         record.audio_ready = Some(timing::elapsed_ms(key_up));
         record.audio_ms = clip.duration().as_millis() as u64;
+        let streamed = stream.map(|session| session.finish());
+        // Esc aborted the live session: no batch fallback, the run is cancelled.
+        if cancelled.load(Ordering::Acquire) {
+            return Some(Err(ProviderError::Other("Cancelled".into())));
+        }
         match active_provider(settings) {
-            Ok(provider) => transcribe_instruction(
-                provider.as_ref(),
-                &clip,
-                settings,
-                key_up,
-                record,
-                stream.map(|session| session.finish()),
-            ),
+            Ok(provider) => {
+                transcribe_instruction(provider.as_ref(), &clip, settings, key_up, record, streamed)
+            }
             Err(error) => Some(Err(error)),
         }
     });
@@ -583,8 +583,7 @@ fn finish_command(
     outcome
 }
 
-/// Disarms Esc when dropped: the end of a dictation's recording, or of a
-/// command run.
+/// Disarms Esc when a command run ends, however it ends.
 struct DisarmEsc;
 impl Drop for DisarmEsc {
     fn drop(&mut self) {

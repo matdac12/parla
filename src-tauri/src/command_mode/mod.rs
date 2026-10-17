@@ -3,8 +3,9 @@
 //!
 //! The orchestrator owns a run from key-up to its outcome: the empty-instruction
 //! rule, the LLM call, cancellation, the paste (the inserter restores the
-//! clipboard) and the history row. It talks to the desktop, the LLM and history through narrow
-//! ports, so it is tested with fakes and flow.rs supplies the real ones.
+//! clipboard) and the history row. It talks to the desktop, the LLM and
+//! history through narrow ports, so it is tested with fakes and flow.rs
+//! supplies the real ones.
 pub mod responses;
 
 use crate::{
@@ -87,8 +88,11 @@ pub fn run(
     mut record: DictationRecord,
     transcribe: impl FnOnce(&mut DictationRecord) -> Option<Result<(), ProviderError>>,
 ) -> Outcome {
+    let cancelled = || run.cancelled.load(Ordering::Acquire);
     let outcome = match transcribe(&mut record) {
         None => return Outcome::Silent,
+        // Esc aborts a live transcription, so its error is the cancel.
+        Some(_) if cancelled() => Outcome::Cancelled,
         Some(Err(error)) => {
             record.error = Some(error.to_string());
             Outcome::Failed(Failure::Transcription(error))
@@ -110,9 +114,6 @@ pub fn run(
 
 fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Outcome {
     let cancelled = || run.cancelled.load(Ordering::Acquire);
-    if cancelled() {
-        return Outcome::Cancelled;
-    }
     if let Some(hold) = &run.hold_error {
         return Outcome::Failed(Failure::Command(ProviderError::Other(hold.clone())));
     }
@@ -124,11 +125,9 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
     record.llm_model = Some(request.model.clone());
     let reply = ports.llm.reply(&request, run.cancelled);
     record.llm_returned = Some(timing::elapsed_ms(run.key_up));
-    // A reply that lands after Esc is discarded.
-    if cancelled() {
-        return Outcome::Cancelled;
-    }
     let reply = match reply {
+        // A reply or an error that lands after Esc is discarded.
+        _ if cancelled() => return Outcome::Cancelled,
         Ok(reply) => reply,
         Err(error) => return Outcome::Failed(Failure::Command(error)),
     };
@@ -136,7 +135,7 @@ fn reply_and_paste(ports: &Ports, run: &Run, record: &mut DictationRecord) -> Ou
     record.tokens_out = reply.tokens_out;
     if reply.text.trim().is_empty() {
         return Outcome::Failed(Failure::Command(ProviderError::Other(
-            "OpenAI returned an empty reply.".into(),
+            "the reply was empty.".into(),
         )));
     }
     let pasted = ports.desktop.paste(&reply.text);
@@ -384,6 +383,16 @@ mod tests {
         assert_eq!(h.run("Scrivi un saluto"), Outcome::Cancelled);
         assert!(h.llm.requests.borrow().is_empty());
         assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Cancelled));
+        // Esc aborts a live transcription, which then reports an error: still
+        // a cancel, with no cross or notification.
+        let h = Harness::new(text("never"));
+        h.cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            h.run_with(None, Some(Err(ProviderError::Timeout))),
+            Outcome::Cancelled
+        );
+        assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Cancelled));
+        assert!(h.rows()[0].error.is_none());
     }
 
     #[test]

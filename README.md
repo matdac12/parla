@@ -320,8 +320,11 @@ section of `settings.json`, and start Parla again:
   or an empty reply shows the red cross and a "Command mode: …" notification,
   and nothing is pasted. There is no Retry.
 - **Esc** cancels while you hold, and also after you release, while the
-  instruction is transcribed and the reply is awaited: the pill goes away at
-  once and a late reply is discarded, so nothing is pasted.
+  instruction is transcribed and the reply is awaited. Nothing is pasted: a
+  late reply is discarded. While waiting for the reply the pill goes away at
+  once; while transcribing, as soon as the transcription stops.
+- A hold that reaches the 120 s cap fails without asking the LLM; the
+  instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
   `outcome` (`pasted`, `failed` or `cancelled`), `llm_model`, `tokens_in` and
   `tokens_out`, the `reply`, and stage times from key-up (`provider_returned`
