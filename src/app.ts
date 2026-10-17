@@ -386,7 +386,7 @@ function show(next: Page): void {
   }
   history.replaceState(null, "", `#${next}`);
   main.scrollTo(0, 0);
-  // Live events keep the list current; reloads happen on window focus.
+  // Live events keep the list current; a reopened window loads afresh.
   if (RECORD_PAGES.has(next) && loaded) render();
 }
 
@@ -465,11 +465,6 @@ onApplied((applied) => {
 });
 
 document.addEventListener("visibilitychange", () => render());
-// Another window (the latency log) may have cleared history meanwhile.
-// Unchanged entries keep their cached DOM nodes.
-window.addEventListener("focus", () => {
-  if (loaded) void load();
-});
 void getVersion().then((version) => {
   must<HTMLSpanElement>("version").textContent = `v${version}`;
 }, () => undefined);

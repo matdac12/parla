@@ -7,7 +7,6 @@ export default defineConfig({
       input: {
         main: "index.html",
         app: "app.html",
-        history: "history.html",
         bench: "bench.html",
         overlay: "overlay.html",
       },

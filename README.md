@@ -85,9 +85,10 @@ npm run tauri dev
 ```
 
 The dev app starts in the tray. Choose **Open Parla** or **Settings…** in the tray to open its
-window. Closing a secondary window destroys it; choose **Quit** to exit Parla.
-The main, history and benchmark windows are created only when opened and can
-be reopened from the tray. Only the recording pill stays loaded at startup.
+window. Closing a secondary window destroys it; choose **Quit Parla** to exit.
+The main and benchmark windows are created only when opened: the main window
+from the tray, the benchmark window from the main window's sidebar. Only the
+recording pill stays loaded at startup.
 All windows are created after their app state is registered.
 
 For a standalone executable, from the repository root:
@@ -164,16 +165,15 @@ model applies at once. Other edits show a **Save** bar at the bottom with
 
 The tray menu contains, in order:
 
-- **Open Parla** — shows or focuses the main window.
+- **Open Parla** (the default item, in bold) — shows or focuses the main window.
 - **Settings…** — opens the main window on its **Transcription** settings page.
-- **History…** — shows the separate latency log window (per-stage timings; see
-  [History](#history)). The main window's **Timings** page shows the same data.
-- **Benchmark…** — shows the benchmark window.
 - **Test mic (3 s)** — records three seconds from the default microphone, saves
   it as `clips/test.wav` in the app data directory, and reveals the file in
   Explorer.
 - **Retry last failed dictation** — enabled only while a recovery clip exists.
-- **Quit** — exits Parla.
+- **Quit Parla** — exits Parla.
+
+History, Timings and Benchmark are reached from the main window's sidebar.
 
 ### Two ways to record
 
@@ -471,21 +471,22 @@ blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
 two kinds of row.
 
 The main window's **History** page is the place to read and copy transcripts;
-its **Timings** page charts the stages below. Tray **History…** is the latency
-log window: it lists dictations newest first with: wall-clock time, provider,
-captured audio length, then the latency breakdown — **Ready** (key-up to audio
-ready), **Transcribe** (audio ready to provider returned), **Paste** (provider
-returned to input injection), and **Total** (key-up to pasted). A dash means that
-stage never completed (a failed transcription has no paste time). The transcript
-is truncated, with the full text on hover or click; failures are tinted and show
-the error. The view updates live and **Clear history…** truncates the file after
-a confirmation. Reads are bounded: the view requests the newest 200 rows and the
-backend walks the file backwards, so a large history never has to fit in memory;
-corrupt lines are skipped.
+its **Timings** page is the latency log. Each dictation's latency is split into
+**Ready** (key-up to audio ready), **Transcribe** (audio ready to provider
+returned), **Paste** (provider returned to input injection), and **Total**
+(key-up to pasted). A dash means that stage never completed (a failed
+transcription has no paste time). **Table view** on the Timings page lists
+wall-clock time, provider, captured audio length, the four stages, the
+transcript (full text on hover or click) and the error; failures are tinted.
+Both pages update live, and **Clear history…** on the History page truncates
+the file after a confirmation. Reads are bounded: the window requests the
+newest 200 rows at a time and the backend walks the file backwards, so a large
+history never has to fit in memory; corrupt lines are skipped.
 
 ## Benchmark
 
-Tray **Benchmark…** compares providers on your own voice and network.
+**Benchmark ↗** at the bottom of the main window's sidebar compares providers
+on your own voice and network.
 
 1. Click **Record clip**, speak, click **Stop recording** (it stops by itself
    after 30 s). Hotkey dictation is blocked while the benchmark owns the
@@ -552,10 +553,10 @@ Before windows were made lazy, measured once on a Windows 11 machine with the
 app idle in the tray and OpenAI
 as the active provider: about **610 MB** working set (**270 MB** private) in
 total, of which `parla.exe` itself is only about 40 MB. Nearly all of the rest is
-the WebView2 browser processes behind the four hidden windows (main, history,
-benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
+the WebView2 browser processes behind the four hidden windows of the time (main,
+a separate history window since retired, benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
 700 MB (about 1.4 GB working set in total). These are single measurements, not
-benchmarks. Main, history and benchmark windows are now created on demand and
+benchmarks. Main and benchmark windows are now created on demand and
 destroyed on close; the pill stays warm. The recorder drains audio every 10 ms
 while recording and every 100 ms while idle, and start/stop commands wake it
 immediately. After 60 s idle the microphone stream is paused and the recorder

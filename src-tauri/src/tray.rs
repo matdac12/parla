@@ -3,30 +3,39 @@
 use std::time::Duration;
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{IsMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
+/// The right-click menu, top to bottom, as `(id, label)`. The first item is
+/// the default (bold on Windows). History and Timings live in the app window;
+/// Benchmark is linked from its sidebar rail.
+const MENU: [(&str, &str); 5] = [
+    ("open", "Open Parla"),
+    ("settings", "Settings…"),
+    ("test_mic", "Test mic (3 s)"),
+    (RETRY, "Retry last failed dictation"),
+    ("quit", "Quit Parla"),
+];
+const RETRY: &str = "retry_failed";
+
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Parla", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-    let history = MenuItem::with_id(app, "history", "History…", true, None::<&str>)?;
-    let bench = MenuItem::with_id(app, "bench", "Benchmark…", true, None::<&str>)?;
-    let test_mic = MenuItem::with_id(app, "test_mic", "Test mic (3 s)", true, None::<&str>)?;
-    let retry = MenuItem::with_id(
-        app,
-        "retry_failed",
-        "Retry last failed dictation",
-        crate::failure::clip_path(app.handle()).is_ok_and(|path| path.is_file()),
-        None::<&str>,
-    )?;
-    app.manage(crate::failure::RetryMenu(retry.clone()));
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[&open, &settings, &history, &bench, &test_mic, &retry, &quit],
-    )?;
+    let has_clip = crate::failure::clip_path(app.handle()).is_ok_and(|path| path.is_file());
+    let items = MENU
+        .iter()
+        .map(|&(id, label)| {
+            MenuItem::with_id(app, id, label, id != RETRY || has_clip, None::<&str>)
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let retry = items.iter().find(|item| item.id() == RETRY);
+    app.manage(crate::failure::RetryMenu(
+        retry.expect("MENU lists RETRY").clone(),
+    ));
+    let refs: Vec<&dyn IsMenuItem<_>> = items.iter().map(|item| item as _).collect();
+    let menu = Menu::with_items(app, &refs)?;
+    #[cfg(windows)]
+    make_first_item_default(&menu);
 
     // Tauri's native tray API: https://v2.tauri.app/learn/system-tray/
     TrayIconBuilder::with_id("parla")
@@ -40,29 +49,38 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => open_app(app, "home"),
             "settings" => open_app(app, "settings"),
-            "history" => show_window(app, "history", "history"),
-            "bench" => show_window(app, "bench", "benchmark"),
             "test_mic" => run_test_mic(app),
-            "retry_failed" => {
-                crate::commands::failure::retry_from_tray(app.clone());
-            }
+            RETRY => crate::commands::failure::retry_from_tray(app.clone()),
             "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
 
     // Only the recording overlay is kept warm. Secondary windows are created
-    // by open_app/show_window and destroyed normally when the user closes them.
+    // by open_app/open_bench and destroyed normally when the user closes them.
     Ok(())
 }
 
-/// Opens the main window on `view` ("home" or "settings").
+/// Bolds "Open Parla" like other tray apps' default action. Tauri has no API
+/// for it, so this sets the state on the popup's native handle (best effort).
+#[cfg(windows)]
+fn make_first_item_default<R: tauri::Runtime>(menu: &Menu<R>) {
+    use tauri::menu::ContextMenu;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SetMenuDefaultItem;
+    if let Ok(hmenu) = menu.hpopupmenu() {
+        // SAFETY: `hmenu` belongs to `menu`, which the tray keeps alive.
+        unsafe { SetMenuDefaultItem(hmenu as _, 0, 1) };
+    }
+}
+
+/// Opens the main window on `view`: an app page ("home", "history",
+/// "timings", …) or "settings" for the first settings page.
 pub(crate) fn open_app(app: &tauri::AppHandle, view: &str) {
     queue_window(app, "app", view);
 }
 
-pub(crate) fn show_window(app: &tauri::AppHandle, label: &str, _what: &str) {
-    queue_window(app, label, "home");
+pub(crate) fn open_bench(app: &tauri::AppHandle) {
+    queue_window(app, "bench", "");
 }
 
 fn queue_window(app: &tauri::AppHandle, label: &str, view: &str) {
@@ -103,20 +121,8 @@ fn ensure_window(
         return Ok(window);
     }
     let (title, url, width, height) = match label {
-        "app" => (
-            "Parla",
-            format!(
-                "app.html#{}",
-                if view == "settings" {
-                    "settings"
-                } else {
-                    "home"
-                }
-            ),
-            900.0,
-            680.0,
-        ),
-        "history" => ("Parla History", "history.html".into(), 960.0, 600.0),
+        // app.ts maps an unknown page to Home.
+        "app" => ("Parla", format!("app.html#{view}"), 900.0, 680.0),
         "bench" => ("Parla Benchmark", "bench.html".into(), 960.0, 640.0),
         _ => return Err(tauri::Error::WindowNotFound),
     };
@@ -222,6 +228,33 @@ fn reveal(path: &std::path::Path) {
     }
 }
 
+#[cfg(test)]
+mod menu_tests {
+    use super::MENU;
+
+    #[test]
+    fn right_click_menu_is_the_five_items_with_open_first() {
+        let labels: Vec<_> = MENU.iter().map(|&(_, label)| label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Open Parla",
+                "Settings…",
+                "Test mic (3 s)",
+                "Retry last failed dictation",
+                "Quit Parla",
+            ]
+        );
+        // The first item is made the default (bold) on Windows.
+        assert_eq!(MENU[0].0, "open");
+        assert!(MENU.iter().any(|&(id, _)| id == super::RETRY));
+        let mut ids: Vec<_> = MENU.iter().map(|&(id, _)| id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), MENU.len(), "menu ids must be unique");
+    }
+}
+
 #[cfg(all(test, windows, feature = "native-smoke"))]
 mod tests {
     use super::*;
@@ -239,7 +272,7 @@ mod tests {
                 setup(app)?;
                 crate::overlay::setup(app)?;
                 assert!(app.get_webview_window("overlay").is_some());
-                for label in ["app", "history", "bench"] {
+                for label in ["app", "bench"] {
                     assert!(
                         app.get_webview_window(label).is_none(),
                         "{label} was eagerly created"
@@ -284,7 +317,7 @@ mod tests {
                         <= 1.0
                 );
                 drop(captioned);
-                for label in ["app", "history", "bench", "app"] {
+                for label in ["app", "bench", "app"] {
                     let (done, completed) = std::sync::mpsc::channel();
                     let target = handle.clone();
                     handle
@@ -298,7 +331,12 @@ mod tests {
                         .unwrap();
                     if label == "app" {
                         let deadline = std::time::Instant::now() + Duration::from_secs(15);
-                        while window.url().unwrap().fragment() != Some("settings") {
+                        // app.ts, once loaded, routes #settings to its first
+                        // settings page; without a dev server it never loads.
+                        while !matches!(
+                            window.url().unwrap().fragment(),
+                            Some("settings" | "transcription")
+                        ) {
                             assert!(
                                 std::time::Instant::now() < deadline,
                                 "initial Settings route never loaded"

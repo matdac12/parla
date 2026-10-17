@@ -10,15 +10,15 @@ pub fn get_stats(app: tauri::AppHandle) -> Summary {
         .summary()
 }
 
-/// Shows one of Parla's own windows (used by the main window's buttons).
+/// Shows the benchmark window, or the main window on one of its pages: History
+/// and Timings are pages there, not windows of their own.
 #[tauri::command]
 pub fn open_window(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    let (label, what) = match name.as_str() {
-        "history" => ("history", "history"),
-        "bench" => ("bench", "benchmark"),
+    match name.as_str() {
+        "bench" => crate::tray::open_bench(&app),
+        "home" | "history" | "timings" | "settings" => crate::tray::open_app(&app, &name),
         _ => return Err(format!("Unknown window: {name}")),
-    };
-    crate::tray::show_window(&app, label, what);
+    }
     Ok(())
 }
 
