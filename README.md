@@ -129,8 +129,8 @@ at the bottom opens the benchmark window.
   **Copy** on hover. [Command runs](#command-mode-experimental) sit among them
   with an orange **Command** tag: the instruction, then the outcome (**Reply
   pasted**, **Opened <host>**, **Failed: …** or **Cancelled**), the LLM model
-  and the instruction's audio length; **Copy** copies the reply, and a failed
-  run has none. A search box (transcripts and instructions) and an **All /
+  and the instruction's audio length; **Copy** copies the reply whenever there
+  is one, even if pasting it failed. A search box (transcripts and instructions) and an **All /
   Failed** filter narrow the loaded rows, new ones appear at the top as they
   finish, and **Show older** loads more (200 at a time, up to 2000). Failed
   dictations are red; the newest one, while its recording is still saved, has

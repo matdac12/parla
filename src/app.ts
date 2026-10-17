@@ -200,7 +200,8 @@ function commandOutcome(record: DictationRecord): string {
 }
 
 /** The text, meta line and Copy text of a row. A command row shows its
- *  instruction under an orange tag; Copy copies the reply. */
+ *  instruction under an orange tag; Copy copies the reply whenever there is
+ *  one, even if pasting it failed. */
 function rowParts(record: DictationRecord): { text: string; meta: HTMLDivElement; copy: string | undefined } {
   const ok = record.error === null;
   const meta = el("div", "mt");
@@ -216,7 +217,7 @@ function rowParts(record: DictationRecord): { text: string; meta: HTMLDivElement
     el("span", ok ? undefined : "bad", commandOutcome(record)),
     ` · ${rest.join(" · ")}`,
   );
-  return { text: record.text.trim() || "No instruction", meta, copy: ok ? record.reply : undefined };
+  return { text: record.text.trim() || "No instruction", meta, copy: record.reply };
 }
 
 /** `today` is set on Home, where rows are not grouped by day: older rows
