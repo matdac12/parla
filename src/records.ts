@@ -24,10 +24,13 @@ export interface DictationRecord {
   llm_returned?: number;
   /** The LLM's text reply, kept for Copy. */
   reply?: string;
+  /** A `shown` command reply's kind (PARLA-81); `kind` is the row's origin. */
+  reply_kind?: "edit" | "answer";
 }
 
 /** How a command run ended. `opened` is the open_url tool (PARLA-65);
- *  `shown` is a dictation the Safety Net sent to the Card (PARLA-80). */
+ *  `shown` is a reply in the Card (PARLA-81), or a dictation the Safety Net
+ *  sent there (PARLA-80). `pasted` is a reply from before PARLA-81. */
 export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled" | "shown";
 
 export function must<T extends HTMLElement>(id: string): T {

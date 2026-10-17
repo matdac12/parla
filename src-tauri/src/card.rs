@@ -1,7 +1,7 @@
 //! The Card (PARLA-80): text Parla did not paste, shown above the pill with
 //! buttons, until one is clicked or the next session starts. A dictation the
-//! Safety Net caught opens here; PARLA-81 brings command replies with their
-//! own tag, header and buttons.
+//! Safety Net caught opens here, and so does every command text reply
+//! (PARLA-81), with its own tag, header and buttons.
 
 /// What the Card shows. The overlay renders it as given.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -22,6 +22,8 @@ pub struct Card {
 pub enum Tag {
     /// A neutral dot and "Not pasted · no text field".
     NotPasted,
+    /// An orange dot and "Command".
+    Command,
 }
 
 /// A Card button.
@@ -32,6 +34,9 @@ pub enum Action {
     Copy,
     /// The normal paste transaction into whatever has focus now.
     Paste,
+    /// Paste, over the selection the command read: it is still selected,
+    /// since the Card never takes focus.
+    Replace,
     Dismiss,
 }
 
@@ -46,6 +51,18 @@ impl Card {
             primary: Action::Copy,
         }
     }
+
+    /// A command's text reply (PARLA-81): the instruction in the header, and
+    /// `actions` with the first one filled.
+    pub fn command(instruction: String, text: String, actions: Vec<Action>) -> Self {
+        Self {
+            tag: Tag::Command,
+            header: Some(instruction),
+            text,
+            primary: actions[0],
+            actions,
+        }
+    }
 }
 
 /// What the Card did goes to the log only: history stays append-only.
@@ -56,6 +73,8 @@ pub fn log(what: &str) {
 /// A click on the Card of `generation`: closes it, then copies or pastes its
 /// text. A Card already closed ignores it. Paste mirrors the tray's Retry: the
 /// normal transaction with the clipboard restore, never auto-send's Enter.
+/// Replace is the same paste, over the selection that is still live; there
+/// is no focus guard.
 pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
     use tauri::Manager;
     let Some(card) = crate::overlay::take_card(app, generation) else {
@@ -63,7 +82,12 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
     };
     let result = match action {
         Action::Copy => crate::inserter::copy_text(&card.text).map(|()| "copied"),
-        Action::Paste => {
+        Action::Paste | Action::Replace => {
+            let done = if action == Action::Replace {
+                "replaced"
+            } else {
+                "pasted"
+            };
             let settings = app
                 .state::<crate::settings::SharedSettings>()
                 .read()
@@ -75,7 +99,7 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
                 settings.paste_compatibility_mode,
                 false,
             )
-            .map(|_| "pasted")
+            .map(|_| done)
         }
         Action::Dismiss => Ok("dismissed"),
     };
@@ -101,6 +125,25 @@ mod tests {
                 "text": "Ricordami la fattura",
                 "actions": ["copy", "paste"],
                 "primary": "copy",
+            })
+        );
+    }
+
+    #[test]
+    fn a_command_reply_is_tagged_and_headed_by_its_instruction() {
+        let card = Card::command(
+            "Rendilo più personale".into(),
+            "Ciao Giulia, grazie davvero!".into(),
+            vec![Action::Replace, Action::Copy],
+        );
+        assert_eq!(
+            serde_json::to_value(&card).unwrap(),
+            serde_json::json!({
+                "tag": "command",
+                "header": "Rendilo più personale",
+                "text": "Ciao Giulia, grazie davvero!",
+                "actions": ["replace", "copy"],
+                "primary": "replace",
             })
         );
     }

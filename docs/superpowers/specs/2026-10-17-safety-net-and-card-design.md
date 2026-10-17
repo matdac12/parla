@@ -103,6 +103,13 @@ The Card is fed two ways:
   - Not editable: **Copy**, Dismiss.
   - For an answer, Copy is the main button and Replace or Paste is secondary.
 - **Re-run the live eval** with a `kind` check on each case: rewrite and translate are edits, questions about a selection are answers. Re-check the default effort if `kind` accuracy at `low` is poor.
+- 17/10, PARLA-81 as built:
+  - History stores the label as `reply_kind`, since `kind` already names the row's origin (`command`).
+  - The main button comes first: an answer shows Copy, then Replace or Paste.
+  - An edit of a selection keeps the selection's trailing line break (as the v1 paste did); an answer does not.
+  - The command's desktop port has no paste any more: only the Card's buttons paste.
+  - The eval gained an inserted value and four questions about a selection (31 cases).
+  - The prompt reads "the user's language" as the language of the instruction (an Italian question over an English selection gets an Italian answer).
 
 **The Card**
 - **Window:** reuse the overlay window; don't add a new webview (lean memory, as with the captions). It grows to fit the Card above the pill and is click-through except over the Card, the same as the failed pill's Dismiss and Retry (`set_interactive`). It stays non-focusable.

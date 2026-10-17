@@ -581,8 +581,44 @@ pub fn decide(facts: &Facts) -> Rule {
     }
 }
 
+/// Fake probes for the tests of the probe and of its callers.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// A probe whose thread answers with `foreground` once `gate` opens.
+    pub(crate) fn probe_on(
+        foreground: &'static str,
+        gate: mpsc::Receiver<()>,
+    ) -> Worker<impl FnOnce() -> Jobs> {
+        worker(move || {
+            move || {
+                let _ = gate.recv();
+                Facts {
+                    foreground: Some(foreground.into()),
+                    app: None,
+                    focus: Focus::Nothing,
+                }
+            }
+        })
+    }
+
+    /// Polls for a test only: production never waits on a probe.
+    pub(crate) fn answered(pending: &Pending) -> &Reading {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(reading) = pending.answer() {
+                return reading;
+            }
+            assert!(Instant::now() < deadline, "the probe never answered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::answered;
     use super::*;
 
     const PANE: i32 = 50033;
@@ -730,18 +766,6 @@ mod tests {
             judged(&facts(None, Focus::Error("E_FAIL".into()))),
             (Verdict::Unknown, Rule::Error)
         );
-    }
-
-    /// Polls for a test only: production never waits on a probe.
-    fn answered(pending: &Pending) -> &Reading {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(reading) = pending.answer() {
-                return reading;
-            }
-            assert!(Instant::now() < deadline, "the probe never answered");
-            std::thread::sleep(Duration::from_millis(1));
-        }
     }
 
     /// A probe that answers the desktop once the test opens its gate.

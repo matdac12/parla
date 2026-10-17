@@ -185,6 +185,8 @@ function commandOutcome(record: DictationRecord): string {
   switch (record.outcome) {
     case "pasted":
       return "Reply pasted";
+    case "shown":
+      return record.reply_kind === "answer" ? "Answer shown in the Card" : "Edit shown in the Card";
     case "opened": {
       try {
         return `Opened ${new URL(record.url ?? "").host}`;
