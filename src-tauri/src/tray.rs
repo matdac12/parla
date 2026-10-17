@@ -298,17 +298,19 @@ fn on_tray_click(app: &tauri::AppHandle, button: MouseButton, icon: Rect) {
 }
 
 /// Called by the page once it has rendered: sizes the flyout to `height`
-/// logical px, places it above the tray icon and shows it focused, so that a
-/// click anywhere else blurs and destroys it.
+/// logical px, puts it in the screen corner by the tray and shows it focused,
+/// so that a click anywhere else blurs and destroys it.
 pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::Result<()> {
     let (icon, clicked_at) = {
         let mut state = flyout_state();
         (state.icon, state.clicked_at.take())
     };
     let icon = icon.ok_or(tauri::Error::WindowNotFound)?;
+    let taskbar = taskbar();
+    let anchor = taskbar.map_or(icon, |bar| bar.bounds);
     let monitor = match window.monitor_from_point(
-        f64::from(icon.left + icon.right) / 2.0,
-        f64::from(icon.top + icon.bottom) / 2.0,
+        f64::from(anchor.left + anchor.right) / 2.0,
+        f64::from(anchor.top + anchor.bottom) / 2.0,
     )? {
         Some(monitor) => monitor,
         None => window
@@ -316,21 +318,30 @@ pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::
             .ok_or(tauri::Error::WindowNotFound)?,
     };
     let scale = monitor.scale_factor();
-    let area = monitor.work_area();
-    let work = Bounds {
-        left: area.position.x,
-        top: area.position.y,
-        right: area.position.x + area.size.width as i32,
-        bottom: area.position.y + area.size.height as i32,
+    let (position, size) = (monitor.position(), monitor.size());
+    let screen = Bounds {
+        left: position.x,
+        top: position.y,
+        right: position.x + size.width as i32,
+        bottom: position.y + size.height as i32,
     };
-    let height = height.clamp(1.0, f64::from(work.bottom - work.top) / scale);
+    let work = monitor.work_area();
+    let work = Bounds {
+        left: work.position.x,
+        top: work.position.y,
+        right: work.position.x + work.size.width as i32,
+        bottom: work.position.y + work.size.height as i32,
+    };
+    let (area, edge) = tray_area(screen, work, taskbar);
+    let height = height.clamp(1.0, f64::from(area.bottom - area.top) / scale);
     let (width, height) = (
         (FLYOUT_WIDTH * scale).round() as i32,
         (height * scale).round() as i32,
     );
     let (x, y) = flyout_origin(
-        work,
-        icon,
+        screen,
+        area,
+        edge,
         (width, height),
         (FLYOUT_MARGIN * scale).round() as i32,
     );
@@ -369,26 +380,107 @@ impl Bounds {
     }
 }
 
-/// Top-left corner for a `size` flyout next to the tray `icon`, kept `margin`
-/// px inside the monitor's `work` area. The taskbar lies outside the work area,
-/// so an icon below it (the usual bottom taskbar) puts the flyout in the
-/// bottom corner, an icon above it puts it at the top, and an icon inside it
-/// (an auto-hidden taskbar, the overflow) puts the flyout just above the icon.
-fn flyout_origin(work: Bounds, icon: Bounds, size: (i32, i32), margin: i32) -> (i32, i32) {
-    let (width, height) = size;
-    let x = (icon.left + icon.right) / 2 - width / 2;
-    let y = if icon.top >= work.bottom {
-        work.bottom - margin - height
-    } else if icon.bottom <= work.top {
-        work.top + margin
-    } else {
-        icon.top - margin - height
+/// The screen edge the taskbar is docked to.
+// Only Windows reports a taskbar; elsewhere the tests build these.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    Left,
+    Top,
+    Right,
+    Bottom,
+}
+
+/// The taskbar's edge and its rect, reported the same whether it shows or is
+/// auto-hidden.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Taskbar {
+    edge: Edge,
+    bounds: Bounds,
+}
+
+#[cfg(windows)]
+fn taskbar() -> Option<Taskbar> {
+    use windows::Win32::UI::Shell::{
+        SHAppBarMessage, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETTASKBARPOS, APPBARDATA,
     };
-    // When the flyout is larger than the area, its top-left edge wins.
+    let mut data = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `data` is a valid APPBARDATA with `cbSize` set, as required.
+    if unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) } == 0 {
+        return None;
+    }
+    let edge = match data.uEdge {
+        ABE_LEFT => Edge::Left,
+        ABE_TOP => Edge::Top,
+        ABE_RIGHT => Edge::Right,
+        ABE_BOTTOM => Edge::Bottom,
+        _ => return None,
+    };
+    let rc = data.rc;
+    Some(Taskbar {
+        edge,
+        bounds: Bounds {
+            left: rc.left,
+            top: rc.top,
+            right: rc.right,
+            bottom: rc.bottom,
+        },
+    })
+}
+
+#[cfg(not(windows))]
+fn taskbar() -> Option<Taskbar> {
+    None
+}
+
+/// The area the flyout sits in and the edge it hugs: the `screen` minus the
+/// taskbar's thickness on its edge, which is the work area while the taskbar
+/// shows, whether it is auto-hidden or not. Without a taskbar, the `work`
+/// area and its bottom edge.
+fn tray_area(screen: Bounds, work: Bounds, taskbar: Option<Taskbar>) -> (Bounds, Edge) {
+    let Some(Taskbar { edge, bounds: bar }) = taskbar else {
+        return (work, Edge::Bottom);
+    };
+    let mut area = screen;
+    match edge {
+        Edge::Left => area.left += bar.right - bar.left,
+        Edge::Top => area.top += bar.bottom - bar.top,
+        Edge::Right => area.right -= bar.right - bar.left,
+        Edge::Bottom => area.bottom -= bar.bottom - bar.top,
+    }
+    (area, edge)
+}
+
+/// Top-left corner for a `size` flyout `margin` px inside the corner of
+/// `area` where the tray is: against the taskbar `edge`, at its right end (its
+/// bottom end on a vertical taskbar), like the flyouts Windows opens from the
+/// tray. A flyout larger than the `screen` keeps its top-left edge on screen.
+fn flyout_origin(
+    screen: Bounds,
+    area: Bounds,
+    edge: Edge,
+    size: (i32, i32),
+    margin: i32,
+) -> (i32, i32) {
+    let (width, height) = size;
+    let x = if edge == Edge::Left {
+        area.left + margin
+    } else {
+        area.right - margin - width
+    };
+    let y = if edge == Edge::Top {
+        area.top + margin
+    } else {
+        area.bottom - margin - height
+    };
     let fit = |value: i32, low: i32, high: i32| value.min(high).max(low);
     (
-        fit(x, work.left + margin, work.right - margin - width),
-        fit(y, work.top + margin, work.bottom - margin - height),
+        fit(x, screen.left + margin, screen.right - margin - width),
+        fit(y, screen.top + margin, screen.bottom - margin - height),
     )
 }
 
@@ -461,76 +553,76 @@ fn reveal(path: &std::path::Path) {
 mod flyout_tests {
     use super::*;
 
-    const WORK: Bounds = Bounds {
+    const SCREEN: Bounds = Bounds {
         left: 0,
         top: 0,
         right: 1920,
-        bottom: 1032,
+        bottom: 1080,
     };
 
-    #[test]
-    fn bottom_taskbar_puts_the_flyout_in_the_corner_above_the_icon() {
-        let icon = Bounds {
-            left: 1700,
-            top: 1040,
-            right: 1724,
-            bottom: 1072,
-        };
-        assert_eq!(flyout_origin(WORK, icon, (360, 500), 12), (1532, 520));
-        // An icon near the screen edge keeps the flyout inside the work area.
-        let edge = Bounds {
-            left: 1890,
-            right: 1914,
-            ..icon
-        };
-        assert_eq!(flyout_origin(WORK, edge, (360, 500), 12), (1548, 520));
+    fn bar(edge: Edge, (left, top, right, bottom): (i32, i32, i32, i32)) -> Option<Taskbar> {
+        Some(Taskbar {
+            edge,
+            bounds: Bounds {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        })
+    }
+
+    fn place(work: Bounds, taskbar: Option<Taskbar>) -> (i32, i32) {
+        let (area, edge) = tray_area(SCREEN, work, taskbar);
+        flyout_origin(SCREEN, area, edge, (360, 500), 12)
     }
 
     #[test]
-    fn top_taskbar_hangs_the_flyout_below_it() {
-        let work = Bounds { top: 48, ..WORK };
-        let icon = Bounds {
-            left: 1700,
-            top: 8,
-            right: 1724,
-            bottom: 40,
+    fn bottom_taskbar_puts_the_flyout_in_the_bottom_right_corner_above_it() {
+        let work = Bounds {
+            bottom: 1032,
+            ..SCREEN
         };
-        assert_eq!(flyout_origin(work, icon, (360, 500), 12), (1532, 60));
+        let taskbar = bar(Edge::Bottom, (0, 1032, 1920, 1080));
+        assert_eq!(place(work, taskbar), (1548, 520));
+        // Auto-hidden: the work area is the whole screen, the corner is the same.
+        assert_eq!(place(SCREEN, taskbar), (1548, 520));
+        // Reported where a hidden bar slid to: only its thickness counts.
+        let slid = bar(Edge::Bottom, (0, 1078, 1920, 1126));
+        assert_eq!(place(SCREEN, slid), (1548, 520));
     }
 
     #[test]
-    fn icon_inside_the_work_area_gets_the_flyout_just_above_it() {
-        let icon = Bounds {
-            left: 1000,
-            top: 900,
-            right: 1032,
-            bottom: 932,
-        };
-        assert_eq!(flyout_origin(WORK, icon, (360, 500), 12), (836, 388));
-        // Too close to the top: the flyout stays inside the area instead.
-        let high = Bounds {
-            top: 100,
-            bottom: 132,
-            ..icon
-        };
-        assert_eq!(flyout_origin(WORK, high, (360, 500), 12).1, 12);
+    fn other_taskbar_edges_get_their_own_tray_corner() {
+        let top = bar(Edge::Top, (0, 0, 1920, 48));
+        assert_eq!(place(SCREEN, top), (1548, 60));
+        let left = bar(Edge::Left, (0, 0, 48, 1080));
+        assert_eq!(place(SCREEN, left), (60, 568));
+        let right = bar(Edge::Right, (1872, 0, 1920, 1080));
+        assert_eq!(place(SCREEN, right), (1500, 568));
     }
 
     #[test]
-    fn a_flyout_larger_than_the_area_is_pinned_top_left() {
+    fn without_a_taskbar_the_work_area_bottom_right_is_used() {
+        let work = Bounds {
+            right: 1800,
+            bottom: 1000,
+            ..SCREEN
+        };
+        assert_eq!(place(work, None), (1428, 488));
+    }
+
+    #[test]
+    fn a_flyout_larger_than_the_screen_keeps_its_top_left_on_screen() {
         let small = Bounds {
             left: 0,
             top: 0,
             right: 300,
             bottom: 400,
         };
-        let icon = Bounds {
-            left: 280,
-            top: 410,
-            right: 300,
-            bottom: 430,
-        };
-        assert_eq!(flyout_origin(small, icon, (360, 500), 12), (12, 12));
+        let taskbar = bar(Edge::Bottom, (0, 352, 300, 400));
+        let (area, edge) = tray_area(small, small, taskbar);
+        assert_eq!(flyout_origin(small, area, edge, (360, 500), 12), (12, 12));
     }
 
     #[test]

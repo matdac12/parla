@@ -165,7 +165,10 @@ model applies at once. Other edits show a **Save** bar at the bottom with
 
 ### Tray icon
 
-**Left-click** the tray icon for a small flyout above it: the **Ready ·
+**Left-click** the tray icon for a small flyout in the screen corner by the
+tray (bottom-right for a bottom taskbar). It sits just above where the taskbar
+is when shown, also when the taskbar auto-hides or the icon is in the hidden
+icons overflow. It shows the **Ready ·
 <engine>** status and your push-to-talk keys; an **OpenAI / Grok / Local**
 switch (applies at once, like the provider choice in Settings; providers that
 are not set up are greyed out); three quick toggles, **Live captions**, **Dim
