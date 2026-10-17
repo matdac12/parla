@@ -188,6 +188,15 @@ pub fn dismiss(app: &tauri::AppHandle) {
     }
 }
 
+/// How a session's pill settles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// The check.
+    Done,
+    /// The cross and Dismiss; the Retry button only when `retry` (PARLA-51).
+    Failed { retry: bool },
+}
+
 /// One dictation's pill: recording (live meter) -> processing (spinner) -> a
 /// brief done/error confirmation. Dropping it without `finish` hides the pill
 /// at once (cancelled dictation).
@@ -332,18 +341,28 @@ impl Overlay {
 
     /// Shows a short confirmation (check on success, cross on failure), then
     /// hides the pill.
-    pub fn finish(self, ok: bool) {
-        self.settle(ok, if ok { DONE_HOLD } else { ERROR_HOLD });
+    pub fn finish(self, ending: Ending) {
+        let hold = match ending {
+            Ending::Done => DONE_HOLD,
+            Ending::Failed { .. } => ERROR_HOLD,
+        };
+        self.settle(ending, hold);
     }
 
     /// The check with `label` beside it, held a little longer to be read.
     pub fn finish_labelled(self, label: &str) {
         Size::Labelled.apply(&self.app);
         let _ = self.app.emit_to(LABEL, "label", label);
-        self.settle(true, LABELLED_HOLD);
+        self.settle(Ending::Done, LABELLED_HOLD);
     }
 
-    fn settle(mut self, ok: bool, hold: Duration) {
+    fn settle(mut self, ending: Ending, hold: Duration) {
+        let ok = ending == Ending::Done;
+        if let Ending::Failed { retry } = ending {
+            // Before the phase, like the label: the cross renders with or
+            // without its Retry button.
+            let _ = self.app.emit_to(LABEL, "retry", retry);
+        }
         self.clear_captions();
         self.settled = true;
         self.metering.store(false, Ordering::Release);
@@ -499,7 +518,7 @@ mod native_tests {
                     let overlay = begin(&handle, false, Duration::ZERO);
                     std::thread::sleep(Duration::from_millis(400));
                     overlay.processing();
-                    overlay.finish(false);
+                    overlay.finish(Ending::Failed { retry: true });
                     std::thread::sleep(Duration::from_millis(500));
                 };
 

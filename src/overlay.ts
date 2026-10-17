@@ -162,6 +162,8 @@ void listen<string>("label", (event) => {
   label.textContent = event.payload;
   pill.dataset.labelled = "";
 });
+// Before an "error" phase: whether its cross comes with Retry (PARLA-51).
+void listen<boolean>("retry", (event) => pill.toggleAttribute("data-no-retry", !event.payload));
 void listen<string>("phase", (event) => setPhase(event.payload));
 void listen<{ generation: number; enabled: boolean }>("caption-session", (event) => {
   if (event.payload.generation < generation) return;
