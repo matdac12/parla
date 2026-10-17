@@ -46,7 +46,8 @@
 .field input[type="text"],
 .field input[type="password"],
 .field input[type="number"],
-.field textarea {
+.field textarea,
+.field select {
   width: 100%;
   padding: 0.5rem 0.7rem;
   border: 1px solid var(--border-strong);
@@ -57,13 +58,14 @@
   transition: border-color 150ms var(--ease), box-shadow 150ms var(--ease);
 }
 .field textarea { resize: vertical; min-height: 5rem; }
-.field input:focus, .field textarea:focus {
+.field input:focus, .field textarea:focus, .field select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .hint { color: var(--text-3); font-size: 0.85rem; margin: 0.4rem 0 0; line-height: 1.5; }
 .capture-hint { color: var(--warning); }
+.field label:has(input:disabled) { color: var(--text-3); cursor: not-allowed; }
 
 .password-row,
 .hotkey-row { display: flex; gap: 0.5rem; align-items: stretch; }

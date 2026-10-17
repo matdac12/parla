@@ -157,11 +157,25 @@ older versions keep their words and get audio and cost from `history.jsonl`
 once.
 
 Settings are split into **Transcription** (provider, keys, models, local
-model), **Dictation & hotkey** (shortcut, live transcription and captions),
-**Other audio** ([dimming](#dimming-other-audio)), **Vocabulary** and
-**Clipboard** (paste compatibility, restore delay). Switching provider or local
-model applies at once. Other edits show a **Save** bar at the bottom with
-**Discard**; it stays until you save or discard, across pages.
+model), **Dictation & hotkey** (shortcut, the **Command mode** card, live
+transcription and captions), **Other audio** ([dimming](#dimming-other-audio)),
+**Vocabulary** and **Clipboard** (paste compatibility, restore delay). Switching
+provider or local model applies at once. Other edits show a **Save** bar at the
+bottom with **Discard**; it stays until you save or discard, across pages.
+
+The **Command mode** card holds the `command` section of `settings.json`
+([command mode](#command-mode-experimental)):
+
+- **Enabled**, off by default. It is greyed out, with a hint, until an OpenAI
+  key is set: the one under Transcription → OpenAI (typing it is enough, both
+  save together) or `OPENAI_API_KEY`. If the key later goes away, command mode
+  stays on, with the hint, until you turn it off.
+- **Command hotkey**, default `LCtrl+Shift`; see [Hotkey](#hotkey).
+- **Model**, default `gpt-6-luna`; clearing the field restores it.
+- **Reasoning effort**, `none` or `low`.
+
+Saving arms or disarms the command chord and rebinds it at once, with no
+restart. Model and effort are read by each command run.
 
 ### Tray icon
 
@@ -515,6 +529,28 @@ rejected, and **Ctrl+V is reserved** for pasting.
 The hold mode uses the shortcut's modifiers as the chord, and needs two or more
 (`Ctrl+Alt+Space`, `Ctrl+Shift+F9`). With fewer, the shortcut is tap to start,
 tap to stop.
+
+The **command hotkey** (Settings → **Command mode** card) starts
+[command mode](#command-mode-experimental). It is a hold only, made of two or
+more modifiers and no other key, written like `LCtrl+Shift` (the default: left
+Ctrl plus either Shift). `Ctrl`, `Shift` and `Win` mean either side, and
+`LCtrl`/`RCtrl`, `LShift`/`RShift` and `LWin`/`RWin` mean only that side;
+`Alt` is left Alt only, and AltGr is never allowed. Every modifier not in the
+chord, the other side of a one-sided modifier included, must stay up. **Record
+keys** takes the modifiers you hold when you release the first one. It keeps
+Ctrl's side and records Shift and Win as either side, so holding left Ctrl and
+a Shift records the default. Saving applies it immediately, with no restart.
+While command mode is enabled, Parla rejects a command hotkey inline, with a
+warning, and does not save it, if:
+
+- its modifiers equal, contain or sit inside the dictation hold's (for example
+  `Ctrl+Alt` or `Ctrl+Alt+Shift` against `Ctrl+Alt+Space`), since pressing one
+  would pass through the other, or
+- it has a main key: **Ctrl+V stays reserved** for pasting.
+
+With command mode off, the keyboard hook skips the command chord with one flag
+check per key. The card still shows the warning, but saving never rejects a
+command hotkey that is off, so it can't block a dictation rebind.
 
 On Windows the hotkey is a keyboard-only low-level hook that ignores injected
 input; Tauri's global-shortcut plugin merely reserves the accelerator. If the

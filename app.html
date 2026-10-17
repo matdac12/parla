@@ -174,6 +174,50 @@
                 </p>
               </div>
             </section>
+            <section class="card" id="command-card">
+              <h2>Command mode</h2>
+              <div class="field">
+                <label><input id="command-enabled" type="checkbox" aria-describedby="command-enabled-hint" /> Enabled</label>
+                <p id="command-enabled-hint" class="hint">
+                  Hold the command hotkey, say an instruction (“make this more formal”, “translate to English”) and release:
+                  Parla sends it with any selected text to OpenAI and pastes the reply. Dictation never goes through an LLM.
+                </p>
+                <p id="command-key-hint" class="hint capture-hint" hidden>
+                  Needs an OpenAI API key: add one under Transcription → OpenAI, or set <code>OPENAI_API_KEY</code>.
+                </p>
+              </div>
+              <div class="field">
+                <label for="command-hotkey">Command hotkey</label>
+                <div class="hotkey-row">
+                  <input
+                    id="command-hotkey"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="LCtrl+Shift"
+                    aria-describedby="command-hotkey-warning command-hotkey-hint"
+                  />
+                  <button type="button" id="command-capture" class="secondary">Record keys</button>
+                </div>
+                <p id="command-hotkey-warning" class="hint capture-hint" role="status" aria-live="polite" hidden></p>
+                <p id="command-hotkey-hint" class="hint">
+                  Two or more modifiers held together, no other key (default <code>LCtrl+Shift</code>: left Ctrl and either Shift).
+                  <code>LCtrl</code>/<code>RCtrl</code>, <code>LShift</code>/<code>RShift</code> and <code>LWin</code>/<code>RWin</code> pick one side;
+                  <code>Alt</code> is left Alt only, never AltGr. Press “Record keys”, hold the modifiers, then release them. It applies on save.
+                </p>
+              </div>
+              <div class="field">
+                <label for="command-model">Model</label>
+                <input id="command-model" type="text" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="command-effort">Reasoning effort</label>
+                <select id="command-effort">
+                  <option value="none">None (fastest)</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+            </section>
             <section class="card">
               <h2>While I speak</h2>
               <div class="field">
