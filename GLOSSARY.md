@@ -44,6 +44,18 @@ _Avoid_: popup, toast, preview window, answer window, safety net window
 The rule that sends a dictation to the Card instead of pasting it when nothing editable has focus. It only acts on a confident "not editable"; when unsure, Parla pastes. Its setting (`safety_net`) also gates the editable probe that command replies use to pick the Card's buttons.
 _Avoid_: fallback, editable check, focus guard
 
+**To-do**:
+An item in Mattia's Traccia Personal Space that he means to do, optionally on a Planned day. Command mode's reminder tool creates To-dos; it never creates Traccia Issues.
+_Avoid_: task, issue, promemoria
+
+**Reminder**:
+A time of day on a To-do's Planned day when Traccia pings Mattia on Telegram. A To-do has at most one. Parla sets it but never delivers it.
+_Avoid_: alarm, notification, due date
+
+**Project reference**:
+An `@KEY` in a To-do's title that names one of Mattia's Traccia Projects (for example `@CRM`). The LLM writes it from the Project list Parla puts in the request.
+_Avoid_: tag, project link, mention
+
 **Edit** and **Answer**:
 The two kinds of command reply. An edit is text meant to go into the document (a rewrite, a translation, a drafted email), so the Card's main button is Replace or Paste. An answer is addressed to the user (an explanation, a calculation), so the main button is Copy. The LLM says which kind it wrote.
 _Avoid_: rewrite vs question, action vs info
