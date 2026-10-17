@@ -272,6 +272,7 @@ fn run_session(
         Completion {
             hold_error,
             paste: true,
+            auto_send: settings.auto_send,
             stream,
         },
     );
@@ -318,6 +319,8 @@ pub fn finish_session(
         Completion {
             hold_error: None,
             paste,
+            // A retry never sends: focus may have moved since (PARLA-58).
+            auto_send: false,
             stream: None,
         },
     );
@@ -326,6 +329,7 @@ pub fn finish_session(
 struct Completion {
     hold_error: Option<String>,
     paste: bool,
+    auto_send: bool,
     stream: Option<crate::streaming::Session>,
 }
 
@@ -366,10 +370,16 @@ fn finish_session_with_error(
                             completion.stream.take().map(|session| session.finish()),
                             |text, delay| {
                                 if completion.paste {
+                                    // History keeps the raw text; only the paste drops the trigger.
+                                    let stripped = completion
+                                        .auto_send
+                                        .then(|| inserter::strip_send_trigger(text))
+                                        .flatten();
                                     inserter::paste_text_with_options(
-                                        text,
+                                        stripped.unwrap_or(text),
                                         delay,
                                         settings.paste_compatibility_mode,
+                                        stripped.is_some(),
                                     )
                                     .map_err(|e| e.to_string())
                                 } else {
