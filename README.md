@@ -346,11 +346,17 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   see [Hotkey](#hotkey)), say the instruction, release. It is hold only: no
   hands-free lock, and Space does nothing special.
 - **Selection:** once the hold passes 300 ms, while you are still speaking,
-  Parla saves your clipboard text, sends **Ctrl+Insert** (never Ctrl+C, so a
-  terminal is never interrupted) and watches the clipboard for about 150 ms.
-  New, non-empty text is the selection; a slower copy is still picked up when
-  you release. Nothing new, or VS Code's copy of the whole line when nothing
-  is selected, means no selection. The focused app's
+  Parla saves your clipboard text, sends **Ctrl+Insert** and watches the
+  clipboard for about 150 ms. If nothing is copied (some apps, such as the
+  PDFgear PDF viewer, ignore Ctrl+Insert), it sends **Ctrl+C** and watches as
+  long again, except in a console, a terminal or an app with a terminal pane
+  (Windows Terminal, conhost, Git Bash, VS Code, JetBrains IDEs, T3 Code…),
+  which never get Ctrl+C. New, non-empty text is the selection. A slower copy
+  still counts until about 1 s after the first key or until you release,
+  whichever comes first; a clipboard write after that is someone else's (a
+  clipboard manager, a sync) and is neither the selection nor overwritten.
+  Nothing new, or an editor's copy of the whole line when nothing is selected
+  (VS Code, Visual Studio, Notepad++), means no selection. The focused app's
   executable name is noted too, and the connection to OpenAI is opened ahead
   of the request.
 - The pill is **orange** while recording, transcribing and waiting for the
@@ -410,7 +416,8 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - An empty or silent instruction ends quietly: no LLM call and no row.
 - A network error, a timeout, an API error, a reply cut off by the token cap
   or an empty reply shows the red cross and a "Command mode: …" notification,
-  and no Card. There is no Retry.
+  and no Card. So does an instruction that could not be transcribed, under
+  "Parla — command failed". There is no Retry.
 - **Esc** cancels while you hold, and also after you release, while the
   instruction is transcribed and the reply is awaited. No Card opens: a
   late reply is discarded. While waiting for the reply the pill goes away at
@@ -430,9 +437,11 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   replaced`). A cancel while you are still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
-  as usual), and the hold stops after 120 s. Recording starts at key-down, but
-  the pill appears and other audio is dimmed only once the hold passes
-  300 ms, and only from then does **Esc** cancel (and get swallowed).
+  as usual), and the hold stops after 120 s. A mouse button still down at
+  300 ms (a Ctrl+Shift+drag) ends the hold too, with no run. Recording
+  starts at key-down, but the pill appears and other audio is dimmed only
+  once the hold passes 300 ms, and only from then does **Esc** cancel (and
+  get swallowed).
 - While a command run or a dictation is in flight, both hotkeys are ignored.
 - Command runs never count toward words, dictations or audio. Total cost adds
   the instruction's transcription, like a dictation, and the LLM tokens (see

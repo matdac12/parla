@@ -53,13 +53,12 @@ pub fn paste_text_with_options(
     compatibility_mode: bool,
     send: bool,
 ) -> Result<Instant, String> {
-    paste_transaction(text, None, restore_delay, compatibility_mode, send)
+    paste_transaction(text, restore_delay, compatibility_mode, send)
 }
 
 #[cfg(windows)]
 fn paste_transaction(
     text: &str,
-    borrowed: Option<&Borrowed>,
     restore_delay: Duration,
     compatibility_mode: bool,
     send: bool,
@@ -70,7 +69,6 @@ fn paste_transaction(
     let result = paste_over(
         &mut WindowsDesktop::new()?,
         &mut pending,
-        borrowed,
         text,
         restore_delay,
         compatibility_mode,
@@ -107,14 +105,14 @@ pub fn copy_text(text: &str) -> Result<(), String> {
     copy_to(&mut WindowsDesktop::new()?, &mut pending_restore(), text)
 }
 
-/// Ctrl+Insert into the focused app, for command mode's selection read: never
-/// Ctrl+C, which would interrupt a terminal. It runs while the user still
-/// holds the command hotkey, so the modifiers it released go back down before
-/// the synthetic-input guard drops: the hook's watchdog samples the logical
-/// state and would read a missing Shift as the hotkey let go. No waits in
-/// between, so a real release can hardly slip in.
+/// Ctrl+Insert, or Ctrl+C where command mode found the window takes it
+/// (PARLA-84), into the focused app, for command mode's selection read. It
+/// runs while the user still holds the command hotkey, so the modifiers it
+/// released go back down before the synthetic-input guard drops: the hook's
+/// watchdog samples the logical state and would read a missing Shift as the
+/// hotkey let go. No waits in between, so a real release can hardly slip in.
 #[cfg(windows)]
-pub fn send_copy() -> Result<(), String> {
+pub fn send_copy(key: crate::command_mode::CopyKey) -> Result<(), String> {
     use enigo::{Direction, Key, Keyboard};
     let _synthetic_input = crate::hotkey::synthetic_input_guard();
     // Enigo releases the keys it pressed when dropped; these stay held.
@@ -129,7 +127,12 @@ pub fn send_copy() -> Result<(), String> {
     } else {
         input.key(Key::Control, Direction::Press)
     };
-    let copy = press.and_then(|()| input.key(Key::Insert, Direction::Click));
+    let key = match key {
+        crate::command_mode::CopyKey::CtrlInsert => Key::Insert,
+        // Virtual VK_C, not a layout-dependent Unicode character.
+        crate::command_mode::CopyKey::CtrlC => Key::Other(0x43),
+    };
+    let copy = press.and_then(|()| input.key(key, Direction::Click));
     let release_control = if borrow_control {
         Ok(())
     } else {
@@ -150,24 +153,29 @@ pub fn clipboard_sequence() -> u32 {
     unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() }
 }
 
-/// VS Code copies the whole line when nothing is selected, and marks it in
-/// its `vscode-editor-data` (`"isFromEmptySelection":true`). Chromium keeps
-/// that web type in this format, a pickle of UTF-16 strings.
+/// Editors copy the whole line when nothing is selected. Visual Studio and
+/// Scintilla's (Notepad++) add an empty `MSDEVLineSelect` format (PARLA-78).
+/// VS Code marks it in its `vscode-editor-data`
+/// (`"isFromEmptySelection":true`), which Chromium keeps in its web custom
+/// format, a pickle of UTF-16 strings.
 #[cfg(windows)]
 pub fn copied_empty_selection() -> bool {
     use windows_sys::Win32::{
         Foundation::HGLOBAL,
         System::{DataExchange::*, Memory::*},
     };
-    let name: Vec<u16> = "Chromium Web Custom MIME Data Format\0"
-        .encode_utf16()
-        .collect();
-    // SAFETY: `name` is NUL-terminated UTF-16.
-    let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
-    // SAFETY: plain value parameters.
-    if format == 0 || unsafe { IsClipboardFormatAvailable(format) } == 0 {
-        return false;
+    let available = |name: &str| {
+        let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: `name` is NUL-terminated UTF-16; plain value parameters.
+        let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
+        (format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0).then_some(format)
+    };
+    if available("MSDEVLineSelect").is_some() {
+        return true;
     }
+    let Some(format) = available("Chromium Web Custom MIME Data Format") else {
+        return false;
+    };
     // Listeners such as clipboard managers open it right after every copy.
     let opened = (0..5).any(|attempt| {
         if attempt > 0 {
@@ -234,6 +242,26 @@ pub fn foreground_app() -> Option<String> {
     named.then(|| path.rsplit('\\').next().unwrap_or(&path).to_owned())
 }
 
+/// The focused top-level window's class, such as `ConsoleWindowClass`.
+#[cfg(windows)]
+pub fn foreground_class() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
+    let mut class = [0u16; 256];
+    // SAFETY: the buffer outlives the call and its length is passed.
+    let length = unsafe { GetClassNameW(GetForegroundWindow(), class.as_mut_ptr(), 256) };
+    (length > 0).then(|| String::from_utf16_lossy(&class[..length as usize]))
+}
+
+/// A mouse button is down: a Ctrl+Shift+drag, not a command (PARLA-78).
+#[cfg(windows)]
+pub fn mouse_button_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    // Left, right, middle, X1, X2. SAFETY: no pointer parameters.
+    [0x01, 0x02, 0x04, 0x05, 0x06]
+        .into_iter()
+        .any(|vk| unsafe { GetAsyncKeyState(vk) } < 0)
+}
+
 /// The paste transaction: at most one restore is pending at a time.
 #[cfg(windows)]
 fn pending_restore() -> std::sync::MutexGuard<'static, Option<PendingRestore>> {
@@ -295,8 +323,18 @@ pub fn copy_text(_text: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-pub fn send_copy() -> Result<(), String> {
+pub fn send_copy(_key: crate::command_mode::CopyKey) -> Result<(), String> {
     Err("Input is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn foreground_class() -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn mouse_button_down() -> bool {
+    false
 }
 
 #[cfg(not(windows))]
@@ -384,47 +422,22 @@ struct PendingRestore {
     due: Instant,
 }
 
-/// Dictation's `paste_over`, for the tests.
-#[cfg(test)]
-fn paste_deferring_restore(
-    desktop: &mut impl Desktop,
-    pending: &mut Option<PendingRestore>,
-    text: &str,
-    restore_delay: Duration,
-    compatibility_mode: bool,
-    send: bool,
-) -> Result<Instant, String> {
-    paste_over(
-        desktop,
-        pending,
-        None,
-        text,
-        restore_delay,
-        compatibility_mode,
-        send,
-    )
-}
-
 /// Pastes and returns without waiting for the restore, which is left in
 /// `pending`. Keeping the dictation busy through the restore delay dropped a
-/// dictation started right after a paste (PARLA-48). `borrowed` is command
-/// mode's (PARLA-64); dictation passes None.
+/// dictation started right after a paste (PARLA-48).
 #[cfg(any(windows, test))]
 fn paste_over(
     desktop: &mut impl Desktop,
     pending: &mut Option<PendingRestore>,
-    borrowed: Option<&Borrowed>,
     text: &str,
     restore_delay: Duration,
     compatibility_mode: bool,
     send: bool,
 ) -> Result<Instant, String> {
     let current = restorable_text(desktop.read_text()?);
-    let saved = match (borrowed, pending.as_ref()) {
-        // Still command mode's copy of the selection: the user's text is owed.
-        (Some(borrowed), _) if current == borrowed.copied => borrowed.saved.clone(),
+    let saved = match pending.as_ref() {
         // Still our previous transcript: the user's text is the one owed back.
-        (_, Some(restore)) if current.as_deref() == Some(restore.pasted.as_str()) => {
+        Some(restore) if current.as_deref() == Some(restore.pasted.as_str()) => {
             Some(restore.saved.clone())
         }
         _ => current,
@@ -761,7 +774,7 @@ mod tests {
         compatibility_mode: bool,
     ) -> Result<Instant, String> {
         let mut pending = None;
-        let result = paste_deferring_restore(
+        let result = paste_over(
             desktop,
             &mut pending,
             text,
@@ -780,7 +793,7 @@ mod tests {
         let mut pending = None;
         let delay = Duration::from_millis(250);
         let before = Instant::now();
-        paste_deferring_restore(&mut desktop, &mut pending, "new", delay, false, false).unwrap();
+        paste_over(&mut desktop, &mut pending, "new", delay, false, false).unwrap();
         assert_eq!(desktop.waits, [Duration::from_millis(15)]);
         assert_eq!(desktop.text.as_deref(), Some("new"));
         let restore = pending.as_ref().unwrap();
@@ -793,8 +806,8 @@ mod tests {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
         let delay = Duration::from_millis(250);
-        paste_deferring_restore(&mut desktop, &mut pending, "first", delay, false, false).unwrap();
-        paste_deferring_restore(&mut desktop, &mut pending, "second", delay, false, false).unwrap();
+        paste_over(&mut desktop, &mut pending, "first", delay, false, false).unwrap();
+        paste_over(&mut desktop, &mut pending, "second", delay, false, false).unwrap();
         assert_eq!(desktop.pasted, ["first", "second"]);
         // No early restore, no wait: the pending restore is carried forward.
         assert_eq!(desktop.writes, ["first", "second"]);
@@ -809,7 +822,7 @@ mod tests {
     fn a_copy_between_pastes_replaces_the_pending_restore() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
-        paste_deferring_restore(
+        paste_over(
             &mut desktop,
             &mut pending,
             "first",
@@ -819,7 +832,7 @@ mod tests {
         )
         .unwrap();
         desktop.text = Some("user copy".into());
-        paste_deferring_restore(
+        paste_over(
             &mut desktop,
             &mut pending,
             "second",
@@ -837,7 +850,7 @@ mod tests {
         let mut pending = None;
         let delay = Duration::from_millis(250);
         // A restore still owed for an earlier paste of the same text.
-        paste_deferring_restore(&mut desktop, &mut pending, "Ciao", delay, false, false).unwrap();
+        paste_over(&mut desktop, &mut pending, "Ciao", delay, false, false).unwrap();
         copy_to(&mut desktop, &mut pending, "Ciao").unwrap();
         restore_pending(&mut desktop, &mut pending);
         assert_eq!(desktop.text.as_deref(), Some("Ciao"));
@@ -848,7 +861,7 @@ mod tests {
     fn the_timer_restore_runs_exactly_once() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
-        paste_deferring_restore(
+        paste_over(
             &mut desktop,
             &mut pending,
             "new",
@@ -868,7 +881,7 @@ mod tests {
     fn nothing_is_pending_for_an_empty_or_non_text_clipboard() {
         let mut desktop = MemoryDesktop::new(None);
         let mut pending = None;
-        paste_deferring_restore(
+        paste_over(
             &mut desktop,
             &mut pending,
             "new",
@@ -982,7 +995,7 @@ mod tests {
     fn send_presses_enter_once_right_after_the_paste_and_still_restores() {
         let mut desktop = MemoryDesktop::new(Some("old"));
         let mut pending = None;
-        paste_deferring_restore(
+        paste_over(
             &mut desktop,
             &mut pending,
             "hi",
@@ -1006,7 +1019,7 @@ mod tests {
         let mut desktop = MemoryDesktop::new(Some("old"));
         desktop.injection_error = true;
         let mut pending = None;
-        let result = paste_deferring_restore(
+        let result = paste_over(
             &mut desktop,
             &mut pending,
             "hi",
@@ -1066,45 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_over_a_borrowed_clipboard_owes_the_users_text_not_the_copy() {
-        let mut desktop = MemoryDesktop::new(Some("selected text"));
-        let mut pending = None;
-        let lent = borrowed(Some("user copy"), Some("selected text"));
-        paste_over(
-            &mut desktop,
-            &mut pending,
-            Some(&lent),
-            "reply",
-            Duration::ZERO,
-            false,
-            false,
-        )
-        .unwrap();
-        assert_eq!(desktop.pasted, ["reply"]);
-        restore_pending(&mut desktop, &mut pending);
-        assert_eq!(desktop.writes, ["reply", "user copy"]);
-    }
-
-    #[test]
-    fn a_copy_made_after_the_borrow_is_what_a_paste_owes() {
-        let mut desktop = MemoryDesktop::new(Some("newer copy"));
-        let mut pending = None;
-        let lent = borrowed(Some("user copy"), Some("selected text"));
-        paste_over(
-            &mut desktop,
-            &mut pending,
-            Some(&lent),
-            "reply",
-            Duration::ZERO,
-            false,
-            false,
-        )
-        .unwrap();
-        restore_pending(&mut desktop, &mut pending);
-        assert_eq!(desktop.text.as_deref(), Some("newer copy"));
-    }
-
-    #[test]
     fn giving_back_writes_the_users_text_unless_the_clipboard_moved_on() {
         for (clipboard, lent, after) in [
             (
@@ -1133,8 +1107,7 @@ mod tests {
         let mut desktop = MemoryDesktop::new(Some("user copy"));
         let mut pending = None;
         let delay = Duration::from_secs(1);
-        paste_deferring_restore(&mut desktop, &mut pending, "dictated", delay, false, false)
-            .unwrap();
+        paste_over(&mut desktop, &mut pending, "dictated", delay, false, false).unwrap();
         assert_eq!(
             read_settled(&mut desktop, &mut pending),
             Ok(Some("user copy".into()))

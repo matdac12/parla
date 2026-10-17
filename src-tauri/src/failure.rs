@@ -26,6 +26,15 @@ pub struct RetryMenu(pub tauri::menu::MenuItem<tauri::Wry>);
 /// Only trusted summaries are displayed: raw server, transport and config strings
 /// can contain credentials of arbitrary shape, so none are copied into the toast.
 pub fn user_message(provider_display_name: &str, error: &ProviderError) -> String {
+    message(
+        provider_display_name,
+        error,
+        "dictation failed. Check Settings and try again.",
+    )
+}
+
+/// `fallback` covers Parla's own reasons that have no message of their own.
+fn message(provider_display_name: &str, error: &ProviderError, fallback: &str) -> String {
     let reason = match error {
         ProviderError::MissingConfig(reason) => {
             let lower = reason.to_lowercase();
@@ -67,13 +76,25 @@ pub fn user_message(provider_display_name: &str, error: &ProviderError) -> Strin
             _ if reason.starts_with("Paste failed:") => {
                 "could not paste the transcript. Try again."
             }
-            _ => "dictation failed. Check Settings and try again.",
+            _ => fallback,
         },
     };
     format!("{provider_display_name}: {reason}")
 }
 
+/// A command run's instruction could not be transcribed (PARLA-78): the
+/// provider's reason, worded for command mode.
+pub fn instruction_message(provider_display_name: &str, error: &ProviderError) -> String {
+    let reason = message(
+        provider_display_name,
+        error,
+        "the instruction could not be transcribed. Try again.",
+    );
+    format!("Command mode: {reason}")
+}
+
 const DICTATION_FAILED: &str = "Parla — dictation failed";
+const COMMAND_FAILED: &str = "Parla — command failed";
 
 pub fn notify_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
     let provider = registry::get(provider_id);
@@ -106,9 +127,15 @@ pub fn command_message(error: &ProviderError) -> String {
 pub fn notify_command_error(app: &tauri::AppHandle, error: &ProviderError) {
     notify_failure(
         app,
-        "Parla — command failed",
+        COMMAND_FAILED,
         &format!("Command mode: {}", command_message(error)),
     );
+}
+
+pub fn notify_instruction_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
+    let provider = registry::get(provider_id);
+    let name = provider.as_ref().map_or("Provider", |p| p.display_name());
+    notify_failure(app, COMMAND_FAILED, &instruction_message(name, error));
 }
 
 fn notify_failure(app: &tauri::AppHandle, title: &str, message: &str) {
@@ -416,6 +443,28 @@ mod tests {
             ),
         ] {
             assert_eq!(command_message(&error), expected);
+        }
+    }
+
+    #[test]
+    fn an_instruction_that_fails_to_transcribe_names_command_mode_not_dictation() {
+        for (error, expected) in [
+            (
+                ProviderError::Other("private arbitrary-key".into()),
+                "Command mode: Parakeet: the instruction could not be transcribed. Try again.",
+            ),
+            (
+                ProviderError::Timeout,
+                "Command mode: Parakeet: timed out after 30 s. Try again.",
+            ),
+            (
+                ProviderError::Other("No audio captured".into()),
+                "Command mode: No audio captured. Hold the hotkey while speaking.",
+            ),
+        ] {
+            let message = instruction_message("Parakeet", &error);
+            assert_eq!(message, expected);
+            assert!(!message.contains("dictation"), "{message}");
         }
     }
 

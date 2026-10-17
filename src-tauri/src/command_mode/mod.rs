@@ -19,7 +19,7 @@ use crate::{
     settings::CommandSettings,
     timing::{self, CommandOutcome, DictationRecord},
 };
-use responses::{Reply, Request};
+use responses::{Content, Reply, Request};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -31,14 +31,15 @@ pub trait Desktop {
     fn clipboard_text(&self) -> Result<Option<String>, String>;
     /// Moves on whenever any app writes the clipboard.
     fn clipboard_sequence(&self) -> u32;
-    /// Ctrl+Insert into the focused app: a copy that, unlike Ctrl+C, never
-    /// interrupts a terminal.
-    fn send_copy(&self) -> Result<(), String>;
-    /// The clipboard holds VS Code's copy of the whole line under an empty
-    /// selection.
+    /// A copy shortcut into the focused app.
+    fn send_copy(&self, key: CopyKey) -> Result<(), String>;
+    /// The clipboard holds an editor's copy of the whole line under an empty
+    /// selection (VS Code, Visual Studio, Notepad++).
     fn copied_empty_selection(&self) -> bool;
     /// The focused app's executable name.
     fn foreground_app(&self) -> Option<String>;
+    /// The focused top-level window's class, such as `ConsoleWindowClass`.
+    fn foreground_class(&self) -> Option<String>;
     fn wait(&self, delay: Duration);
     /// Writes the saved text back now, unless the clipboard changed since the copy.
     fn give_back(&self, borrowed: &Borrowed);
@@ -79,9 +80,96 @@ pub struct Run<'a> {
     pub focus: Option<&'a crate::focus_probe::Pending>,
 }
 
-/// How long the focused app gets to answer Ctrl+Insert.
+/// How long the focused app gets to answer each copy key.
 pub const COPY_WAIT: Duration = Duration::from_millis(150);
+/// A slow app's copy still counts up to this long after the first copy key,
+/// while the user is still speaking. A clipboard write after it is somebody
+/// else's (a clipboard manager, a sync): never the selection, and never
+/// overwritten by the give-back (PARLA-78).
+pub const LATE_COPY_WAIT: Duration = Duration::from_secs(1);
 const COPY_POLL: Duration = Duration::from_millis(5);
+
+/// A copy shortcut for the selection read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyKey {
+    /// Tried first: unlike Ctrl+C it never interrupts a terminal (PARLA-64).
+    CtrlInsert,
+    /// For the apps that ignore Ctrl+Insert, such as PDFgear (PARLA-84).
+    /// Never sent where [`takes_ctrl_c`] says no.
+    CtrlC,
+}
+
+/// Whether the focused window may get Ctrl+C: never a console, a terminal or
+/// an app with a terminal pane (an IDE, T3 Code), where Ctrl+C with nothing
+/// selected interrupts the running program. A window Parla cannot name gets
+/// none either.
+pub fn takes_ctrl_c(class: Option<&str>, app: Option<&str>) -> bool {
+    const CLASSES: [&str; 6] = [
+        "ConsoleWindowClass",
+        "CASCADIA_HOSTING_WINDOW_CLASS",
+        "PseudoConsoleWindow",
+        "mintty",
+        "PuTTY",
+        "VirtualConsoleClass",
+    ];
+    // Lowercase, without `.exe`.
+    const APPS: [&str; 41] = [
+        // Consoles, shells and terminals.
+        "cmd",
+        "powershell",
+        "powershell_ise",
+        "pwsh",
+        "wsl",
+        "wslhost",
+        "bash",
+        "mintty",
+        "alacritty",
+        "wezterm",
+        "wezterm-gui",
+        "hyper",
+        "tabby",
+        "conemu",
+        "conemu64",
+        "putty",
+        "kitty",
+        "mobaxterm",
+        "termius",
+        "warp",
+        "rio",
+        "ghostty",
+        "extraterm",
+        // Editors and IDEs with a terminal pane.
+        "code",
+        "code - insiders",
+        "cursor",
+        "windsurf",
+        "vscodium",
+        "zed",
+        "devenv",
+        "idea64",
+        "pycharm64",
+        "webstorm64",
+        "rider64",
+        "clion64",
+        "goland64",
+        "phpstorm64",
+        "rubymine64",
+        "rustrover64",
+        "datagrip64",
+        "studio64",
+    ];
+    let (Some(class), Some(app)) = (class, app) else {
+        return false;
+    };
+    let app = app.to_lowercase();
+    let app = app.strip_suffix(".exe").unwrap_or(&app);
+    !CLASSES.contains(&class)
+        && !APPS.contains(&app)
+        // Windows Terminal, OpenConsole, conhost, any other *term* or console,
+        // and every T3 Code channel.
+        && !["term", "console", "conhost"].iter().any(|name| app.contains(name))
+        && !app.starts_with("t3 code")
+}
 
 /// What was selected when the hold was confirmed, and the user's clipboard
 /// while the copy holds it.
@@ -91,26 +179,12 @@ pub struct Selection {
     pub text: Option<String>,
     pub app: Option<String>,
     borrowed: Option<Borrowed>,
-    /// No copy within the wait: the saved text and the sequence before the
-    /// copy, for a second look once the instruction is in.
-    unanswered: Option<(Option<String>, u32)>,
 }
 
 impl Selection {
-    /// A slow app's copy that landed after the wait, while the user was still
-    /// speaking: the selection after all, and the clipboard is borrowed.
-    fn late_copy(&mut self, desktop: &dyn Desktop) {
-        if let Some((saved, before)) = self.unanswered.take() {
-            if desktop.clipboard_sequence() != before {
-                self.take_copy(desktop, saved);
-            }
-        }
-    }
-
     /// Every run gives the user's clipboard back, since none pastes: as soon
     /// as the reply is in, or on a cancel, a failure or a silent instruction.
-    pub fn give_back(mut self, desktop: &dyn Desktop) {
-        self.late_copy(desktop);
+    pub fn give_back(self, desktop: &dyn Desktop) {
         if let Some(borrowed) = &self.borrowed {
             desktop.give_back(borrowed);
         }
@@ -130,8 +204,10 @@ impl Selection {
 
 /// Reads the selection at the confirmed hold, while the user is still
 /// speaking: saves the clipboard, sends Ctrl+Insert and watches the clipboard
-/// sequence for up to `COPY_WAIT`. A change with text is the selection.
-pub fn read_selection(desktop: &dyn Desktop) -> Selection {
+/// sequence for `COPY_WAIT`; then Ctrl+C, where the window takes it, for as
+/// long again. A change with text is the selection. A slow app's copy counts
+/// until `LATE_COPY_WAIT`, or until `joined`: the run wants the selection.
+pub fn read_selection(desktop: &dyn Desktop, joined: &AtomicBool) -> Selection {
     let mut selection = Selection {
         app: desktop.foreground_app(),
         ..Selection::default()
@@ -145,18 +221,42 @@ pub fn read_selection(desktop: &dyn Desktop) -> Selection {
         }
     };
     let before = desktop.clipboard_sequence();
-    // A failed copy leaves the sequence alone: no selection.
-    if let Err(error) = desktop.send_copy() {
-        eprintln!("Parla selection copy failed: {error}");
-    }
-    let copied = (0..COPY_WAIT.as_millis() / COPY_POLL.as_millis()).any(|_| {
-        desktop.wait(COPY_POLL);
+    let mut polls_left = LATE_COPY_WAIT.as_millis() / COPY_POLL.as_millis();
+    // Up to `polls` more polls, within `LATE_COPY_WAIT` in all; with
+    // `joined`, until the run joins, then one last look.
+    let mut watch = |polls: u128, joined: Option<&AtomicBool>| {
+        for _ in 0..polls.min(polls_left) {
+            if joined.is_some_and(|joined| joined.load(Ordering::Acquire)) {
+                break;
+            }
+            polls_left -= 1;
+            desktop.wait(COPY_POLL);
+            if desktop.clipboard_sequence() != before {
+                return true;
+            }
+        }
         desktop.clipboard_sequence() != before
-    });
-    if copied {
+    };
+    // A failed copy leaves the sequence alone: no selection.
+    let copy = |key| {
+        if let Err(error) = desktop.send_copy(key) {
+            eprintln!("Parla selection copy ({key:?}) failed: {error}");
+        }
+    };
+    let window = COPY_WAIT.as_millis() / COPY_POLL.as_millis();
+    copy(CopyKey::CtrlInsert);
+    let mut copied = watch(window, None);
+    if !copied
+        && takes_ctrl_c(
+            desktop.foreground_class().as_deref(),
+            selection.app.as_deref(),
+        )
+    {
+        copy(CopyKey::CtrlC);
+        copied = watch(window, None);
+    }
+    if copied || watch(u128::MAX, Some(joined)) {
         selection.take_copy(desktop, saved);
-    } else {
-        selection.unanswered = Some((saved, before));
     }
     selection
 }
@@ -238,8 +338,7 @@ pub fn run(
 ) -> Outcome {
     let cancelled = || run.cancelled.load(Ordering::Acquire);
     let transcribed = transcribe(&mut record);
-    let mut selection = selection();
-    selection.late_copy(ports.desktop);
+    let selection = selection();
     // Whether there was a selection and its length, never its text.
     record.selection_chars = Some(
         selection
@@ -304,31 +403,30 @@ fn reply_and_act(
     record.llm_model = Some(request.model.clone());
     let reply = ports.llm.reply(&request, run.cancelled);
     record.llm_returned = Some(timing::elapsed_ms(run.key_up));
+    // Billed whatever comes of it, even when Esc discards it (PARLA-78).
+    if let Ok(reply) = &reply {
+        record.tokens_in = reply.tokens_in;
+        record.tokens_out = reply.tokens_out;
+    }
     let reply = match reply {
         // A reply or an error that lands after Esc is discarded.
         _ if cancelled() => return Outcome::Cancelled,
         Ok(reply) => reply,
         Err(error) => return Outcome::Failed(Failure::Command(error)),
     };
-    record.tokens_in = reply.tokens_in;
-    record.tokens_out = reply.tokens_out;
-    if let Some(call) = &reply.call {
-        return run_tool(ports, run, record, call);
-    }
-    let kind = match reply.kind {
-        Some(kind) if !reply.text.trim().is_empty() => kind,
-        _ => {
-            return Outcome::Failed(Failure::Command(ProviderError::Other(
-                "the reply was empty.".into(),
-            )))
+    let (text, kind) = match reply.content {
+        Content::Call(call) => return run_tool(ports, run, record, &call),
+        Content::Unusable(reason) => {
+            return Outcome::Failed(Failure::Command(ProviderError::Other(reason)))
         }
+        Content::Text { text, kind } => (text, kind),
     };
     // The reply's end comes trimmed; an edit keeps a selection's own trailing
     // line break (a triple-clicked paragraph), or Replace would join the next
     // line to it.
     let text = match (&selection.text, kind) {
-        (Some(selected), Kind::Edit) => reply.text + &selected[selected.trim_end().len()..],
-        _ => reply.text,
+        (Some(selected), Kind::Edit) => text + &selected[selected.trim_end().len()..],
+        _ => text,
     };
     let actions = crate::focus_probe::around_paste(run.focus, "command", |verdict| {
         buttons(kind, selection.text.is_some(), verdict)
@@ -403,19 +501,27 @@ mod tests {
         }
     }
 
-    /// A focused app and its clipboard. Ctrl+Insert copies `selected` (None:
-    /// the app copies nothing) after `copy_lag` polls.
+    /// A focused app and its clipboard. A copy key copies `selected` (None:
+    /// the app copies nothing) after `copy_lag` polls; an app that
+    /// `ignores_insert` answers Ctrl+C only.
     struct FakeDesktop {
         clipboard: RefCell<Option<String>>,
         sequence: Cell<u32>,
         selected: Option<String>,
+        ignores_insert: bool,
         copy_lag: usize,
         copy_due: Cell<Option<usize>>,
         vscode_line: bool,
         unreadable: bool,
         app: Option<String>,
-        copies: Cell<usize>,
+        class: Option<String>,
+        /// The copy keys sent, in order.
+        keys: RefCell<Vec<CopyKey>>,
         waited: Cell<Duration>,
+        /// Set once the run joins the read: at once unless `join_after`
+        /// polls are given.
+        joined: AtomicBool,
+        join_after: Cell<Option<usize>>,
         /// Every clipboard write by Parla: only the give-back, since a run
         /// never pastes.
         writes: RefCell<Vec<String>>,
@@ -426,19 +532,36 @@ mod tests {
                 clipboard: RefCell::new(clipboard.map(Into::into)),
                 sequence: Cell::new(7),
                 selected: None,
+                ignores_insert: false,
                 copy_lag: 1,
                 copy_due: Cell::new(None),
                 vscode_line: false,
                 unreadable: false,
                 app: Some("notepad.exe".into()),
-                copies: Cell::new(0),
+                class: Some("Notepad".into()),
+                keys: RefCell::default(),
                 waited: Cell::new(Duration::ZERO),
+                joined: AtomicBool::new(true),
+                join_after: Cell::new(None),
                 writes: RefCell::default(),
             }
         }
         fn write(&self, text: &str) {
             *self.clipboard.borrow_mut() = Some(text.into());
             self.writes.borrow_mut().push(text.into());
+        }
+        /// Another app writes the clipboard.
+        fn written_by_another_app(&self, text: &str) {
+            *self.clipboard.borrow_mut() = Some(text.into());
+            self.sequence.set(self.sequence.get() + 1);
+        }
+        /// The run joins after `polls` more polls; None: never.
+        fn joins_after(&self, polls: Option<usize>) {
+            self.joined.store(false, Ordering::Release);
+            self.join_after.set(polls);
+        }
+        fn keys(&self) -> Vec<CopyKey> {
+            self.keys.borrow().clone()
         }
     }
     impl Desktop for FakeDesktop {
@@ -451,9 +574,11 @@ mod tests {
         fn clipboard_sequence(&self) -> u32 {
             self.sequence.get()
         }
-        fn send_copy(&self) -> Result<(), String> {
-            self.copies.set(self.copies.get() + 1);
-            if self.selected.is_some() {
+        fn send_copy(&self, key: CopyKey) -> Result<(), String> {
+            self.keys.borrow_mut().push(key);
+            let answered = !(self.ignores_insert && key == CopyKey::CtrlInsert);
+            // A copy already on its way is not restarted.
+            if answered && self.selected.is_some() && self.copy_due.get().is_none() {
                 self.copy_due.set(Some(self.copy_lag));
             }
             Ok(())
@@ -464,6 +589,9 @@ mod tests {
         fn foreground_app(&self) -> Option<String> {
             self.app.clone()
         }
+        fn foreground_class(&self) -> Option<String> {
+            self.class.clone()
+        }
         fn wait(&self, delay: Duration) {
             self.waited.set(self.waited.get() + delay);
             match self.copy_due.get() {
@@ -473,6 +601,14 @@ mod tests {
                     self.sequence.set(self.sequence.get() + 1);
                 }
                 Some(left) => self.copy_due.set(Some(left - 1)),
+                None => {}
+            }
+            match self.join_after.get() {
+                Some(0 | 1) => {
+                    self.join_after.set(None);
+                    self.joined.store(true, Ordering::Release);
+                }
+                Some(left) => self.join_after.set(Some(left - 1)),
                 None => {}
             }
         }
@@ -535,19 +671,24 @@ mod tests {
     }
 
     fn text(reply: &str) -> Result<Reply, ProviderError> {
-        Ok(Reply {
+        replied(Content::Text {
             text: reply.into(),
-            kind: Some(Kind::Edit),
-            call: None,
-            tokens_in: Some(92),
-            tokens_out: Some(18),
+            kind: Kind::Edit,
         })
     }
 
     fn answer(reply: &str) -> Result<Reply, ProviderError> {
-        text(reply).map(|reply| Reply {
-            kind: Some(Kind::Answer),
-            ..reply
+        replied(Content::Text {
+            text: reply.into(),
+            kind: Kind::Answer,
+        })
+    }
+
+    fn replied(content: Content) -> Result<Reply, ProviderError> {
+        Ok(Reply {
+            content,
+            tokens_in: Some(92),
+            tokens_out: Some(18),
         })
     }
 
@@ -566,8 +707,9 @@ mod tests {
         history: FakeHistory,
         cancelled: AtomicBool,
         settings: CommandSettings,
-        /// Polls that pass between the selection read and key-up.
-        speaking: usize,
+        /// Another app writes the clipboard after the read ended, before
+        /// the run joins it.
+        stray: Option<&'static str>,
         focus: Option<crate::focus_probe::Pending>,
     }
     impl Harness {
@@ -579,7 +721,7 @@ mod tests {
                 history: FakeHistory::default(),
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
-                speaking: 0,
+                stray: None,
                 focus: None,
             }
         }
@@ -603,9 +745,9 @@ mod tests {
                 focus: self.focus.as_ref(),
             };
             // Read at the confirmed hold, before the instruction is in.
-            let selection = read_selection(&self.desktop);
-            for _ in 0..self.speaking {
-                self.desktop.wait(COPY_POLL);
+            let selection = read_selection(&self.desktop, &self.desktop.joined);
+            if let Some(stray) = self.stray {
+                self.desktop.written_by_another_app(stray);
             }
             let mut record = DictationRecord::new(SystemTime::now(), "parakeet");
             record.kind = timing::COMMAND_KIND.into();
@@ -802,15 +944,20 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_reply_fails_but_keeps_its_tokens() {
-        let h = Harness::new(text(" \n"));
-        assert!(matches!(
+    fn an_unusable_reply_fails_but_keeps_its_tokens() {
+        // Cut off, refused, unreadable, empty: billed all the same (PARLA-78).
+        let h = Harness::new(replied(Content::Unusable(
+            "the reply was cut off (max_output_tokens).".into(),
+        )));
+        assert_eq!(
             h.run("Scrivi un saluto"),
-            Outcome::Failed(Failure::Command(_))
-        ));
+            Outcome::Failed(Failure::Command(ProviderError::Other(
+                "the reply was cut off (max_output_tokens).".into()
+            )))
+        );
         let row = &h.rows()[0];
         assert_eq!(row.outcome, Some(CommandOutcome::Failed));
-        assert_eq!(row.tokens_out, Some(18));
+        assert_eq!((row.tokens_in, row.tokens_out), (Some(92), Some(18)));
         assert!(row.reply.is_none() && row.reply_kind.is_none());
     }
 
@@ -824,6 +971,8 @@ mod tests {
         };
         assert_eq!(row.outcome, Some(CommandOutcome::Cancelled));
         assert!(row.reply.is_none() && row.pasted.is_none() && row.error.is_none());
+        // Discarded, but billed: its tokens count in Total cost (PARLA-78).
+        assert_eq!((row.tokens_in, row.tokens_out), (Some(92), Some(18)));
     }
 
     #[test]
@@ -886,8 +1035,8 @@ mod tests {
         assert_eq!(request.selection.as_deref(), Some("ciao a tutti"));
         assert_eq!(request.app.as_deref(), Some("notepad.exe"));
         assert_eq!(request.date, "2026-10-17");
-        // Copied with Ctrl+Insert; the user's clipboard comes back once.
-        assert_eq!(h.desktop.copies.get(), 1);
+        // Copied with Ctrl+Insert alone; the user's clipboard comes back once.
+        assert_eq!(h.desktop.keys(), [CopyKey::CtrlInsert]);
         assert_eq!(h.writes(), ["user copy"]);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
         let row = &h.rows()[0];
@@ -923,9 +1072,10 @@ mod tests {
         let h = Harness::new(text("Ciao!"));
         assert_eq!(card(h.run("Scrivi un saluto")).primary, Action::Paste);
         assert_eq!(h.llm.requests.borrow()[0].selection, None);
-        assert_eq!(h.desktop.copies.get(), 1);
-        // The copy got the whole wait, and the clipboard was never borrowed.
-        assert_eq!(h.desktop.waited.get(), COPY_WAIT);
+        // Ctrl+Insert and then Ctrl+C each got the whole wait, and the
+        // clipboard was never borrowed.
+        assert_eq!(h.desktop.keys(), [CopyKey::CtrlInsert, CopyKey::CtrlC]);
+        assert_eq!(h.desktop.waited.get(), COPY_WAIT * 2);
         assert!(h.writes().is_empty());
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
         let row = &h.rows()[0];
@@ -945,25 +1095,127 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_that_lands_after_the_wait_is_picked_up_when_the_run_joins() {
+    fn a_slow_copy_that_lands_while_the_user_speaks_is_the_selection() {
         let polls = (COPY_WAIT.as_millis() / COPY_POLL.as_millis()) as usize;
-        let mut h = Harness::selecting(text("Hello"), "ciao");
-        h.desktop.copy_lag = polls + 3;
-        // The user keeps speaking past the wait; the slow app's copy lands.
-        h.speaking = 3;
-        assert_eq!(card(h.run("Traduci")).primary, Action::Replace);
+        for late in [false, true] {
+            let mut h = Harness::selecting(text("Hello"), "ciao");
+            // Past both copy keys' waits, before the run joins.
+            h.desktop.copy_lag = 2 * polls + 3;
+            h.desktop.joins_after(Some(2 * polls + 10));
+            h.llm.late = late;
+            let outcome = h.run("Traduci");
+            assert_eq!(
+                h.llm.requests.borrow()[0].selection.as_deref(),
+                Some("ciao")
+            );
+            if late {
+                assert_eq!(outcome, Outcome::Cancelled);
+            } else {
+                assert_eq!(card(outcome).primary, Action::Replace);
+            }
+            // Borrowed, so given back, on a cancel too.
+            assert_eq!(h.writes(), ["user copy"]);
+            // The read stopped once the run joined.
+            assert_eq!(h.desktop.waited.get(), COPY_POLL * (2 * polls as u32 + 3));
+        }
+    }
+
+    #[test]
+    fn a_clipboard_write_after_the_read_is_neither_the_selection_nor_overwritten() {
+        // Nothing selected; a clipboard manager or a sync writes the
+        // clipboard while the user is still speaking (PARLA-78).
+        let mut h = Harness::new(text("Ciao!"));
+        h.stray = Some("synced from the phone");
+        let card = card(h.run("Scrivi un saluto"));
+        assert_eq!(card.actions, [Action::Paste, Action::Copy], "no Replace");
+        assert_eq!(h.llm.requests.borrow()[0].selection, None);
+        assert_eq!(h.rows()[0].selection_chars, Some(0));
+        assert!(h.writes().is_empty());
+        assert_eq!(h.clipboard().as_deref(), Some("synced from the phone"));
+    }
+
+    #[test]
+    fn the_read_waits_for_a_slow_copy_no_longer_than_the_late_wait() {
+        let mut desktop = FakeDesktop::new(Some("user copy"));
+        desktop.selected = Some("ciao".into());
+        desktop.copy_lag = usize::MAX;
+        // The user is still speaking: the run has not joined.
+        desktop.joins_after(None);
+        let selection = read_selection(&desktop, &desktop.joined);
+        assert_eq!(desktop.waited.get(), LATE_COPY_WAIT);
+        assert_eq!(selection.text, None);
+        // Not borrowed: whatever lands later is left alone.
+        selection.give_back(&desktop);
+        assert!(desktop.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_app_that_ignores_ctrl_insert_is_read_with_ctrl_c() {
+        // PDFgear (PARLA-84).
+        let mut h = Harness::selecting(answer("Vuol dire..."), "Art. 13 — Foro competente");
+        h.desktop.ignores_insert = true;
+        h.desktop.app = Some("pdfeditor.exe".into());
+        let card = card(h.run("Mi spieghi cosa significa?"));
+        assert_eq!(h.desktop.keys(), [CopyKey::CtrlInsert, CopyKey::CtrlC]);
         assert_eq!(
             h.llm.requests.borrow()[0].selection.as_deref(),
-            Some("ciao")
+            Some("Art. 13 — Foro competente")
         );
+        assert_eq!(card.actions, [Action::Copy, Action::Replace]);
+        // Borrowed and given back like Ctrl+Insert's copy.
         assert_eq!(h.writes(), ["user copy"]);
-        // A cancel gives the user's clipboard back over the late copy too.
-        let mut h = Harness::selecting(text("Hello"), "ciao");
-        h.desktop.copy_lag = polls + 3;
-        h.speaking = 3;
-        h.llm.late = true;
-        assert_eq!(h.run("Traduci"), Outcome::Cancelled);
-        assert_eq!(h.writes(), ["user copy"]);
+        assert_eq!(h.clipboard().as_deref(), Some("user copy"));
+    }
+
+    #[test]
+    fn a_terminal_never_gets_ctrl_c() {
+        for (class, app) in [
+            ("CASCADIA_HOSTING_WINDOW_CLASS", "WindowsTerminal.exe"),
+            ("ConsoleWindowClass", "conhost.exe"),
+            ("mintty", "mintty.exe"),
+            ("Chrome_WidgetWin_1", "Code.exe"),
+            ("Chrome_WidgetWin_1", "T3 Code (Nightly).exe"),
+        ] {
+            let mut h = Harness::selecting(text("Hi"), "ls -la");
+            h.desktop.ignores_insert = true;
+            h.desktop.class = Some(class.into());
+            h.desktop.app = Some(app.into());
+            assert_eq!(card(h.run("Spiega")).primary, Action::Paste, "{app}");
+            assert_eq!(h.desktop.keys(), [CopyKey::CtrlInsert], "{app}");
+            assert!(h.writes().is_empty(), "{app}");
+        }
+    }
+
+    #[test]
+    fn ctrl_c_goes_only_to_a_window_parla_can_name_that_is_no_terminal() {
+        for (class, app, takes) in [
+            (Some("Notepad"), Some("notepad.exe"), true),
+            (Some("PDFgear"), Some("pdfeditor.exe"), true),
+            (Some("Chrome_WidgetWin_1"), Some("olk.exe"), true),
+            (Some("ConsoleWindowClass"), Some("cmd.exe"), false),
+            // A console app's own window class gives it away.
+            (Some("ConsoleWindowClass"), Some("myapp.exe"), false),
+            (
+                Some("CASCADIA_HOSTING_WINDOW_CLASS"),
+                Some("WindowsTerminal.exe"),
+                false,
+            ),
+            (Some("Window Class"), Some("OpenConsole.exe"), false),
+            (Some("Window Class"), Some("Alacritty.exe"), false),
+            (Some("VirtualConsoleClass"), Some("ConEmu64.exe"), false),
+            (
+                Some("Chrome_WidgetWin_1"),
+                Some("Code - Insiders.exe"),
+                false,
+            ),
+            (Some("SunAwtFrame"), Some("idea64.exe"), false),
+            (Some("Chrome_WidgetWin_1"), Some("T3 Code.exe"), false),
+            (Some("Some"), Some("MobaXterm.exe"), false),
+            (None, Some("notepad.exe"), false),
+            (Some("Notepad"), None, false),
+        ] {
+            assert_eq!(takes_ctrl_c(class, app), takes, "{class:?} {app:?}");
+        }
     }
 
     #[test]
@@ -990,8 +1242,8 @@ mod tests {
     fn an_unreadable_clipboard_skips_the_copy_rather_than_lose_it() {
         let mut h = Harness::selecting(text("Hi"), "ciao");
         h.desktop.unreadable = true;
-        let selection = read_selection(&h.desktop);
-        assert_eq!(h.desktop.copies.get(), 0);
+        let selection = read_selection(&h.desktop, &h.desktop.joined);
+        assert!(h.desktop.keys().is_empty());
         assert_eq!(selection.text, None);
         assert_eq!(selection.app.as_deref(), Some("notepad.exe"));
     }
@@ -1022,7 +1274,7 @@ mod tests {
         }
         // Esc while still holding: the run never starts, flow gives it back.
         let h = Harness::selecting(text("never"), "ciao");
-        read_selection(&h.desktop).give_back(&h.desktop);
+        read_selection(&h.desktop, &h.desktop.joined).give_back(&h.desktop);
         assert_eq!(h.writes(), ["user copy"]);
     }
 
@@ -1037,7 +1289,7 @@ mod tests {
     #[test]
     fn a_copy_the_user_makes_during_the_run_is_kept() {
         let h = Harness::selecting(Err(ProviderError::Timeout), "ciao");
-        let selection = read_selection(&h.desktop);
+        let selection = read_selection(&h.desktop, &h.desktop.joined);
         *h.desktop.clipboard.borrow_mut() = Some("newer copy".into());
         selection.give_back(&h.desktop);
         assert!(h.writes().is_empty());
@@ -1046,9 +1298,7 @@ mod tests {
 
     fn tool(name: &str, url: &str) -> Result<Reply, ProviderError> {
         Ok(Reply {
-            text: String::new(),
-            kind: None,
-            call: Some(responses::ToolCall {
+            content: Content::Call(responses::ToolCall {
                 name: name.into(),
                 arguments: serde_json::json!({ "url": url }).to_string(),
             }),

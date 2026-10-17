@@ -9,7 +9,7 @@
 
 use parla_lib::{
     command_mode::{
-        responses::{send, Reply, Request, ToolCall},
+        responses::{send, Content, Reply, Request, ToolCall},
         tools::{self, Tool},
         Kind,
     },
@@ -362,12 +362,16 @@ fn is_bullet(line: &str) -> bool {
 }
 
 fn grade(expect: &Expect, reply: &Reply) -> Verdict {
-    match (expect, &reply.call) {
-        (Expect::Text { .. }, Some(call)) => Verdict {
+    match (expect, &reply.content) {
+        (_, Content::Unusable(reason)) => Verdict {
+            problems: vec![format!("failed: {reason}")],
+            ..Verdict::default()
+        },
+        (Expect::Text { .. }, Content::Call(call)) => Verdict {
             problems: vec![format!("called {} instead of replying", call.name)],
             ..Verdict::default()
         },
-        (Expect::Open { .. }, None) => Verdict {
+        (Expect::Open { .. }, Content::Text { .. }) => Verdict {
             problems: vec!["replied with text instead of opening".into()],
             ..Verdict::default()
         },
@@ -379,18 +383,21 @@ fn grade(expect: &Expect, reply: &Reply) -> Verdict {
                 drops,
                 bullets,
             },
-            None,
+            Content::Text {
+                text,
+                kind: labelled,
+            },
         ) => {
-            let mut verdict = grade_text(*kind, *lang, keeps, drops, *bullets, &reply.text);
-            verdict.reply_kind_ok = reply.kind == Some(*kind);
+            let mut verdict = grade_text(*kind, *lang, keeps, drops, *bullets, text);
+            verdict.reply_kind_ok = labelled == kind;
             if !verdict.reply_kind_ok {
                 verdict
                     .problems
-                    .push(format!("labelled {:?}, not {kind:?}", reply.kind));
+                    .push(format!("labelled {labelled:?}, not {kind:?}"));
             }
             verdict
         }
-        (Expect::Open { hosts, has }, Some(call)) => grade_page(hosts, has, call),
+        (Expect::Open { hosts, has }, Content::Call(call)) => grade_page(hosts, has, call),
     }
 }
 
@@ -663,14 +670,22 @@ fn the_eval_grades_every_case_at_each_effort() {
                 let started = Instant::now();
                 let reply = send(&key, &request(effort, case));
                 let ms = started.elapsed().as_millis();
-                let failed = reply.is_err();
+                // Unusable is billed, so its tokens count; still a failure.
+                let failed = !matches!(
+                    &reply,
+                    Ok(Reply {
+                        content: Content::Text { .. } | Content::Call(_),
+                        ..
+                    })
+                );
                 let (verdict, tokens, shown) = match reply {
                     Ok(reply) => (
                         grade(expect, &reply),
                         (reply.tokens_in.unwrap_or(0), reply.tokens_out.unwrap_or(0)),
-                        match &reply.call {
-                            Some(call) => format!("{}({})", call.name, call.arguments),
-                            None => format!("{:?}", reply.text),
+                        match &reply.content {
+                            Content::Call(call) => format!("{}({})", call.name, call.arguments),
+                            Content::Text { text, .. } => format!("{text:?}"),
+                            Content::Unusable(_) => String::new(),
                         },
                     ),
                     Err(error) => (
@@ -736,32 +751,33 @@ fn the_eval_grades_every_case_at_each_effort() {
 mod grading {
     use super::*;
 
-    fn text(text: &str) -> Reply {
+    fn reply(content: Content) -> Reply {
         Reply {
-            text: text.into(),
-            kind: Some(Kind::Edit),
-            call: None,
+            content,
             tokens_in: Some(1),
             tokens_out: Some(1),
         }
     }
 
+    fn text(text: &str) -> Reply {
+        reply(Content::Text {
+            text: text.into(),
+            kind: Kind::Edit,
+        })
+    }
+
     fn answer(text: &str) -> Reply {
-        Reply {
-            kind: Some(Kind::Answer),
-            ..super::grading::text(text)
-        }
+        reply(Content::Text {
+            text: text.into(),
+            kind: Kind::Answer,
+        })
     }
 
     fn opens(url: &str) -> Reply {
-        Reply {
-            kind: None,
-            call: Some(ToolCall {
-                name: tools::OPEN_URL.into(),
-                arguments: serde_json::json!({ "url": url }).to_string(),
-            }),
-            ..text("")
-        }
+        reply(Content::Call(ToolCall {
+            name: tools::OPEN_URL.into(),
+            arguments: serde_json::json!({ "url": url }).to_string(),
+        }))
     }
 
     const FORMAL: Expect = says(It, &["domani"]);
