@@ -1,0 +1,189 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway (PARLA-54). Question: what should the Card look like?
+  Verdict (Mattia, 2026-10-17): variant A, the captions-style Card above the pill.
+  Three structurally different variants of the Card, switchable via ?variant=A|B|C
+  and the bar at the top (top, not bottom, so it doesn't sit on the Card).
+  Scenarios via ?scenario=1..5 or the chips under the bar. Double-click to open.
+  Styling copies src/overlay.css: the dark pill and the streaming captions box.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE: Parla Card (PARLA-54)</title>
+<style>
+  :root { --ink: rgba(255,255,255,.88); --ink-2: rgba(255,255,255,.56); --orange: #ff9f43; --blue: #4cc2ff; --green: #7ee2a8; }
+  html, body { margin: 0; height: 100%; font: 13px/19px "Segoe UI Variable Text", "Segoe UI", sans-serif; }
+  body { background: #d9dde3; overflow: hidden; }
+
+  /* ---- fake desktop: an app with a selection, to judge the Card in context ---- */
+  .app { position: absolute; inset: 0 0 0 0; display: grid; grid-template-columns: 220px 1fr; background: #f3f3f3; color: #1b1b1b; }
+  .app aside { background: #e9e9ec; padding: 18px; color: #555; font-size: 12px; }
+  .app aside b { display: block; margin: 0 0 10px; color: #222; font-size: 13px; }
+  .app aside div { padding: 6px 8px; border-radius: 6px; }
+  .app aside div.on { background: #fff; }
+  .doc { padding: 36px 60px; max-width: 760px; background: #fff; margin: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .doc h1 { font-size: 18px; margin: 0 0 4px; }
+  .doc .meta { color: #777; font-size: 12px; margin-bottom: 18px; }
+  .doc p { font-size: 14px; line-height: 22px; }
+  .sel { background: #b4d5fe; }
+  .pdf .doc { background: #fafafa; font-family: Georgia, serif; }
+
+  /* ---- shared overlay atoms (from overlay.css) ---- */
+  .stage { position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .pill { display: flex; align-items: center; justify-content: center; gap: 11px; height: 32px; min-width: 40px; border-radius: 16px; background: rgba(18,18,20,.92);
+          box-shadow: 0 0 0 .5px rgba(255,255,255,.14), 0 6px 18px rgba(0,0,0,.35); color: #fff; }
+  .pill.cmd { box-shadow: 0 0 0 1px rgba(255,159,67,.75), 0 6px 18px rgba(0,0,0,.35); }
+  .check { color: var(--green); display: grid; place-items: center; width: 16px; }
+  .glass { background: rgba(18,18,20,.88); box-shadow: 0 0 0 .5px rgba(255,255,255,.1), 0 4px 13px rgba(0,0,0,.17); color: var(--ink); }
+  .appear { animation: appear 180ms cubic-bezier(.2,0,0,1); }
+  @keyframes appear { from { opacity: 0; transform: translateY(4px) scale(.98); } }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; user-select: text; }
+  .body::-webkit-scrollbar { width: 6px; } .body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 3px; }
+  .tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; line-height: 16px; color: var(--ink-2); }
+  .tag i { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,.7); font-style: normal; }
+  .tag.cmd i { background: var(--orange); }
+  .instr { color: var(--ink-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; cursor: pointer; border: 0; color: #fff; }
+  .btn { height: 26px; padding: 0 11px; border-radius: 13px; background: rgba(255,255,255,.12); font-size: 12px; }
+  .btn:hover { background: rgba(255,255,255,.22); }
+  .btn.primary { background: rgba(255,255,255,.9); color: #121214; }
+  .btn.primary:hover { background: #fff; }
+  .icon { width: 26px; height: 26px; border-radius: 50%; background: transparent; display: grid; place-items: center; color: var(--ink-2); padding: 0; }
+  .icon:hover { background: rgba(255,255,255,.12); color: #fff; }
+  .kbd { color: var(--ink-2); font-size: 11px; }
+
+  /* ---- Variant A: captions box grown up (Card above the pill, pill shows the check) ---- */
+  .A .card { box-sizing: border-box; width: 420px; border-radius: 11px; padding: 10px 13px 9px; }
+  .A .head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .A .head .instr { flex: 1; }
+  .A .body { max-height: 228px; }
+  .A .foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 9px; }
+
+  /* ---- Variant B: the pill itself grows into the Card (one shape) ---- */
+  .B .card { box-sizing: border-box; width: 440px; border-radius: 16px; background: rgba(18,18,20,.94); padding: 0; overflow: hidden; }
+  .B .card.cmd { box-shadow: 0 0 0 1px rgba(255,159,67,.75), 0 10px 28px rgba(0,0,0,.35); }
+  .B .card:not(.cmd) { box-shadow: 0 0 0 .5px rgba(255,255,255,.14), 0 10px 28px rgba(0,0,0,.35); }
+  .B .body { max-height: 228px; padding: 12px 16px 4px; }
+  .B .bar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 6px 0 14px; }
+  .B .bar .instr { flex: 1; }
+  .B .bar .sep { width: 1px; height: 16px; background: rgba(255,255,255,.14); }
+
+  /* ---- Variant C: text floats like captions, the pill becomes the action bar ---- */
+  .C .card { box-sizing: border-box; width: 400px; border-radius: 11px; padding: 9px 13px; }
+  .C .card .instr { margin-bottom: 4px; }
+  .C .body { max-height: 228px; }
+  .C .actions { gap: 4px; padding: 0 4px 0 12px; }
+  .C .actions .btn { height: 24px; }
+
+  /* ---- prototype chrome: visually NOT part of the design ---- */
+  .switcher { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 9; display: flex; flex-direction: column; align-items: center; gap: 6px; font: 12px/1 ui-monospace, Consolas, monospace; }
+  .switcher .row { display: flex; align-items: center; gap: 4px; background: #ffe600; color: #000; border: 2px solid #000; border-radius: 999px; padding: 4px 6px; box-shadow: 3px 3px 0 #000; }
+  .switcher button { color: #000; background: transparent; font: inherit; padding: 4px 8px; border-radius: 999px; }
+  .switcher button:hover, .switcher button.on { background: #000; color: #ffe600; }
+  .state { position: fixed; top: 10px; right: 10px; z-index: 9; background: #000; color: #ffe600; font: 11px/15px ui-monospace, Consolas, monospace; padding: 8px 10px; border-radius: 6px; white-space: pre; }
+  .toast { position: fixed; top: 92px; left: 50%; transform: translateX(-50%); background: #000; color: #ffe600; font: 12px ui-monospace, Consolas, monospace; padding: 6px 10px; border-radius: 6px; z-index: 9; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="switcher">
+  <div class="row"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+  <div class="row" id="scen"></div>
+</div>
+<pre class="state" id="state"></pre>
+<script>
+const VARIANTS = { A: "Captions card above pill", B: "Pill grows into Card", C: "Text above, pill = action bar" };
+const SCENARIOS = {
+  1: { name: "Command: rewrite selection", kind: "command", sel: true, editable: true, app: "mail",
+       instr: "Make it more personal",
+       text: "Hi Giulia,\n\nThanks so much for sending the draft over the weekend, I know how busy things have been. I read it this morning and I love where it's going. Could we grab 20 minutes on Tuesday to go through the last section together?\n\nTalk soon,\nMattia" },
+  2: { name: "Command: question on a PDF", kind: "command", sel: true, editable: false, app: "pdf",
+       instr: "Cosa significa questa clausola?",
+       text: "In pratica: se una delle due parti non rispetta il contratto, l'altra può chiuderlo con 30 giorni di preavviso scritto, senza penali. Il termine parte dalla ricezione della comunicazione, non dall'invio." },
+  3: { name: "Command: no selection", kind: "command", sel: false, editable: true, app: "mail",
+       instr: "What's 17% of 2,340?", text: "397.80" },
+  4: { name: "Safety Net: dictation caught", kind: "dictation", sel: false, editable: false, app: "desktop",
+       instr: "", text: "Remind me to send the invoice to Bedigital before Friday and to check the Parla build on the laptop." },
+  5: { name: "Command: long answer (scroll)", kind: "command", sel: true, editable: true, app: "mail",
+       instr: "Turn this into bullet points",
+       text: Array.from({length: 14}, (_, i) => `- Point ${i+1}: something the model wrote that runs a little long so it wraps`).join("\n") },
+};
+const q = new URLSearchParams(location.search);
+let variant = VARIANTS[q.get("variant")] ? q.get("variant") : "A";
+let scenario = SCENARIOS[q.get("scenario")] ? q.get("scenario") : "1";
+let lastAction = "—";
+
+const X = `<svg viewBox="0 0 16 16" width="14" height="14"><path d="M4.8 4.8l6.4 6.4M11.2 4.8l-6.4 6.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>`;
+const CHECK = `<svg viewBox="0 0 16 16" width="16" height="16"><path d="M3.6 8.4l3 3 5.8-6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const esc = s => s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function backdrop(s) {
+  if (s.app === "desktop") return `<div class="app" style="background:linear-gradient(135deg,#355c7d,#6c5b7b 60%,#c06c84);display:block"></div>`;
+  const pdf = s.app === "pdf";
+  const p1 = pdf ? "Art. 12 — Recesso." : "Hi Giulia,";
+  const sel = pdf
+    ? "Ciascuna parte potrà recedere dal presente contratto in caso di inadempimento dell'altra, mediante comunicazione scritta con preavviso di trenta (30) giorni decorrenti dalla data di ricezione, senza che ciò comporti l'applicazione di penali."
+    : "Thanks for the draft. I read it. Can we meet on Tuesday to discuss the last section?";
+  return `<div class="app ${pdf ? "pdf" : ""}"><aside><b>${pdf ? "Contratto.pdf" : "Outlook"}</b>
+    <div class="on">${pdf ? "Pagina 4" : "Drafts"}</div><div>${pdf ? "Pagina 5" : "Inbox"}</div><div>${pdf ? "Pagina 6" : "Sent"}</div></aside>
+    <div><div class="doc"><h1>${pdf ? "Contratto di servizio" : "Re: draft"}</h1><div class="meta">${pdf ? "read-only · PDF viewer" : "To: Giulia"}</div>
+    <p>${p1}</p><p>${s.sel ? `<span class="sel">${sel}</span>` : sel}</p><p>${pdf ? "Art. 13 — Foro competente." : "Mattia"}</p></div></div></div>`;
+}
+
+// Which buttons the Card offers. Copy is always there; Replace only with a
+// selection in an editable field; Paste (into whatever has focus) otherwise.
+function actions(s) {
+  const a = [];
+  if (s.kind === "command" && s.sel && s.editable) a.push(["Replace", true], ["Copy", false]);
+  else if (s.editable) a.push(["Paste", true], ["Copy", false]);
+  else a.push(["Copy", true], ["Paste", false]);
+  return a;
+}
+const btns = (s) => actions(s).map(([l, p]) => `<button class="btn ${p ? "primary" : ""}" data-act="${l}">${l}</button>`).join("");
+const tag = (s) => s.kind === "command"
+  ? `<span class="tag cmd"><i></i>Command</span>`
+  : `<span class="tag"><i></i>Not pasted · no text field</span>`;
+const instr = (s) => s.instr ? `<span class="instr">“${esc(s.instr)}”</span>` : `<span class="instr"></span>`;
+
+function card(s) {
+  const body = `<div class="body">${esc(s.text)}</div>`;
+  if (variant === "A") return `<div class="stage A">
+      <div class="card glass appear"><div class="head">${tag(s)}${instr(s)}<button class="icon" data-act="Dismiss" title="Dismiss">${X}</button></div>
+      ${body}<div class="foot">${btns(s)}</div></div>
+      <div class="pill ${s.kind === "command" ? "cmd" : ""}"><span class="check">${CHECK}</span></div></div>`;
+  if (variant === "B") return `<div class="stage B">
+      <div class="card ${s.kind === "command" ? "cmd" : ""} appear">${body}
+      <div class="bar">${tag(s)}${instr(s)}${btns(s)}<span class="sep"></span><button class="icon" data-act="Dismiss" title="Dismiss">${X}</button></div></div></div>`;
+  return `<div class="stage C">
+      <div class="card glass appear">${s.instr ? `<div class="instr">“${esc(s.instr)}”</div>` : `<div class="instr">Not pasted · no text field</div>`}${body}</div>
+      <div class="pill actions ${s.kind === "command" ? "cmd" : ""} appear"><span class="check">${CHECK}</span>${btns(s)}<button class="icon" data-act="Dismiss" title="Dismiss">${X}</button></div></div>`;
+}
+
+function render() {
+  const s = SCENARIOS[scenario];
+  document.getElementById("app").innerHTML = backdrop(s) + card(s);
+  document.getElementById("vlabel").textContent = `${variant} (${VARIANTS[variant]})`;
+  document.getElementById("scen").innerHTML = Object.entries(SCENARIOS)
+    .map(([k, v]) => `<button class="${k === scenario ? "on" : ""}" data-s="${k}">${k}. ${v.name}</button>`).join("");
+  document.getElementById("state").textContent =
+    `variant   ${variant}\nscenario  ${scenario}\nkind      ${s.kind}\nselection ${s.sel}\neditable  ${s.editable} (UIA probe)\nbuttons   ${actions(s).map(a => a[0]).join(", ")}, Dismiss\nlast      ${lastAction}`;
+  history.replaceState(null, "", `?variant=${variant}&scenario=${scenario}`);
+}
+function cycle(d) { const k = Object.keys(VARIANTS); variant = k[(k.indexOf(variant) + d + k.length) % k.length]; render(); }
+document.getElementById("prev").onclick = () => cycle(-1);
+document.getElementById("next").onclick = () => cycle(1);
+addEventListener("keydown", e => { if (e.key === "ArrowLeft") cycle(-1); if (e.key === "ArrowRight") cycle(1); });
+document.addEventListener("click", e => {
+  const s = e.target.closest("[data-s]"); if (s) { scenario = s.dataset.s; lastAction = "—"; render(); return; }
+  const a = e.target.closest("[data-act]"); if (!a) return;
+  lastAction = a.dataset.act + (a.dataset.act === "Dismiss" ? "" : " → card closes");
+  document.querySelector(".stage").remove();
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = `[stub] ${a.dataset.act}`; document.body.append(t);
+  setTimeout(() => { t.remove(); render(); }, 900);
+  document.getElementById("state").textContent = document.getElementById("state").textContent.replace(/last .*/, `last      ${lastAction}`);
+});
+render();
+</script>
+</body>
+</html>

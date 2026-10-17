@@ -9,7 +9,7 @@ The mode where Parla pastes the raw transcript of what you said into the focused
 _Avoid_: transcription mode, normal mode
 
 **Command mode**:
-The separate mode where what you say is an instruction, and Parla pastes an LLM's reply to it. It is the only mode that uses an LLM.
+The separate mode where what you say is an instruction, and Parla shows an LLM's reply to it in the Card, or runs a tool. It is the only mode that uses an LLM.
 _Avoid_: AI mode, rewrite mode, command dictation
 
 **Command hotkey**:
@@ -21,7 +21,7 @@ What you say in command mode, transcribed. It is sent to the LLM and is never pa
 _Avoid_: prompt, command text
 
 **Selection**:
-The text selected in the focused app, read once the command hold is confirmed. With no selection, the instruction stands alone and the reply is pasted at the cursor.
+The text selected in the focused app, read once the command hold is confirmed. With no selection, the instruction stands alone and Replace becomes Paste at the cursor.
 _Avoid_: highlighted text, input text
 
 **Pill**:
@@ -33,5 +33,17 @@ An action from Parla's fixed allowlist that command mode's LLM may ask Parla to 
 _Avoid_: action, skill, plugin, function
 
 **Command run**:
-One use of command mode, from the confirmed hold to its outcome: a pasted reply, a tool call, a failure or a cancel. Each run is recorded in history next to dictations, but is not counted as one.
+One use of command mode, from the confirmed hold to its outcome: a reply shown in the Card, a tool call, a failure or a cancel. Each run is recorded in history next to dictations, but is not counted as one.
 _Avoid_: command dictation, LLM call, request
+
+**Card**:
+The floating panel above the pill that shows text Parla did not paste: a command mode reply, or a dictation caught by the Safety Net. It never takes focus, and offers Replace or Paste, Copy, and Dismiss.
+_Avoid_: popup, toast, preview window, answer window, safety net window
+
+**Safety Net**:
+The rule that sends a dictation to the Card instead of pasting it when nothing editable has focus. It only acts on a confident "not editable"; when unsure, Parla pastes.
+_Avoid_: fallback, editable check, focus guard
+
+**Edit** and **Answer**:
+The two kinds of command reply. An edit is text meant to go into the document (a rewrite, a translation, a drafted email), so the Card's main button is Replace or Paste. An answer is addressed to the user (an explanation, a calculation), so the main button is Copy. The LLM says which kind it wrote.
+_Avoid_: rewrite vs question, action vs info
