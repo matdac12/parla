@@ -42,8 +42,9 @@ pub struct DictationRecord {
     pub stream_setup_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_caption_ms: Option<u64>,
-    /// Command runs only (PARLA-63). `text` is the instruction and `model` its
-    /// speech model; these describe the LLM step.
+    /// Command runs (PARLA-63), and dictations the Safety Net showed in the
+    /// Card (`shown`, PARLA-80). On a command row `text` is the instruction and
+    /// `model` its speech model; the fields below describe the LLM step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<CommandOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,11 +77,13 @@ pub struct DictationRecord {
     pub opened: Option<u64>,
 }
 
-/// How a command run ended.
+/// How a command run ended, or that a dictation was shown instead of pasted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommandOutcome {
     Pasted,
+    /// Opened in the Card, not pasted: a dictation with nowhere to land.
+    Shown,
     /// A tool opened a page instead of a paste.
     Opened,
     Failed,

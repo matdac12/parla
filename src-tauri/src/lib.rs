@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod bench;
+mod card;
 pub mod clip;
 pub mod command_mode;
 mod commands;
@@ -95,6 +96,8 @@ pub fn run() {
             commands::settings::check_command_hotkey,
             commands::history::get_history,
             commands::history::clear_history,
+            commands::card::card_bounds,
+            commands::card::card_action,
             commands::failure::retry_last_failed,
             commands::failure::dismiss_failure_pill,
             commands::failure::retry_to_history,

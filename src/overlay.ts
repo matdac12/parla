@@ -172,3 +172,69 @@ void listen<{ generation: number; enabled: boolean }>("caption-session", (event)
   clearCaptions();
 });
 void listen<CaptionUpdate>("caption", (event) => queueCaption(event.payload));
+
+// The Card (PARLA-80): text Parla did not paste, above the check, until a
+// button closes it or the next session starts. Rust says what it shows; the
+// window takes clicks only over the box reported here.
+/** The footer's buttons; Dismiss is always the ✕. */
+type CardAction = "copy" | "paste";
+interface CardView {
+  tag: "not_pasted";
+  header: string | null;
+  text: string;
+  actions: CardAction[];
+  primary: CardAction;
+}
+const TAGS: Record<CardView["tag"], string> = { not_pasted: "Not pasted · no text field" };
+const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste" };
+const card = document.getElementById("card") as HTMLElement;
+const cardClose = card.querySelector(".card-close") as HTMLButtonElement;
+const cardTag = card.querySelector(".card-tag span") as HTMLSpanElement;
+const cardHeader = card.querySelector(".card-header") as HTMLSpanElement;
+const cardBody = card.querySelector(".card-body") as HTMLDivElement;
+const cardFoot = card.querySelector(".card-foot") as HTMLDivElement;
+let cardGeneration = 0;
+
+function reportCardBounds(): void {
+  if (card.hidden) return;
+  const box = card.getBoundingClientRect();
+  void invoke("card_bounds", {
+    generation: cardGeneration,
+    bounds: { left: box.left, top: box.top, width: box.width, height: box.height },
+  }).catch(() => undefined);
+}
+
+function showCard(generation: number, view: CardView): void {
+  cardGeneration = generation;
+  card.setAttribute("aria-label", TAGS[view.tag]);
+  cardTag.textContent = TAGS[view.tag];
+  cardHeader.textContent = view.header === null ? "" : `“${view.header}”`;
+  cardBody.textContent = view.text;
+  cardBody.scrollTop = 0;
+  cardFoot.replaceChildren(...view.actions.map((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = action === view.primary ? "card-button primary" : "card-button";
+    button.dataset.action = action;
+    button.textContent = ACTIONS[action];
+    return button;
+  }));
+  cardClose.disabled = false;
+  card.hidden = false;
+  // Laid out already; again once the window has grown and the entrance ends.
+  reportCardBounds();
+}
+
+card.addEventListener("click", (event) => {
+  const button = (event.target as Element).closest<HTMLButtonElement>("button[data-action]");
+  if (button === null || button.disabled) return;
+  // One action per Card: Rust also takes it only once.
+  card.querySelectorAll("button").forEach((other) => { other.disabled = true; });
+  void invoke("card_action", { generation: cardGeneration, action: button.dataset.action }).catch(() => undefined);
+});
+card.addEventListener("animationend", reportCardBounds);
+window.addEventListener("resize", reportCardBounds);
+void listen<{ generation: number; card: CardView } | null>("card", (event) => {
+  if (event.payload === null) card.hidden = true;
+  else showCard(event.payload.generation, event.payload.card);
+});

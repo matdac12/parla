@@ -264,8 +264,18 @@ editable and is never queried; only on the desktop or taskbar, or with no
 foreground window, does Parla ask UI Automation what has focus. At the paste,
 Parla reads the verdict without waiting (no answer yet counts as editable) and
 logs it to stderr: `Parla focus probe (dictation): Unknown by App, app
-notepad.exe, window Notepad, …`. For now nothing else changes; pasting is as
-before. Off, no probe runs.
+notepad.exe, window Notepad, …`. Off, no probe runs and every dictation pastes.
+
+**The Card:** when the probe is sure nothing editable has focus (in practice,
+you dictated on the desktop or the taskbar), the dictation is not pasted and
+the clipboard is left alone. Its text opens in a dark panel above the pill's
+check instead, with **Copy** (the clipboard keeps the text), **Paste** (the
+normal paste into whatever has focus now, clipboard restored, never
+auto-send's Enter) and ✕ to dismiss. It stays until you click one of them or
+start the next dictation or command; it never takes focus, and the mouse
+passes through everything around it. The history row is a normal dictation
+with outcome `shown`, counted in your stats; what you clicked goes to stderr
+(`Parla card: copied`).
 
 ### Recording pill
 
@@ -284,7 +294,8 @@ It never takes focus and ignores the mouse, so pasting still goes to your app.
   click it to retry the saved clip (spinner, then check or cross again). The
   pill never takes focus, so the retried text is pasted into the app you were
   using. The pill is click-through at all other times. A cancelled recording just
-  disappears.
+  disappears. With the Card above it (see Safety Net), the check stays until the
+  Card closes.
 
 Parla opens the default input device once at startup and keeps its stream warm,
 so pressing the hotkey has no device-startup latency. After 60 s without a
