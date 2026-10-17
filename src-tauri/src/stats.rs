@@ -32,8 +32,8 @@ pub struct Stats {
     pub first_used_at: Option<u64>,
     /// Audio sent per provider, model and mode, benchmarks included.
     pub usage: Vec<Usage>,
-    /// Command mode's LLM tokens per model. Absent in files written before
-    /// command mode, which had no command runs to bill.
+    /// Command mode's LLM tokens per model, from when they were first billed
+    /// (PARLA-66); absent in older files, and not backfilled.
     pub llm_usage: Vec<LlmUsage>,
     pub version: u32,
 }

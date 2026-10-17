@@ -36,6 +36,7 @@ fn usd_per_million_tokens(model: &str) -> Option<(f64, f64)> {
     }
 }
 
+/// A command run's LLM cost, or `None` when its model has no known price.
 pub fn llm_cost_usd(model: &str, tokens_in: u64, tokens_out: u64) -> Option<f64> {
     usd_per_million_tokens(model).map(|(input, output)| {
         (input * tokens_in as f64 + output * tokens_out as f64) / 1_000_000.0

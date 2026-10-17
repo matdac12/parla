@@ -201,7 +201,7 @@ function commandOutcome(record: DictationRecord): string {
 
 /** The text, meta line and Copy text of a row. A command row shows its
  *  instruction under an orange tag; Copy copies the reply. */
-function content(record: DictationRecord): { text: string; meta: HTMLDivElement; copy: string | undefined } {
+function rowParts(record: DictationRecord): { text: string; meta: HTMLDivElement; copy: string | undefined } {
   const ok = record.error === null;
   const meta = el("div", "mt");
   if (!isCommand(record)) {
@@ -228,7 +228,7 @@ function row(record: DictationRecord, retryable: boolean, today?: number): HTMLL
     : clock(record.started_at));
   when.title = fullDate(record.started_at);
 
-  const { text: shown, meta, copy } = content(record);
+  const { text: shown, meta, copy } = rowParts(record);
   const text = el("p", "tx", shown);
   // Click expands the two-line clamp, unless the click ended a text selection.
   text.addEventListener("click", () => {
@@ -337,7 +337,7 @@ function renderHistory(retryable: DictationRecord | undefined): void {
   empty.hidden = shown.length > 0;
   empty.textContent = count === 0
     ? "No dictations yet."
-    : query === "" && failedOnly ? "No failed dictations." : "No transcripts match.";
+    : query === "" && failedOnly ? "Nothing failed." : "Nothing matches.";
   more.hidden = count < limit || limit >= MAX;
   clear.disabled = count === 0;
 }
