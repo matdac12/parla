@@ -8,7 +8,11 @@ data paths and live tests.
 
 - Lean, fast Rust. Latency comes first: weigh every change by its cost on the
   hotkey-to-paste path.
-- Paste the raw transcript. Never add an LLM rewrite or cleanup pass.
+- Dictation pastes the raw transcript. Never add an LLM rewrite or cleanup
+  pass to dictation.
+- Command mode (its own hotkey, off by default) is the only place Parla calls
+  an LLM. It must add nothing to the dictation hotkey-to-paste path. See
+  `docs/adr/0001-command-mode-is-the-only-llm-path.md`.
 - Keep the engine (`transcribe-rs` on ONNX Runtime via `ort`) and the native
   dependencies. A new model goes in as a drop-in on that engine; any engine or
   native-dependency swap waits for Mattia's decision.
