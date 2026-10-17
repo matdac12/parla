@@ -13,7 +13,8 @@ export interface DictationRecord {
   /** A command run's instruction (`kind: "command"`). */
   text: string;
   error: string | null;
-  /** Command runs only (`timing::DictationRecord`); absent on other rows. */
+  /** Command runs, and dictations shown in the Card instead of pasted
+   *  (`shown`, PARLA-80); absent on other rows. */
   outcome?: CommandOutcome;
   /** The page an `opened` run opened (PARLA-65). */
   url?: string;
@@ -25,8 +26,9 @@ export interface DictationRecord {
   reply?: string;
 }
 
-/** How a command run ended. `opened` is the open_url tool (PARLA-65). */
-export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled";
+/** How a command run ended. `opened` is the open_url tool (PARLA-65);
+ *  `shown` is a dictation the Safety Net sent to the Card (PARLA-80). */
+export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled" | "shown";
 
 export function must<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);

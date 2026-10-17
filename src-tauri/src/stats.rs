@@ -462,6 +462,16 @@ mod tests {
     }
 
     #[test]
+    fn a_dictation_shown_in_the_card_counts_like_a_pasted_one() {
+        let mut stats = Stats::default();
+        let mut shown = record("dictation", "ricordami la fattura", None);
+        shown.outcome = Some(crate::timing::CommandOutcome::Shown);
+        assert!(stats.apply(&shown));
+        assert_eq!(counts(&stats), (3, 1));
+        assert_eq!(stats.audio_ms, 1_000);
+    }
+
+    #[test]
     fn command_runs_count_toward_no_dictation_total_but_bill_their_speech() {
         let mut stats = Stats::default();
         let mut command = record(crate::timing::COMMAND_KIND, "make this formal", None);

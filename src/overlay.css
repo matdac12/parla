@@ -237,10 +237,116 @@ body {
     transform: translateY(4px) scale(0.96);
   }
 }
+/* The Card (PARLA-80, prototype variant A): the captions box grown up, above
+   the check. Always dark, whatever the system theme. */
+.card {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: 420px;
+  padding: 10px 13px 9px;
+  border-radius: 11px;
+  background: rgba(18, 18, 20, 0.88);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 4px 13px rgba(0, 0, 0, 0.17);
+  color: rgba(255, 255, 255, 0.88);
+  font: 13px/19px "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  animation: card-appear 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+.card[hidden] { display: none; }
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.card-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: rgba(255, 255, 255, 0.56);
+  white-space: nowrap;
+}
+.card-tag i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.7);
+}
+.card-header {
+  flex: 1;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.card-body {
+  max-height: 228px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+.card-body::-webkit-scrollbar { width: 6px; }
+.card-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
+.card-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 9px;
+}
+.card-close,
+.card-button {
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.card-close:disabled,
+.card-button:disabled { cursor: default; }
+.card-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.56);
+}
+.card-close:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.card-button {
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 12px;
+}
+.card-button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.22); }
+.card-button.primary {
+  background: rgba(255, 255, 255, 0.9);
+  color: #121214;
+}
+.card-button.primary:hover:not(:disabled) { background: #fff; }
+@keyframes card-appear {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px) scale(0.98);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   /* The spinner is a progress indicator, so it keeps rotating. */
   .pill {
     animation: none;
   }
   .captions { animation: none; }
+  .card { animation: none; }
 }

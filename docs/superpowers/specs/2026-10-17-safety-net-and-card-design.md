@@ -118,6 +118,9 @@ The Card is fed two ways:
   - **Dismiss:** close.
 - **Lifetime:** the Card stays until a button closes it or the next dictation or command starts. No timer, no Esc, no keyboard control in v1. The hook is unchanged.
 - **Wait state:** the orange spinner pill as today, until the reply is complete. No streaming.
+- 17/10, PARLA-80 as built:
+  - The window takes the Card's tallest size (456 × 380) while it is open. A Windows click-through flag covers a whole window, so a thread polls the cursor every 30 ms while the Card is open and makes the window clickable only over the Card's box (reported by the page). The rest, the check included, stays click-through.
+  - A caught dictation shows what would have been pasted: with auto-send on, without its trigger word. History keeps the raw transcript.
 
 **History and stats**
 - A caught dictation is a normal dictation row with outcome `shown`. It counts in words and totals as today.

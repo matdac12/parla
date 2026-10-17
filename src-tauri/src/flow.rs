@@ -525,30 +525,28 @@ fn finish_session_with_error(
                                 }
                             }
                             if completion.paste {
-                                // History keeps the raw text; only the paste drops the trigger.
+                                // History keeps the raw text; only the paste
+                                // (and the Card) drops the trigger.
                                 let stripped = completion
                                     .auto_send
                                     .then(|| inserter::strip_send_trigger(text))
                                     .flatten();
-                                // The Safety Net acts on the verdict from
-                                // PARLA-80; until then every dictation pastes.
-                                focus_probe::around_paste(
+                                deliver(
                                     completion.focus.as_ref(),
-                                    "dictation",
-                                    |_verdict| {
+                                    stripped.unwrap_or(text),
+                                    |text| {
                                         inserter::paste_text_with_options(
-                                            stripped.unwrap_or(text),
+                                            text,
                                             delay,
                                             settings.paste_compatibility_mode,
                                             stripped.is_some(),
                                         )
                                     },
                                 )
-                                .map_err(|e| e.to_string())
                             } else {
                                 // Retried from the app window: the history entry
                                 // is the delivery, there is nothing to paste into.
-                                Ok(Instant::now())
+                                Ok(Delivery::Pasted(Instant::now()))
                             }
                         },
                     )
@@ -581,20 +579,49 @@ fn finish_session_with_error(
     Some(ending)
 }
 
+/// Where a dictation's transcript went.
+#[derive(Debug, PartialEq, Eq)]
+enum Delivery {
+    /// Pasted, at the V click.
+    Pasted(Instant),
+    /// Caught by the Safety Net: shown in the Card, with nothing pasted and
+    /// the clipboard untouched (PARLA-80).
+    Shown(String),
+}
+
+/// The paste point: a confident "not editable" opens the Card instead of
+/// pasting; anything else, a probe still running included, pastes at once.
+fn deliver(
+    focus: Option<&focus_probe::Pending>,
+    text: &str,
+    paste: impl FnOnce(&str) -> Result<Instant, String>,
+) -> Result<Delivery, String> {
+    focus_probe::around_paste(focus, "dictation", |verdict| match verdict {
+        focus_probe::Verdict::NotEditable => Ok(Delivery::Shown(text.to_owned())),
+        focus_probe::Verdict::Editable | focus_probe::Verdict::Unknown => {
+            paste(text).map(Delivery::Pasted)
+        }
+    })
+}
+
 /// The pill's ending and the history row's error. A paste that landed is a
 /// success even when the hold hit the cap; Retry is offered only when this
 /// run saved its clip, or it would re-run an older one (PARLA-51).
 fn dictation_ending(
     hold_error: Option<String>,
-    result: Result<(), ProviderError>,
+    result: Result<Delivery, ProviderError>,
     clip_saved: bool,
 ) -> (Ending, Option<String>) {
     match result {
-        Ok(()) => {
+        Ok(delivery) => {
             if let Some(hold) = hold_error {
-                eprintln!("Dictation pasted after the hold ended early: {hold}");
+                eprintln!("Dictation delivered after the hold ended early: {hold}");
             }
-            (Ending::Done, None)
+            let ending = match delivery {
+                Delivery::Pasted(_) => Ending::Done,
+                Delivery::Shown(text) => Ending::Card(crate::card::Card::caught_dictation(text)),
+            };
+            (ending, None)
         }
         Err(error) => (
             Ending::Failed { retry: clip_saved },
@@ -912,21 +939,24 @@ fn transcribe_and_paste(
     key_up: Instant,
     record: &mut DictationRecord,
     streamed: Option<Result<crate::streaming::Streamed, ProviderError>>,
-    paste: impl FnOnce(&str, Duration) -> Result<Instant, String>,
-) -> Result<(), ProviderError> {
+    paste: impl FnOnce(&str, Duration) -> Result<Delivery, String>,
+) -> Result<Delivery, ProviderError> {
     transcribe(provider, clip, settings, key_up, record, streamed)?;
     if record.text.trim().is_empty() {
         return Err(ProviderError::Other(
             "Provider returned an empty transcript".into(),
         ));
     }
-    let pasted = paste(
+    let delivery = paste(
         &record.text,
         Duration::from_millis(settings.restore_delay_ms),
     )
     .map_err(|error| ProviderError::Other(format!("Paste failed: {error}")))?;
-    record.pasted = Some(timing::offset_ms(key_up, pasted));
-    Ok(())
+    match &delivery {
+        Delivery::Pasted(at) => record.pasted = Some(timing::offset_ms(key_up, *at)),
+        Delivery::Shown(_) => record.outcome = Some(timing::CommandOutcome::Shown),
+    }
+    Ok(delivery)
 }
 
 /// A command run's instruction, transcribed by the active provider into its
@@ -1003,8 +1033,14 @@ mod pipeline_tests {
         let cap = || Some("hold exceeded 120 s".to_string());
         // The cap ended the hold but the transcript pasted: a plain success,
         // with no error row the app window would offer to retry (PARLA-51).
-        assert_eq!(dictation_ending(cap(), Ok(()), false), (Ending::Done, None));
-        assert_eq!(dictation_ending(None, Ok(()), false), (Ending::Done, None));
+        assert_eq!(
+            dictation_ending(cap(), Ok(Delivery::Pasted(Instant::now())), false),
+            (Ending::Done, None)
+        );
+        assert_eq!(
+            dictation_ending(None, Ok(Delivery::Pasted(Instant::now())), false),
+            (Ending::Done, None)
+        );
         // A failed transcription saved this run's clip: Retry re-runs it.
         assert_eq!(
             dictation_ending(cap(), Err(ProviderError::Timeout), true),
@@ -1113,7 +1149,7 @@ mod pipeline_tests {
                 setup_ms: Some(20),
                 first_caption_ms: Some(400),
             })),
-            |_, _| Ok(Instant::now()),
+            |_, _| Ok(Delivery::Pasted(Instant::now())),
         )
         .unwrap();
         assert!(probe.0.get().is_none());
@@ -1127,7 +1163,7 @@ mod pipeline_tests {
             Some(Err(ProviderError::Timeout)),
             |text, _| {
                 assert_eq!(text, "Recovered");
-                Ok(Instant::now())
+                Ok(Delivery::Pasted(Instant::now()))
             },
         )
         .unwrap();
@@ -1152,7 +1188,7 @@ mod pipeline_tests {
             })),
             |text, _| {
                 pastes.push(text.to_owned());
-                Ok(Instant::now())
+                Ok(Delivery::Pasted(Instant::now()))
             },
         )
         .unwrap();
@@ -1174,7 +1210,7 @@ mod pipeline_tests {
             Some(Err(ProviderError::Timeout)),
             |text, _| {
                 pastes.push(text.to_owned());
-                Ok(Instant::now())
+                Ok(Delivery::Pasted(Instant::now()))
             },
         )
         .unwrap();
@@ -1301,7 +1337,7 @@ mod pipeline_tests {
             None,
             |text, _| {
                 pastes.push(text.to_owned());
-                Ok(Instant::now())
+                Ok(Delivery::Pasted(Instant::now()))
             },
         )
         .unwrap();
@@ -1626,7 +1662,7 @@ mod pipeline_tests {
                     assert_eq!(text, "Hello");
                     assert_eq!(delay, Duration::from_millis(250));
                     pasted.fetch_add(1, Ordering::Relaxed);
-                    Ok(Instant::now())
+                    Ok(Delivery::Pasted(Instant::now()))
                 },
             );
             let success = output == Ok("Hello".into());
@@ -1651,10 +1687,108 @@ mod pipeline_tests {
             key_up,
             &mut record,
             None,
-            |_, _| Ok(injected),
+            |_, _| Ok(Delivery::Pasted(injected)),
         )
         .unwrap();
         assert_eq!(record.pasted, Some(5));
+    }
+
+    /// A probe whose thread answers with `foreground` once `gate` opens.
+    fn probe_on(
+        foreground: &'static str,
+        gate: mpsc::Receiver<()>,
+    ) -> focus_probe::Worker<impl FnOnce() -> Option<mpsc::Sender<Arc<focus_probe::Slot>>>> {
+        focus_probe::worker(move || {
+            move || {
+                let _ = gate.recv();
+                focus_probe::Facts {
+                    foreground: Some(foreground.into()),
+                    app: None,
+                    focus: focus_probe::Focus::Nothing,
+                }
+            }
+        })
+    }
+    fn answered(pending: &focus_probe::Pending) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pending.answer().is_none() {
+            assert!(Instant::now() < deadline, "the probe never answered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_dictation_with_nowhere_to_land_opens_in_the_card_and_is_never_pasted() {
+        let (open, gate) = mpsc::channel();
+        let worker = probe_on("Progman", gate);
+        let focus = worker.start();
+        open.send(()).unwrap();
+        answered(&focus);
+        let delivered = deliver(Some(&focus), "Ricordami la fattura", |_| {
+            panic!("the desktop must get no paste and no clipboard write")
+        });
+        assert_eq!(
+            delivered,
+            Ok(Delivery::Shown("Ricordami la fattura".into()))
+        );
+    }
+
+    #[test]
+    fn an_unknown_focus_or_the_safety_net_off_pastes_as_today() {
+        let (open, gate) = mpsc::channel();
+        let worker = probe_on("Notepad", gate);
+        let focus = worker.start();
+        open.send(()).unwrap();
+        answered(&focus);
+        let at = Instant::now();
+        for focus in [Some(&focus), None] {
+            let mut pasted = Vec::new();
+            let delivered = deliver(focus, "Hello", |text| {
+                pasted.push(text.to_owned());
+                Ok(at)
+            });
+            assert_eq!(delivered, Ok(Delivery::Pasted(at)));
+            assert_eq!(pasted, ["Hello"]);
+        }
+    }
+
+    #[test]
+    fn a_caught_dictation_is_a_shown_row_without_a_paste_time_and_ends_in_the_card() {
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        let delivered = transcribe_and_paste(
+            &FakeProvider(Ok("Ricordami la fattura".into())),
+            &crate::clip::Clip::new(vec![1; 160]),
+            &Settings::default(),
+            Instant::now(),
+            &mut record,
+            None,
+            |text, _| Ok(Delivery::Shown(text.into())),
+        );
+        assert!(record.pasted.is_none());
+        assert_eq!(serde_json::to_value(&record).unwrap()["outcome"], "shown");
+        assert_eq!(
+            dictation_ending(None, delivered, false),
+            (
+                Ending::Card(crate::card::Card::caught_dictation(
+                    "Ricordami la fattura".into()
+                )),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn a_probe_that_has_not_answered_pastes_without_waiting() {
+        // The desktop, but the answer comes too late to matter.
+        let (open, gate) = mpsc::channel();
+        let worker = probe_on("Progman", gate);
+        let focus = worker.start();
+        let read_at = Instant::now();
+        let at = Instant::now();
+        let delivered = deliver(Some(&focus), "Hello", |_| Ok(at));
+        assert!(read_at.elapsed() < Duration::from_millis(50));
+        assert_eq!(delivered, Ok(Delivery::Pasted(at)));
+        open.send(()).unwrap();
     }
 
     #[test]
