@@ -192,18 +192,24 @@ const FLYOUT_WIDTH: f64 = 360.0;
 /// Logical gap to the work-area edge, as Windows leaves around its own flyouts.
 const FLYOUT_MARGIN: f64 = 12.0;
 
-/// The icon the flyout opened from, when that click happened, and whether the
-/// next click on the icon is the one that just closed the flyout.
+/// How long a hidden flyout may load before another click replaces it, rather
+/// than being taken for a double-click's second release.
+const LOAD_GRACE: Duration = Duration::from_secs(3);
+/// How long after a press on the icon blurred the flyout its release may come.
+const CLOSE_CLICK: Duration = Duration::from_secs(1);
+
+/// The icon the flyout opened from, when that click happened (until the
+/// flyout shows), and when the flyout last closed with the cursor on the icon.
 struct FlyoutState {
     icon: Option<Bounds>,
     clicked_at: Option<Instant>,
-    swallow_click: bool,
+    closed_on_icon_at: Option<Instant>,
 }
 
 static FLYOUT_STATE: Mutex<FlyoutState> = Mutex::new(FlyoutState {
     icon: None,
     clicked_at: None,
-    swallow_click: false,
+    closed_on_icon_at: None,
 });
 
 fn flyout_state() -> std::sync::MutexGuard<'static, FlyoutState> {
@@ -216,13 +222,25 @@ fn flyout_state() -> std::sync::MutexGuard<'static, FlyoutState> {
 /// closes it when it is open. Runs on the event loop, like every tray
 /// callback, so creation is serialized.
 fn on_tray_click(app: &tauri::AppHandle, button: MouseButton, icon: Rect) {
-    // Pressing the icon while the flyout is open blurs it, which closes it
-    // before this release arrives: that click is spent, whichever button.
-    if std::mem::take(&mut flyout_state().swallow_click) || button != MouseButton::Left {
+    let now = Instant::now();
+    let (spent, loading) = {
+        let mut state = flyout_state();
+        (
+            // Pressing the icon while the flyout is open blurs it, which
+            // closes it before this release arrives: that click is spent.
+            within(state.closed_on_icon_at.take(), now, CLOSE_CLICK),
+            within(state.clicked_at, now, LOAD_GRACE),
+        )
+    };
+    if spent || button != MouseButton::Left {
         return;
     }
     if let Some(window) = app.get_webview_window(FLYOUT) {
-        let _ = window.destroy();
+        // A visible flyout closes. A hidden one still loading is left alone
+        // (a double-click's second release); one that never showed is dropped.
+        if window.is_visible().unwrap_or(false) || !loading {
+            let _ = window.destroy();
+        }
         return;
     }
     // The tray reports the icon in physical pixels already.
@@ -236,7 +254,7 @@ fn on_tray_click(app: &tauri::AppHandle, button: MouseButton, icon: Rect) {
             right: position.x + size.width,
             bottom: position.y + size.height,
         });
-        state.clicked_at = Some(Instant::now());
+        state.clicked_at = Some(now);
     }
     // Hidden until the page has rendered and reported its height, so it never
     // flashes empty or at the wrong size.
@@ -267,9 +285,11 @@ fn on_tray_click(app: &tauri::AppHandle, button: MouseButton, icon: Rect) {
             let cursor = target.app_handle().cursor_position();
             {
                 let mut state = flyout_state();
-                state.swallow_click = match (state.icon, cursor) {
-                    (Some(icon), Ok(at)) => icon.contains(at.x as i32, at.y as i32),
-                    _ => false,
+                state.closed_on_icon_at = match (state.icon, cursor) {
+                    (Some(icon), Ok(at)) if icon.contains(at.x as i32, at.y as i32) => {
+                        Some(Instant::now())
+                    }
+                    _ => None,
                 };
             }
             let _ = target.destroy();
@@ -314,8 +334,10 @@ pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::
         (width, height),
         (FLYOUT_MARGIN * scale).round() as i32,
     );
-    window.set_size(PhysicalSize::new(width, height))?;
+    // Move first: moving onto a monitor with another scale would rescale a
+    // window already sized for it.
     window.set_position(PhysicalPosition::new(x, y))?;
+    window.set_size(PhysicalSize::new(width, height))?;
     window.show()?;
     window.set_focus()?;
     // The page calls this again when its content changes; time the first.
@@ -326,6 +348,10 @@ pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::
         );
     }
     Ok(())
+}
+
+fn within(at: Option<Instant>, now: Instant, limit: Duration) -> bool {
+    at.is_some_and(|at| now.saturating_duration_since(at) < limit)
 }
 
 /// A screen rectangle in physical pixels; `right` and `bottom` are exclusive.
@@ -505,6 +531,18 @@ mod flyout_tests {
             bottom: 430,
         };
         assert_eq!(flyout_origin(small, icon, (360, 500), 12), (12, 12));
+    }
+
+    #[test]
+    fn recent_events_count_only_inside_their_window() {
+        let now = Instant::now();
+        assert!(!within(None, now, CLOSE_CLICK));
+        assert!(within(
+            Some(now),
+            now + Duration::from_millis(300),
+            CLOSE_CLICK
+        ));
+        assert!(!within(Some(now), now + CLOSE_CLICK, CLOSE_CLICK));
     }
 
     #[test]

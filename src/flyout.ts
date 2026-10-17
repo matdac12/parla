@@ -1,6 +1,7 @@
 /** The tray flyout (PARLA-60): created per left-click, destroyed on blur, so
  *  everything here is loaded fresh each time it opens. */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clock, el, must, providerName, type DictationRecord } from "./records";
 import "./theme.css";
@@ -168,7 +169,7 @@ function retryButton(): HTMLButtonElement {
   button.addEventListener("click", () => {
     button.disabled = true;
     button.textContent = "Retrying…";
-    invoke("retry_to_history").then(() => loadHistory().then(fit), (problem) => {
+    invoke("retry_to_history").then(refresh, (problem) => {
       button.disabled = false;
       button.textContent = "Retry";
       showError(problem);
@@ -212,6 +213,10 @@ async function loadHistory(): Promise<void> {
   renderHistory(records, canRetry);
 }
 
+function refresh(): Promise<void> {
+  return loadHistory().then(fit).catch(showError);
+}
+
 /** Sizes the (still hidden, on first call) window to the page and shows it. */
 function fit(): Promise<void> {
   return invoke("flyout_ready", { height: Math.ceil(main.getBoundingClientRect().height) });
@@ -226,8 +231,13 @@ const testMic = must<HTMLButtonElement>("test-mic");
 testMic.addEventListener("click", () => {
   testMic.disabled = true;
   testMic.textContent = "Recording 3 s…";
-  // When the clip is saved, Explorer takes focus and the flyout closes.
+  // When the clip is saved, Explorer takes focus and the flyout closes; if it
+  // does not (no microphone, say), the button comes back.
   invoke("test_mic").catch(showError);
+  window.setTimeout(() => {
+    testMic.disabled = false;
+    testMic.textContent = "Test mic";
+  }, 3500);
 });
 
 must<HTMLButtonElement>("quit").addEventListener("click", () => void invoke("quit"));
@@ -249,4 +259,8 @@ Promise.all([
   models = local;
   showHotkey(loaded.hotkey);
   renderControls();
-}).then(fit).catch(showError);
+}).then(fit).catch(showError).finally(() => {
+  // The flyout can stay open while a dictation or a pill Retry finishes.
+  void listen("dictation://recorded", () => void refresh());
+  void listen("failure://changed", () => void refresh());
+});
