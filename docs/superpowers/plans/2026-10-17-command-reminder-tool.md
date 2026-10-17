@@ -1,6 +1,6 @@
 # Command reminder tool: implementation plan (PARLA-82)
 
-> **For agentic workers:** one slice per ticket, each blocked by the one before. Work test-first (mattpocock-skills:tdd), in a worktree on `parla-NN-slug`. Every commit names the ticket. **Don't start until Mattia has answered the spec's open questions**: the tickets assume its recommendations.
+> **For agentic workers:** one slice per ticket, each blocked by the one before. Work test-first (mattpocock-skills:tdd), in a worktree on `parla-NN-slug`. Every commit names the ticket. Mattia answered the spec's open questions on 17/10: see its **Decisions** section.
 
 **Goal:** saying "ricordami di chiamare Luca domani alle 15" in command mode creates a To-do with a Reminder in Mattia's Traccia Personal Space, and the Card confirms it with Open and Undo.
 
@@ -146,9 +146,16 @@
     - on success the Card closes and the log says `Parla card: reminder undone`;
     - on failure the usual notification appears and the Card stays.
 - **The outcome:** `Outcome::Reminded` opens the Card above the check, replacing slice 2's pill-only result.
+- **The 5-second confirmation (Q6):**
+  - a ring beside the tag spins, then fills its circle over about 5 s;
+  - when it completes, the Card fades and slides away (about 300 ms);
+  - hovering the Card pauses the countdown;
+  - a generation-checked close, so a late timer can't close the next session's Card;
+  - under reduced motion, no animation: a plain 5 s wait, then the Card disappears.
 
 **Tests:**
 - the Card construction and its buttons;
+- the auto-close only closes its own generation, and a hover pause defers it;
 - the Open url guard, which refuses another host;
 - Undo with a fake client, on success and on failure (the Card stays);
 - a history row is still written once, as `created`.

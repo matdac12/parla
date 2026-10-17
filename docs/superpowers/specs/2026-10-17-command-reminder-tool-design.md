@@ -1,6 +1,6 @@
 # Command mode: the `create_reminder` tool (PARLA-82)
 
-Design and research, 2026-10-17. **Not built.** Mattia hasn't reviewed it yet: the **Open questions** section below lists what he needs to decide, each with a recommendation. Tickets: sub-issues of PARLA-82, all in Backlog, none `ready-for-agent` until he answers.
+Design and research, 2026-10-17. **Not built.** Mattia answered the open questions the same evening: see **Decisions** at the end. Tickets: sub-issues of PARLA-82, in Backlog.
 
 Vocabulary: `GLOSSARY.md` (To-do, Reminder and Project reference are new). Decisions:
 - ADR-0001: command mode is the only LLM path, and dictation stays raw.
@@ -90,14 +90,14 @@ The 400 is Traccia's rule, so Parla doesn't duplicate the past check. One code p
 - **Bonus:** the fetch opens TCP and TLS to Traccia in the shared client's pool, so the POST skips the handshake.
 - **Cost:** about 8 tokens per Project, so about 240 tokens for 30 Projects, or about $0.00002 per run.
 
-### 4. Confirmation and Undo in the Card: create first, offer Undo (Q1)
+### 4. Confirmation and Undo in the Card: create first, offer Undo (Q1, decided)
 
 ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't seen. It says tools act at once, "because an action has nothing to preview". A reminder is an action, and it's cheap to reverse:
 - Traccia's delete is soft and restorable from the Trash;
 - nothing pings until the Reminder's moment, and a deleted To-do is never sent;
 - a `todos` token can't purge.
 
-**Recommendation: create at once, then confirm in the Card with Undo.**
+**Decided: create at once, then confirm in the Card with Undo.**
 - After a 201, the pill shows the check and the Card opens with:
   - **Tag:** an orange dot, "Reminder".
   - **Header:** the instruction, quoted, as for command replies.
@@ -106,7 +106,12 @@ ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't 
     - **Open** is the filled one: it opens the To-do's `url` in the default browser through the existing opener. It only opens if the `url` starts with the configured base URL.
     - **Undo** calls `DELETE /v1/todos/{id}`. On success the Card closes and the log says `Parla card: reminder undone`. On failure it shows the usual error notification and the Card stays, so Undo or Open can be retried.
     - **✕** dismisses.
-- **Lifetime:** the same as every Card: until a click or the next session (**Q6**).
+- **Lifetime (Q6, decided): a 5-second confirmation that closes itself.** This is the one Card with a timer.
+  - A ring next to the tag spins while the Card opens, then fills its circle over about 5 s like a countdown.
+  - When the circle completes, the Card fades and slides away gently (about 300 ms), and the pill's check goes with it.
+  - **Hovering the Card pauses the countdown,** so Undo and Open are always reachable. This rule is an addition Mattia hasn't confirmed; the existing Card cursor thread already knows when the pointer is over the Card.
+  - A click (Open, Undo, ✕) or the next session closes it earlier, as for every Card.
+  - Under reduced motion: no spin, a plain 5 s wait, then the Card simply disappears.
 - **History:** append-only, as decided for the Card. The row says `created`. An Undo goes to the log only.
 
 **Why not preview and Confirm:**
@@ -118,6 +123,7 @@ ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't 
 - `Tag::Reminder`, and `Action::Open` and `Action::Undo`.
 - The Card keeps the To-do's `id` and `url` with its generation, so `card::act` can run them.
 - The Card's text stays selectable, and Copy isn't offered: there is nothing to paste.
+- The countdown ring and the auto-close (in `overlay.ts`, `overlay.css`, and a generation-checked close in `overlay.rs`), so a late timer never closes the next session's Card.
 
 ### 5. Failure modes
 
@@ -276,22 +282,22 @@ ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't 
 - A local LLM-free parser for "ricordami…".
 - Undo from the history list after the Card has closed.
 
-## Open questions for Mattia
+## Decisions (Mattia, 17/10 evening)
 
-Each has a recommendation; the tickets assume it until he answers.
+Mattia accepted every recommendation, except Q6.
 
-- **Q1. Create first and offer Undo, or preview and offer Confirm?** *Recommendation: create first, Undo in the Card* (§4). Preview-and-confirm loses the reminder whenever the Card is ignored.
-  - **Q1b. A reminder with no day and no time** ("ricordami di comprare il latte"): *recommendation: create an Anytime To-do with no Reminder, and say so in the Card.* The alternative is to ask, but the Card has no input, so asking would mean a conversation, which is out of scope.
-- **Q2. A day with no time** ("ricordami lunedì di pagare l'affitto"): *recommendation: a 09:00 Reminder on that day; if it's today and 09:00 has passed, a Planned day of today with no Reminder.* The alternative, always a Planned day with no Reminder, means "ricordami" sometimes never pings.
-- **Q3. Parts of the day:** *recommendation: morning 09:00, noon 12:00, lunch 12:30, afternoon 15:00, evening/stasera 18:00, tonight 20:30*. Most match Traccia's picker presets (09:00, 12:30, 15:00, 18:00, 20:30, 22:00). Is "stasera" 18:00 or 20:30 for you?
-- **Q4. A moment already past** ("oggi alle 10" said at 21:00, or "stasera" after 18:00): *recommendation: fail with "10:00 today has already passed"*, and say it again. The alternatives: move it to tomorrow (a surprise), or create it without a Reminder (it never pings).
-- **Q5. "Lunedì" and "lunedì prossimo":** *recommendation: both mean the next Monday after today (on a Monday, in 7 days),* the same as Traccia's quick add. Some people mean "the Monday of next week" by "lunedì prossimo"; the Card shows the date either way.
-- **Q6. The reminder Card's lifetime:** *recommendation: the same as every Card (until a click or the next session), no timer.* The alternative: auto-close after about 8 s, since this Card is a confirmation, not something to act on.
-- **Q7. Settings placement:** *recommendation: the toggle in the Command mode card, and the URL and token in a "Traccia" block under it, stored in `providers.traccia`.* Fine to move.
+- **Q1. Create first, offer Undo** (§4).
+  - **Q1b. No day and no time:** an Anytime To-do with no Reminder; the Card says so.
+- **Q2. A day with no time:** a 09:00 Reminder on that day. If it's today and 09:00 has passed, a Planned day of today with no Reminder. Mattia will usually say an exact time.
+- **Q3. Parts of the day:** morning 09:00, noon 12:00, lunch 12:30, afternoon 15:00, **evening/stasera 18:00**, tonight 20:30.
+- **Q4. A moment already past:** fail loudly ("10:00 today has already passed"); Mattia says it again.
+- **Q5. "Lunedì" and "lunedì prossimo":** both mean the next Monday after today (on a Monday, in 7 days).
+- **Q6. The reminder Card:** a 5-second confirmation with a ring that spins, then fills its circle, then the Card fades away gently (§4). Hovering pauses it; that part is our addition.
+- **Q7. Settings placement:** the toggle in the Command mode card, and the URL and token under it, stored in `providers.traccia`.
 
 ## Tickets
 
-Sub-issues of PARLA-82, in Backlog, labelled, each blocked by the one before. They are not `ready-for-agent` until the open questions are answered:
+Sub-issues of PARLA-82, in Backlog, labelled, each blocked by the one before. Mattia has answered the open questions:
 
 1. PARLA-85: Traccia connection: settings, token, Test connection.
 2. PARLA-86: the `create_reminder` tool creates a To-do (pill only), plus the eval cases.

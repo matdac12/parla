@@ -37,7 +37,7 @@ One use of command mode, from the confirmed hold to its outcome: a reply shown i
 _Avoid_: command dictation, LLM call, request
 
 **Card**:
-The floating panel above the pill that shows text Parla did not paste: a command mode reply, or a dictation caught by the Safety Net. It never takes focus, and offers Replace or Paste, Copy, and Dismiss.
+The floating panel above the pill that shows text Parla did not paste (a command mode reply, or a dictation caught by the Safety Net), or briefly confirms a Reminder the command created. It never takes focus.
 _Avoid_: popup, toast, preview window, answer window, safety net window
 
 **Safety Net**:
