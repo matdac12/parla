@@ -261,7 +261,7 @@ keeps the raw transcript; a tray Retry pastes but never sends.
 dictation and command hold, a UI Automation probe on its own thread checks
 whether the focused element accepts text. At the paste, Parla reads its
 verdict without waiting (no answer yet counts as editable) and logs it to
-stderr: `Parla focus probe (dictation): editable by edit, app notepad.exe, …`.
+stderr: `Parla focus probe (dictation): Editable by Edit, app notepad.exe, …`.
 For now nothing else changes; pasting is as before. Off, no probe runs.
 
 ### Recording pill

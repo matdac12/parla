@@ -1,6 +1,6 @@
 //! The editable probe (PARLA-79): whether the focused element accepts text.
 use std::{
-    sync::{mpsc, Arc, Mutex, OnceLock},
+    sync::{mpsc, Arc, LazyLock, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -12,7 +12,7 @@ pub enum Verdict {
     Unknown,
 }
 
-/// Which rule decided the verdict, for the log.
+/// Which rule decided, and so the verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
     Edit,
@@ -23,6 +23,16 @@ pub enum Rule {
     Shell,
     NoMatch,
     Error,
+}
+
+impl Rule {
+    pub fn verdict(self) -> Verdict {
+        match self {
+            Rule::Edit | Rule::Document | Rule::Value | Rule::Text => Verdict::Editable,
+            Rule::NoForeground | Rule::Shell | Rule::NoMatch => Verdict::NotEditable,
+            Rule::Error => Verdict::Unknown,
+        }
+    }
 }
 
 /// The foreground window, as far as the verdict cares.
@@ -45,7 +55,7 @@ pub struct Element {
     pub keyboard_focusable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Facts {
     pub foreground: Foreground,
     /// The UIA error when the focused element could not be read.
@@ -55,13 +65,10 @@ pub struct Facts {
 }
 
 /// A probe's answer, kept for the log.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Reading {
-    pub verdict: Verdict,
     pub rule: Rule,
-    pub app: Option<String>,
-    pub control_type: Option<i32>,
-    pub error: Option<String>,
+    pub facts: Facts,
     /// The UIA calls alone.
     pub probe: Duration,
     /// From the start of the session to the answer.
@@ -81,7 +88,7 @@ impl<F: FnMut() -> Facts> Probe for F {
 /// One session's probe. Dropping it discards the answer.
 pub struct Pending(Arc<Slot>);
 
-struct Slot {
+pub(crate) struct Slot {
     started: Instant,
     answer: OnceLock<Reading>,
 }
@@ -97,72 +104,43 @@ impl Pending {
     pub fn answer(&self) -> Option<&Reading> {
         self.0.answer.get()
     }
-    /// The paste point's read: one atomic load, never a wait.
-    pub fn read(&self) -> Seen<'_> {
-        Seen {
-            answer: self.answer(),
-            pending: self,
-        }
-    }
 }
 
-/// What the paste point saw. Fixed when read: a later answer is only noted.
-#[derive(Clone, Copy)]
-pub struct Seen<'a> {
-    answer: Option<&'a Reading>,
-    pending: &'a Pending,
-}
-
-impl Seen<'_> {
-    /// Unknown when the probe had not answered.
-    pub fn verdict(self) -> Verdict {
-        self.answer
-            .map_or(Verdict::Unknown, |reading| reading.verdict)
-    }
-
-    /// One log line for a `run` ("dictation", "command"). Call it after the
-    /// paste: the write is not free.
-    pub fn log(self, run: &str) {
-        let line = match (self.answer, self.pending.answer()) {
-            (Some(reading), _) => reading.describe(),
-            (None, Some(late)) => format!(
-                "unknown, no answer at the paste; later: {}",
-                late.describe()
-            ),
-            (None, None) => format!(
-                "unknown, no answer at the paste (still probing {} ms after key-down)",
-                self.pending.0.started.elapsed().as_millis()
-            ),
-        };
-        eprintln!("Parla focus probe ({run}): {line}");
-    }
+/// The paste point, for dictations and command replies: reads the verdict
+/// with one atomic load (Unknown while the probe runs, or with the Safety Net
+/// off), pastes with it, then logs the run, off key-up→pasted.
+pub fn around_paste<R>(focus: Option<&Pending>, run: &str, paste: impl FnOnce(Verdict) -> R) -> R {
+    let Some(pending) = focus else {
+        return paste(Verdict::Unknown);
+    };
+    let seen = pending.answer();
+    let pasted = paste(seen.map_or(Verdict::Unknown, |reading| reading.rule.verdict()));
+    let line = match (seen, pending.answer()) {
+        (Some(reading), _) => reading.describe(),
+        (None, Some(late)) => format!(
+            "Unknown, no answer at the paste; later: {}",
+            late.describe()
+        ),
+        (None, None) => format!(
+            "Unknown, no answer at the paste (still probing {} ms after key-down)",
+            pending.0.started.elapsed().as_millis()
+        ),
+    };
+    eprintln!("Parla focus probe ({run}): {line}");
+    pasted
 }
 
 impl Reading {
     fn describe(&self) -> String {
-        let verdict = match self.verdict {
-            Verdict::Editable => "editable",
-            Verdict::NotEditable => "not editable",
-            Verdict::Unknown => "unknown",
+        let (control, error) = match &self.facts.focused {
+            Ok(element) => (control_name(element.control_type), String::new()),
+            Err(error) => ("-".into(), format!(", error {error}")),
         };
-        let rule = match self.rule {
-            Rule::Edit => "edit",
-            Rule::Document => "document",
-            Rule::Value => "value",
-            Rule::Text => "text",
-            Rule::NoForeground => "no-foreground",
-            Rule::Shell => "shell",
-            Rule::NoMatch => "no-match",
-            Rule::Error => "error",
-        };
-        let control = self.control_type.map_or("-".into(), control_name);
-        let error = self
-            .error
-            .as_ref()
-            .map_or(String::new(), |error| format!(", error {error}"));
         format!(
-            "{verdict} by {rule}, app {}, control {control}, probe {} ms, answered {} ms after key-down{error}",
-            self.app.as_deref().unwrap_or("-"),
+            "{:?} by {:?}, app {}, control {control}, probe {} ms, answered {} ms after key-down{error}",
+            self.rule.verdict(),
+            self.rule,
+            self.facts.app.as_deref().unwrap_or("-"),
             self.probe.as_millis(),
             self.answered_after.as_millis(),
         )
@@ -221,41 +199,34 @@ fn control_name(id: i32) -> String {
         .map_or_else(|| id.to_string(), |name| (*name).to_owned())
 }
 
+/// The probe thread's queue; None if the thread could not start.
+type Jobs = Option<mpsc::Sender<Arc<Slot>>>;
+
 /// The probe thread, created by the first `start`, never at startup. One
 /// thread serves every session in turn.
-pub struct Worker<F> {
-    make: Mutex<Option<F>>,
-    jobs: OnceLock<Option<mpsc::Sender<Arc<Slot>>>>,
-}
+pub(crate) struct Worker<F = fn() -> Jobs>(LazyLock<Jobs, F>);
 
-impl<F, P> Worker<F>
-where
-    F: FnOnce() -> P + Send + 'static,
-    P: Probe,
-{
-    pub const fn new(make: F) -> Self {
-        Self {
-            make: Mutex::new(Some(make)),
-            jobs: OnceLock::new(),
-        }
-    }
-
+impl<F: FnOnce() -> Jobs> Worker<F> {
     /// Queues a probe and returns at once. Without the thread the answer
     /// never comes: Unknown.
-    pub fn start(&self) -> Pending {
+    pub(crate) fn start(&self) -> Pending {
         let pending = Pending::new();
-        let jobs = self.jobs.get_or_init(|| {
-            let make = self.make.lock().unwrap_or_else(|e| e.into_inner()).take()?;
-            spawn(make)
-        });
-        if let Some(jobs) = jobs {
+        if let Some(jobs) = &*self.0 {
             let _ = jobs.send(pending.0.clone());
         }
         pending
     }
 }
 
-fn spawn<P: Probe>(make: impl FnOnce() -> P + Send + 'static) -> Option<mpsc::Sender<Arc<Slot>>> {
+/// A worker whose thread builds its probe with `make`, for tests' fakes.
+#[cfg(test)]
+pub(crate) fn worker<P: Probe>(
+    make: impl FnOnce() -> P + Send + 'static,
+) -> Worker<impl FnOnce() -> Jobs> {
+    Worker(LazyLock::new(move || spawn(make)))
+}
+
+fn spawn<P: Probe>(make: impl FnOnce() -> P + Send + 'static) -> Jobs {
     let (jobs, queue) = mpsc::channel::<Arc<Slot>>();
     std::thread::Builder::new()
         .name("parla-focus-probe".into())
@@ -268,15 +239,10 @@ fn spawn<P: Probe>(make: impl FnOnce() -> P + Send + 'static) -> Option<mpsc::Se
                 }
                 let began = Instant::now();
                 let facts = probe.facts();
-                let probe = began.elapsed();
-                let (verdict, rule) = decide(&facts);
                 let _ = slot.answer.set(Reading {
-                    verdict,
-                    rule,
-                    control_type: facts.focused.as_ref().ok().map(|e| e.control_type),
-                    error: facts.focused.err(),
-                    app: facts.app,
-                    probe,
+                    rule: decide(&facts),
+                    facts,
+                    probe: began.elapsed(),
                     answered_after: slot.started.elapsed(),
                 });
             }
@@ -286,7 +252,7 @@ fn spawn<P: Probe>(make: impl FnOnce() -> P + Send + 'static) -> Option<mpsc::Se
     Some(jobs)
 }
 
-static WORKER: Worker<fn() -> uia::Uia> = Worker::new(uia::Uia::new);
+static WORKER: Worker = Worker(LazyLock::new(|| spawn(uia::Uia::new)));
 
 /// Starts this session's probe on the app's probe thread (created now if
 /// this is the first session) and returns at once.
@@ -333,7 +299,7 @@ mod uia {
         pub fn new() -> Self {
             // SAFETY: COM is initialised on this thread before any UIA call,
             // and the interfaces never leave it.
-            Self(unsafe { client() }.map_err(|error| describe(&error)))
+            Self(unsafe { client() }.map_err(|error| error.to_string()))
         }
     }
 
@@ -369,7 +335,7 @@ mod uia {
                 (Err(error), _) => Err(error.clone()),
                 // SAFETY: the client was made on this thread.
                 (Ok((automation, cache)), _) => {
-                    unsafe { focused(automation, cache) }.map_err(|error| describe(&error))
+                    unsafe { focused(automation, cache) }.map_err(|error| error.to_string())
                 }
             };
             Facts {
@@ -418,10 +384,6 @@ mod uia {
             Foreground::App
         }
     }
-
-    fn describe(error: &windows::core::Error) -> String {
-        format!("{} {}", error.code(), error.message())
-    }
 }
 
 /// Off Windows, where Parla does not run, every probe is Unknown: editable.
@@ -454,26 +416,23 @@ const DOCUMENT: i32 = 50030;
 
 /// Editable when any rule holds. Not editable only on a confident no; a UIA
 /// error is Unknown. An edit box wins over the shell (a desktop rename).
-pub fn decide(facts: &Facts) -> (Verdict, Rule) {
+pub fn decide(facts: &Facts) -> Rule {
     if facts.foreground == Foreground::None {
-        return (Verdict::NotEditable, Rule::NoForeground);
+        return Rule::NoForeground;
     }
     if let Ok(element) = &facts.focused {
-        let rule = match element.control_type {
-            EDIT => Some(Rule::Edit),
-            DOCUMENT => Some(Rule::Document),
-            _ if element.value_read_only == Some(false) => Some(Rule::Value),
-            _ if element.text_pattern && element.keyboard_focusable => Some(Rule::Text),
-            _ => None,
-        };
-        if let Some(rule) = rule {
-            return (Verdict::Editable, rule);
+        match element.control_type {
+            EDIT => return Rule::Edit,
+            DOCUMENT => return Rule::Document,
+            _ if element.value_read_only == Some(false) => return Rule::Value,
+            _ if element.text_pattern && element.keyboard_focusable => return Rule::Text,
+            _ => {}
         }
     }
     match (facts.foreground, &facts.focused) {
-        (Foreground::Shell, _) => (Verdict::NotEditable, Rule::Shell),
-        (_, Err(_)) => (Verdict::Unknown, Rule::Error),
-        (_, Ok(_)) => (Verdict::NotEditable, Rule::NoMatch),
+        (Foreground::Shell, _) => Rule::Shell,
+        (_, Err(_)) => Rule::Error,
+        (_, Ok(_)) => Rule::NoMatch,
     }
 }
 
@@ -497,12 +456,16 @@ mod tests {
             ..Element::default()
         }
     }
+    fn judged(facts: &Facts) -> (Verdict, Rule) {
+        let rule = decide(facts);
+        (rule.verdict(), rule)
+    }
 
     #[test]
     fn edit_and_document_controls_are_editable() {
-        assert_eq!(decide(&app(control(EDIT))), (Verdict::Editable, Rule::Edit));
+        assert_eq!(judged(&app(control(EDIT))), (Verdict::Editable, Rule::Edit));
         assert_eq!(
-            decide(&app(control(DOCUMENT))),
+            judged(&app(control(DOCUMENT))),
             (Verdict::Editable, Rule::Document)
         );
     }
@@ -513,9 +476,9 @@ mod tests {
             value_read_only: Some(read_only),
             ..control(PANE)
         };
-        assert_eq!(decide(&app(value(false))), (Verdict::Editable, Rule::Value));
+        assert_eq!(judged(&app(value(false))), (Verdict::Editable, Rule::Value));
         assert_eq!(
-            decide(&app(value(true))),
+            judged(&app(value(true))),
             (Verdict::NotEditable, Rule::NoMatch)
         );
     }
@@ -527,9 +490,9 @@ mod tests {
             keyboard_focusable,
             ..control(PANE)
         };
-        assert_eq!(decide(&app(text(true))), (Verdict::Editable, Rule::Text));
+        assert_eq!(judged(&app(text(true))), (Verdict::Editable, Rule::Text));
         assert_eq!(
-            decide(&app(text(false))),
+            judged(&app(text(false))),
             (Verdict::NotEditable, Rule::NoMatch)
         );
         // Focusable alone is not text: a button or a list item.
@@ -538,7 +501,7 @@ mod tests {
             ..control(LIST_ITEM)
         };
         assert_eq!(
-            decide(&app(focusable)),
+            judged(&app(focusable)),
             (Verdict::NotEditable, Rule::NoMatch)
         );
     }
@@ -551,16 +514,16 @@ mod tests {
             app: Some("explorer.exe".into()),
         };
         assert_eq!(
-            decide(&desktop(Ok(control(LIST_ITEM)))),
+            judged(&desktop(Ok(control(LIST_ITEM)))),
             (Verdict::NotEditable, Rule::Shell)
         );
         assert_eq!(
-            decide(&desktop(Err("UIA timed out".into()))),
+            judged(&desktop(Err("UIA timed out".into()))),
             (Verdict::NotEditable, Rule::Shell)
         );
         // Renaming a file on the desktop.
         assert_eq!(
-            decide(&desktop(Ok(control(EDIT)))),
+            judged(&desktop(Ok(control(EDIT)))),
             (Verdict::Editable, Rule::Edit)
         );
     }
@@ -572,7 +535,7 @@ mod tests {
             focused: Err("no element".into()),
             app: None,
         };
-        assert_eq!(decide(&facts), (Verdict::NotEditable, Rule::NoForeground));
+        assert_eq!(judged(&facts), (Verdict::NotEditable, Rule::NoForeground));
     }
 
     #[test]
@@ -582,7 +545,7 @@ mod tests {
             focused: Err("E_FAIL".into()),
             app: None,
         };
-        assert_eq!(decide(&facts), (Verdict::Unknown, Rule::Error));
+        assert_eq!(judged(&facts), (Verdict::Unknown, Rule::Error));
     }
 
     /// Polls for a test only: production never waits on a probe.
@@ -611,32 +574,40 @@ mod tests {
     }
 
     #[test]
-    fn reading_a_probe_never_waits_and_a_late_answer_is_kept() {
+    fn the_paste_point_never_waits_for_a_slow_probe_and_sees_unknown() {
         let (open, probe) = gated();
-        let worker = Worker::new(move || probe);
+        let worker = worker(move || probe);
         let pending = worker.start();
         let read_at = Instant::now();
-        let seen = pending.read();
-        assert_eq!(seen.verdict(), Verdict::Unknown);
+        let mut seen = Vec::new();
+        let pasted = around_paste(Some(&pending), "dictation", |verdict| {
+            seen.push(verdict);
+            "pasted"
+        });
         assert!(read_at.elapsed() < Duration::from_millis(50));
+        // No answer yet: Unknown, which pastes as today.
+        assert_eq!(
+            (pasted, seen.as_slice()),
+            ("pasted", [Verdict::Unknown].as_slice())
+        );
         open.send(()).unwrap();
         let reading = answered(&pending);
-        assert_eq!(
-            (reading.verdict, reading.rule),
-            (Verdict::Editable, Rule::Edit)
-        );
-        assert_eq!(reading.app.as_deref(), Some("notepad.exe"));
-        assert_eq!(reading.control_type, Some(EDIT));
+        assert_eq!(reading.rule, Rule::Edit);
+        assert_eq!(reading.facts.app.as_deref(), Some("notepad.exe"));
         assert!(reading.answered_after >= reading.probe);
-        // What the paste point saw stays as it was.
-        assert_eq!(seen.verdict(), Verdict::Unknown);
-        assert_eq!(pending.read().verdict(), Verdict::Editable);
+        // The next paste sees the answer; with the Safety Net off, Unknown.
+        around_paste(Some(&pending), "dictation", |verdict| {
+            assert_eq!(verdict, Verdict::Editable)
+        });
+        around_paste(None, "dictation", |verdict| {
+            assert_eq!(verdict, Verdict::Unknown)
+        });
     }
 
     #[test]
     fn the_probe_thread_starts_with_the_first_session() {
         let (made, was_made) = mpsc::channel();
-        let worker = Worker::new(move || {
+        let worker = worker(move || {
             made.send(()).unwrap();
             || app(control(EDIT))
         });
@@ -655,7 +626,7 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (open, mut probe) = gated();
         let counted = calls.clone();
-        let worker = Worker::new(move || {
+        let worker = worker(move || {
             move || {
                 counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 probe()
@@ -671,6 +642,20 @@ mod tests {
         answered(&first);
         answered(&third);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_uia_error_is_kept_with_its_reason() {
+        let worker = worker(|| {
+            || Facts {
+                foreground: Foreground::App,
+                focused: Err("E_FAIL".into()),
+                app: Some("code.exe".into()),
+            }
+        });
+        let reading = answered(&worker.start()).clone();
+        assert_eq!(reading.rule, Rule::Error);
+        assert_eq!(reading.facts.focused.unwrap_err(), "E_FAIL");
     }
 
     /// The timed check of "0 ms on key-up→pasted", against whatever has focus:
@@ -702,15 +687,16 @@ mod tests {
         println!("{}", answered(&start()).describe());
         println!("key-down queueing (thread up): {}", summary(queue));
         println!("UIA probe alone: {}", summary(probe));
-        // The paste point: answered and unanswered probes.
+        // What around_paste does before the paste, answered and unanswered.
         let (open, gated) = gated();
-        let slow = Worker::new(move || gated);
+        let slow = worker(move || gated);
         let unanswered = slow.start();
         for (name, pending) in [("answered", &first), ("unanswered", &unanswered)] {
             let reads = 1_000_000u32;
             let began = Instant::now();
             for _ in 0..reads {
-                std::hint::black_box(std::hint::black_box(pending).read().verdict());
+                let seen = std::hint::black_box(pending).answer();
+                std::hint::black_box(seen.map_or(Verdict::Unknown, |r| r.rule.verdict()));
             }
             println!(
                 "paste-point read, {name}: {:?} each",
@@ -718,23 +704,5 @@ mod tests {
             );
         }
         open.send(()).unwrap();
-    }
-
-    #[test]
-    fn a_uia_error_is_logged_with_its_reason() {
-        let worker = Worker::new(|| {
-            || Facts {
-                foreground: Foreground::App,
-                focused: Err("E_FAIL".into()),
-                app: Some("code.exe".into()),
-            }
-        });
-        let reading = answered(&worker.start()).clone();
-        assert_eq!(
-            (reading.verdict, reading.rule),
-            (Verdict::Unknown, Rule::Error)
-        );
-        assert_eq!(reading.error.as_deref(), Some("E_FAIL"));
-        assert_eq!(reading.control_type, None);
     }
 }

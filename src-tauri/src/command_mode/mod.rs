@@ -319,13 +319,10 @@ fn reply_and_act(
         Some(selected) => reply.text + &selected[selected.trim_end().len()..],
         None => reply.text,
     };
-    // Never waits on the probe; logged once the paste is out.
-    let focus = run.focus.map(crate::focus_probe::Pending::read);
     // Over the selection, which is still selected, or at the cursor.
-    let pasted = ports.desktop.paste(&text, selection.borrowed.as_ref());
-    if let Some(focus) = focus {
-        focus.log("command");
-    }
+    let pasted = crate::focus_probe::around_paste(run.focus, "command", |_verdict| {
+        ports.desktop.paste(&text, selection.borrowed.as_ref())
+    });
     record.reply = Some(text);
     match pasted {
         Ok(at) => {
