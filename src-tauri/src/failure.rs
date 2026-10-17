@@ -89,25 +89,40 @@ fn notify_failure(app: &tauri::AppHandle, message: &str) {
         if let Err(error) = tray.set_tooltip(Some(format!("Parla — {message}"))) {
             eprintln!("Cannot update error tooltip: {error}");
         }
-        // An opaque red square with a white exclamation mark remains visible
-        // even if a hotkey rebind subsequently replaces the shared tooltip.
-        let mut rgba = vec![0_u8; 16 * 16 * 4];
-        for y in 0..16 {
-            for x in 0..16 {
-                let white = (7..=8).contains(&x) && ((3..=9).contains(&y) || y == 12);
-                let offset = (y * 16 + x) * 4;
-                rgba[offset..offset + 4].copy_from_slice(if white {
-                    &[255, 255, 255, 255]
-                } else {
-                    &[190, 30, 30, 255]
-                });
+        // A small red dot on the usual icon remains visible even if a hotkey
+        // rebind subsequently replaces the shared tooltip.
+        if let Some(icon) = app.default_window_icon() {
+            let (width, height) = (icon.width(), icon.height());
+            let badged = error_badge(icon.rgba(), width, height);
+            let image = tauri::image::Image::new_owned(badged, width, height);
+            if let Err(error) = tray.set_icon(Some(image)) {
+                eprintln!("Cannot update error icon: {error}");
             }
-        }
-        if let Err(error) = tray.set_icon(Some(tauri::image::Image::new_owned(rgba, 16, 16))) {
-            eprintln!("Cannot update error icon: {error}");
         }
     }
     show_toast(app, "Parla — dictation failed", message);
+}
+
+/// The app icon with a red dot in its bottom-right corner, ringed by a
+/// transparent gap so it reads on any taskbar colour.
+fn error_badge(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut out = rgba.to_vec();
+    let size = width.min(height) as f32;
+    let radius = size * 0.2;
+    let gap = (size * 0.06).max(1.0);
+    let (cx, cy) = (width as f32 - radius, height as f32 - radius);
+    for y in 0..height {
+        for x in 0..width {
+            let distance = (x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy);
+            let offset = ((y * width + x) * 4) as usize;
+            if distance <= radius {
+                out[offset..offset + 4].copy_from_slice(&[230, 50, 45, 255]);
+            } else if distance <= radius + gap {
+                out[offset + 3] = 0;
+            }
+        }
+    }
+    out
 }
 
 fn notify_info(app: &tauri::AppHandle, message: &str) {
@@ -325,6 +340,22 @@ pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_badge_marks_only_the_bottom_right_corner() {
+        let (w, h) = (32_u32, 32_u32);
+        let icon = vec![10_u8; (w * h * 4) as usize];
+        let badged = error_badge(&icon, w, h);
+        let pixel = |x: u32, y: u32| &badged[((y * w + x) * 4) as usize..][..4];
+        assert_eq!(pixel(0, 0), &[10, 10, 10, 10]);
+        assert_eq!(pixel(w / 2, h / 2), &[10, 10, 10, 10]);
+        assert_eq!(pixel(w - 4, h - 4), &[230, 50, 45, 255]);
+        let changed = badged.chunks(4).zip(icon.chunks(4)).filter(|(a, b)| a != b);
+        assert!(
+            changed.count() < (w * h / 4) as usize,
+            "badge is not minimal"
+        );
+    }
 
     #[test]
     fn messages_cover_all_variants_without_remote_details() {
