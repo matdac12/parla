@@ -50,8 +50,9 @@ arboard = { version = "3", default-features = false }
 webview2-com = "0.39"
 windows-core = "0.62"
 # Same 0.62 as cpal, wry and tao, with features they already enable: other
-# apps' audio session volumes (PARLA-42), the taskbar's edge (PARLA-60).
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# apps' audio session volumes (PARLA-42), the taskbar's edge (PARLA-60),
+# and UI Automation for the editable probe (PARLA-79).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [[example]]
 name = "compare_models"

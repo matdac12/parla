@@ -31,7 +31,7 @@
           "type": "output_text",
           "annotations": [],
           "logprobs": [],
-          "text": "buona giornata!\"}"
+          "text": "buona giornata!\",\"kind\":\"edit\"}"
         }
       ]
     }

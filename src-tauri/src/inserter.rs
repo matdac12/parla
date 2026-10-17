@@ -56,19 +56,6 @@ pub fn paste_text_with_options(
     paste_transaction(text, None, restore_delay, compatibility_mode, send)
 }
 
-/// Command mode's paste (PARLA-64): over the selection Ctrl+Insert copied, if
-/// any. The restore owes `borrowed`'s saved text while the clipboard still
-/// holds the copy, so the user's clipboard comes back once, after the paste.
-#[cfg(windows)]
-pub fn paste_over_borrowed(
-    text: &str,
-    borrowed: Option<&Borrowed>,
-    restore_delay: Duration,
-    compatibility_mode: bool,
-) -> Result<Instant, String> {
-    paste_transaction(text, borrowed, restore_delay, compatibility_mode, false)
-}
-
 #[cfg(windows)]
 fn paste_transaction(
     text: &str,
@@ -112,6 +99,12 @@ pub fn give_back(borrowed: &Borrowed) {
         Ok(mut desktop) => give_back_to(&mut desktop, borrowed),
         Err(error) => eprintln!("Parla clipboard give-back failed: {error}"),
     }
+}
+
+/// The Card's Copy (PARLA-80): the clipboard keeps `text`, with no restore.
+#[cfg(windows)]
+pub fn copy_text(text: &str) -> Result<(), String> {
+    copy_to(&mut WindowsDesktop::new()?, &mut pending_restore(), text)
 }
 
 /// Ctrl+Insert into the focused app, for command mode's selection read: never
@@ -289,22 +282,17 @@ pub fn paste_text_timed(_text: &str, _restore_delay: Duration) -> Result<Instant
 }
 
 #[cfg(not(windows))]
-pub fn paste_over_borrowed(
-    _text: &str,
-    _borrowed: Option<&Borrowed>,
-    _restore_delay: Duration,
-    _compatibility_mode: bool,
-) -> Result<Instant, String> {
-    Err("Text insertion is only supported on Windows".into())
-}
-
-#[cfg(not(windows))]
 pub fn clipboard_text() -> Result<Option<String>, String> {
     Err("The clipboard is only supported on Windows".into())
 }
 
 #[cfg(not(windows))]
 pub fn give_back(_borrowed: &Borrowed) {}
+
+#[cfg(not(windows))]
+pub fn copy_text(_text: &str) -> Result<(), String> {
+    Err("The clipboard is only supported on Windows".into())
+}
 
 #[cfg(not(windows))]
 pub fn send_copy() -> Result<(), String> {
@@ -485,6 +473,18 @@ fn read_settled(
 ) -> Result<Option<String>, String> {
     restore_pending(desktop, pending);
     Ok(restorable_text(desktop.read_text()?))
+}
+
+/// Sets the clipboard for good: a restore still owed would bring the user's
+/// old text back over it, so it is dropped.
+#[cfg(any(windows, test))]
+fn copy_to(
+    desktop: &mut impl Desktop,
+    pending: &mut Option<PendingRestore>,
+    text: &str,
+) -> Result<(), String> {
+    *pending = None;
+    desktop.write_text(text)
 }
 
 #[cfg(any(windows, test))]
@@ -829,6 +829,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pending.as_ref().unwrap().saved, "user copy");
+    }
+
+    #[test]
+    fn the_cards_copy_keeps_the_text_on_the_clipboard_for_good() {
+        let mut desktop = MemoryDesktop::new(Some("old"));
+        let mut pending = None;
+        let delay = Duration::from_millis(250);
+        // A restore still owed for an earlier paste of the same text.
+        paste_deferring_restore(&mut desktop, &mut pending, "Ciao", delay, false, false).unwrap();
+        copy_to(&mut desktop, &mut pending, "Ciao").unwrap();
+        restore_pending(&mut desktop, &mut pending);
+        assert_eq!(desktop.text.as_deref(), Some("Ciao"));
+        assert_eq!(desktop.pasted, ["Ciao"], "Copy never pastes");
     }
 
     #[test]

@@ -13,7 +13,8 @@ export interface DictationRecord {
   /** A command run's instruction (`kind: "command"`). */
   text: string;
   error: string | null;
-  /** Command runs only (`timing::DictationRecord`); absent on other rows. */
+  /** Command runs, and dictations shown in the Card instead of pasted
+   *  (`shown`, PARLA-80); absent on other rows. */
   outcome?: CommandOutcome;
   /** The page an `opened` run opened (PARLA-65). */
   url?: string;
@@ -23,10 +24,14 @@ export interface DictationRecord {
   llm_returned?: number;
   /** The LLM's text reply, kept for Copy. */
   reply?: string;
+  /** A `shown` command reply's kind (PARLA-81); `kind` is the row's origin. */
+  reply_kind?: "edit" | "answer";
 }
 
-/** How a command run ended. `opened` is the open_url tool (PARLA-65). */
-export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled";
+/** How a command run ended. `opened` is the open_url tool (PARLA-65);
+ *  `shown` is a reply in the Card (PARLA-81), or a dictation the Safety Net
+ *  sent there (PARLA-80). `pasted` is a reply from before PARLA-81. */
+export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled" | "shown";
 
 export function must<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -85,6 +90,7 @@ export interface Settings {
   restore_delay_ms: number;
   paste_compatibility_mode: boolean;
   auto_send: boolean;
+  safety_net: boolean;
   streaming_enabled: boolean;
   live_captions: boolean;
   vocabulary: string[];

@@ -127,10 +127,11 @@ at the bottom opens the benchmark window.
 - **History** lists dictations newest first, grouped by day: time, transcript
   (two lines; click to expand), provider, audio length and word count, with
   **Copy** on hover. [Command runs](#command-mode-experimental) sit among them
-  with an orange **Command** tag: the instruction, then the outcome (**Reply
-  pasted**, **Opened <host>**, **Failed: …** or **Cancelled**), the LLM model
-  and the instruction's audio length; **Copy** copies the reply whenever there
-  is one, even if pasting it failed. A search box (transcripts and instructions) and an **All /
+  with an orange **Command** tag: the instruction, then the outcome (**Edit
+  shown in the Card**, **Answer shown in the Card**, **Opened <host>**,
+  **Failed: …** or **Cancelled**; older rows may read **Reply pasted**), the
+  LLM model and the instruction's audio length; **Copy** copies the reply
+  whenever there is one. A search box (transcripts and instructions) and an **All /
   Failed** filter narrow the loaded rows, new ones appear at the top as they
   finish, and **Show older** loads more (200 at a time, up to 2000). Failed
   dictations are red; the newest one, while its recording is still saved, has
@@ -257,6 +258,28 @@ only, so "resend" doesn't count), Parla pastes the text without that word and
 then presses Enter. A dictation that is only "Send." is pasted as text. History
 keeps the raw transcript; a tray Retry pastes but never sends.
 
+**Safety Net** (Settings, on by default, `safety_net`): at key-down of every
+dictation and command hold, a probe on its own thread checks whether the
+paste has somewhere to land. An app in the foreground always counts as
+editable and is never queried; only on the desktop or taskbar, or with no
+foreground window, does Parla ask UI Automation what has focus. At the paste,
+Parla reads the verdict without waiting (no answer yet counts as editable) and
+logs it to stderr: `Parla focus probe (dictation): Unknown by App, app
+notepad.exe, window Notepad, …`. Off, no probe runs and every dictation pastes.
+A command reply always opens in the Card; the probe only picks its buttons
+(see [Command mode](#command-mode-experimental)).
+
+**The Card:** when the probe is sure nothing editable has focus (in practice,
+you dictated on the desktop or the taskbar), the dictation is not pasted and
+the clipboard is left alone. Its text opens in a dark panel above the pill's
+check instead, with **Copy** (the clipboard keeps the text), **Paste** (the
+normal paste into whatever has focus now, clipboard restored, never
+auto-send's Enter) and ✕ to dismiss. It stays until you click one of them or
+start the next dictation or command; it never takes focus, and the mouse
+passes through everything around it. The history row is a normal dictation
+with outcome `shown`, counted in your stats; what you clicked goes to stderr
+(`Parla card: copied`).
+
 ### Recording pill
 
 A small dark pill appears at the bottom centre of the primary monitor about
@@ -274,7 +297,8 @@ It never takes focus and ignores the mouse, so pasting still goes to your app.
   click it to retry the saved clip (spinner, then check or cross again). The
   pill never takes focus, so the retried text is pasted into the app you were
   using. The pill is click-through at all other times. A cancelled recording just
-  disappears.
+  disappears. With the Card above it (see Safety Net), the check stays until the
+  Card closes.
 
 Parla opens the default input device once at startup and keeps its stream warm,
 so pressing the hotkey has no device-startup latency. After 60 s without a
@@ -306,7 +330,9 @@ Command mode is a separate mode, with its own hotkey, where what you say is an
 call an LLM; dictation always pastes the raw transcript (see
 `docs/adr/0001-command-mode-is-the-only-llm-path.md`). It is being built in
 steps (PARLA-61). **So far it applies an instruction to the selected text,
-answers it at the cursor, or opens a web page** (the `open_url` tool).
+answers a question, or opens a web page** (the `open_url` tool). A text reply
+is never pasted on its own: it opens in the Card, and you click to put it in
+(ADR-0003).
 
 It is off by default: turn it on in Settings → **Dictation & hotkey** →
 **Command mode** (see [The Parla window](#the-parla-window)). It needs an
@@ -333,7 +359,8 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   instruction, the selection between `<selection>` tags (data to work on,
   never instructions), the app name and today's date. It also offers the
   allowlisted tools (below), `tool_choice: auto`, at most one call per reply.
-  The text comes back as `{"text": ...}` under a strict JSON schema: as free
+  The text comes back as `{"text": ..., "kind": "edit" | "answer"}` under a
+  strict JSON schema (a reply without a valid `kind` fails): as free
   text, a reply ending on a line break (`Buongiorno,` and a newline) sometimes
   ran on into junk such as `</final`, `</|assistant|>` or stray words, and the
   closing `"}` now ends it. The reply's trailing spaces and line breaks are
@@ -341,12 +368,26 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   spells out a chat-template token (`<|…|>`, `</assistant>`, `</final`) fails
   with nothing pasted, as does a refusal, and when the model calls a tool any
   text beside the call is dropped.
-- The text reply is **pasted once**, over the selection if there was one,
-  otherwise at the cursor, the same way a dictation is pasted, so one Ctrl+Z
-  brings back what was there. Your clipboard text is restored once, after the
-  paste, and also when a run is cancelled, fails or hears nothing. A copy you
+- The model labels its text: an **edit** is meant to go into the document (a
+  rewrite, a translation, a drafted text, an inserted value); an **answer** is
+  addressed to you (an explanation, an opinion, facts about the selection),
+  written conversationally in the instruction's language, still plain text.
+- The text reply **opens in the Card** above the pill's check, with an orange
+  **Command** tag and your instruction quoted beside it. Nothing is pasted
+  until you click. Your clipboard text is given back as soon as the reply is
+  in, and also when a run is cancelled, fails or hears nothing; a copy you
   make during the run is kept. Non-text clipboard content (an image) is not
-  restored, as with dictation. The pill then shows the check.
+  restored, as with dictation. The buttons:
+  - With a selection: **Replace**, **Copy**, ✕. Replace is the normal paste
+    over the selection, which is still selected because the Card never takes
+    focus, so one Ctrl+Z brings back what was there and your clipboard is
+    restored after it. There is no check that the focus is still where it
+    was.
+  - With nothing selected: **Paste** (at the cursor), **Copy**, ✕.
+  - With nothing editable in focus (the desktop or the taskbar): **Copy**, ✕.
+  - An edit leads with Replace or Paste, an answer with Copy (the filled
+    button). An edit of a selection keeps the selection's own trailing line
+    break, so Replace does not join the next line.
 - **Tools.** Instead of text, the model may call a tool from Parla's fixed
   allowlist (`src-tauri/src/command_mode/tools.rs`). Tools join it one at a
   time and are never a shell or anything destructive (ADR-0002). Each has a
@@ -366,21 +407,24 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - An empty or silent instruction ends quietly: no LLM call and no row.
 - A network error, a timeout, an API error, a reply cut off by the token cap
   or an empty reply shows the red cross and a "Command mode: …" notification,
-  and nothing is pasted. There is no Retry.
+  and no Card. There is no Retry.
 - **Esc** cancels while you hold, and also after you release, while the
-  instruction is transcribed and the reply is awaited. Nothing is pasted: a
+  instruction is transcribed and the reply is awaited. No Card opens: a
   late reply is discarded. While waiting for the reply the pill goes away at
   once; while transcribing, as soon as the transcription stops.
 - A hold that reaches the 120 s cap fails without asking the LLM; the
   instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
-  `outcome` (`pasted`, `opened`, `failed` or `cancelled`), `llm_model`,
-  `tokens_in` and `tokens_out` (billed whatever the outcome), the `reply`,
+  `outcome` (`shown`, `opened`, `failed` or `cancelled`; `pasted` on rows from
+  before the Card), `llm_model`, `tokens_in` and `tokens_out` (billed whatever
+  the outcome), the `reply` and its `reply_kind` (`edit` or `answer`; not
+  `kind`, which says the row is a command),
   for an `opened` run the `tool` (`open_url`) and the `url`,
   `selection_chars` (the selection's length, 0 for none; its text is never
   kept), `app` (the focused executable), and stage times from key-up
   (`provider_returned` for the transcript, `llm_returned` for the reply,
-  `pasted` or `opened`). A cancel while you are still holding leaves no row.
+  `opened` for a page). The Card's button goes to stderr only (`Parla card:
+  replaced`). A cancel while you are still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
   as usual), and the hold stops after 120 s. Recording starts at key-down, but
@@ -396,19 +440,22 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 #### The command mode eval
 
 `src-tauri/tests/command_eval.rs` is a live eval of the built-in system prompt
-and the tools, text only, never audio. It sends 26 fixed IT/EN instructions
+and the tools, text only, never audio. It sends 31 fixed IT/EN instructions
 (rewrite, correct, shorten, translate both ways, bullets, an injection and
-selections that only mention searching, answers with nothing selected, open a
-page, search) through the real request builder, parser and URL validator,
-3 times at effort `none` and 3 at `low`, taking turns. Each reply is graded:
-the outcome kind (text or `open_url`); for a page, an http(s) address Parla
-would open on a plausible host with the expected terms; for a text, no
-preamble, wrapping quotes, markdown, stray spaces or leaked tags, plus a
-cheap correctness check (the language, words a rewrite must keep, the source
-words a translation must drop, the bullet count). It prints every reply, a
-markdown table per effort (shares, reply time median and p90, tokens and
-cost) and the outcome kinds each effort got wrong. It fails if the default
-effort gets an outcome kind wrong; the text checks only report.
+selections that only mention searching, answers with nothing selected, a
+value to insert, questions about a selection, open a page, search) through
+the real request builder, parser and URL validator, 3 times at effort `none`
+and 3 at `low`, taking turns. Each reply is graded: the outcome kind (text or
+`open_url`); for a page, an http(s) address Parla would open on a plausible
+host with the expected terms; for a text, its `kind` (rewrites, translations,
+drafts and inserted values are edits; questions are answers), no markdown,
+stray spaces or leaked tags, for an edit no preamble or wrapping quotes, plus
+a cheap correctness check (the language, words a rewrite must keep, the
+source words a translation must drop, the bullet count). It prints every
+reply, a markdown table per effort (shares, reply time median and p90, tokens
+and cost) and the outcome and reply kinds each effort got wrong. It fails if
+the default effort gets an outcome kind wrong; the text checks and the reply
+kind only report.
 Re-run it after changing the system prompt (`command_mode/responses.rs`) or
 adding a tool, and read the replies too: the checks are heuristics.
 
@@ -418,7 +465,7 @@ $env:OPENAI_API_KEY = "sk-..."
 cargo test --locked --test command_eval -- --ignored --nocapture
 ```
 
-About 160 calls, 3 minutes and well under a cent. Without the key it skips.
+About 190 calls, 4 minutes and about a cent. Without the key it skips.
 To probe a flaky case, `PARLA_EVAL_CASES=10,17` picks cases by index and
 `PARLA_EVAL_RUNS=10` sets the repeats. Time it only on the machine lock turn
 (see `AGENTS.md`). The grading itself is tested offline by `cargo test`.
@@ -440,6 +487,7 @@ defaults. Example:
   "restore_delay_ms": 250,
   "paste_compatibility_mode": false,
   "auto_send": true,
+  "safety_net": true,
   "local_model": "parakeet-v3",
   "dim_other_audio": true,
   "dim_audio_level": 30,

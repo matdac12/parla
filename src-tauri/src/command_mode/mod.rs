@@ -3,15 +3,18 @@
 //!
 //! The orchestrator owns a run from the confirmed hold to its outcome: reading
 //! the selection (PARLA-64), the empty-instruction rule, the LLM call,
-//! cancellation, the paste, giving the user's clipboard back and the history
-//! row, or running an allowlisted tool instead of the paste (PARLA-65). It
-//! talks to the desktop, the LLM, the browser and history through narrow
+//! cancellation, giving the user's clipboard back, the Card the reply opens
+//! in (PARLA-81) and the history row, or running an allowlisted tool instead
+//! (PARLA-65). It never pastes: the Card's buttons do, on a click (ADR-0003).
+//! It talks to the desktop, the LLM, the browser and history through narrow
 //! ports, so it is tested with fakes and flow.rs supplies the real ones.
 pub mod responses;
 pub mod tools;
 
 pub use crate::inserter::Borrowed;
 use crate::{
+    card::{Action, Card},
+    focus_probe::Verdict,
     provider::ProviderError,
     settings::CommandSettings,
     timing::{self, CommandOutcome, DictationRecord},
@@ -37,10 +40,6 @@ pub trait Desktop {
     /// The focused app's executable name.
     fn foreground_app(&self) -> Option<String>;
     fn wait(&self, delay: Duration);
-    /// Pastes `text` once and gives the user's clipboard back once afterwards:
-    /// `borrowed`'s saved text while the clipboard still holds the copy.
-    /// Returns the instant the paste was injected.
-    fn paste(&self, text: &str, borrowed: Option<&Borrowed>) -> Result<Instant, String>;
     /// Writes the saved text back now, unless the clipboard changed since the copy.
     fn give_back(&self, borrowed: &Borrowed);
 }
@@ -75,6 +74,9 @@ pub struct Run<'a> {
     pub cancelled: &'a AtomicBool,
     /// The hold hit the cap: the instruction is recorded but not sent.
     pub hold_error: Option<String>,
+    /// The editable probe from key-down, with the Safety Net on: it picks
+    /// the Card's buttons.
+    pub focus: Option<&'a crate::focus_probe::Pending>,
 }
 
 /// How long the focused app gets to answer Ctrl+Insert.
@@ -105,8 +107,8 @@ impl Selection {
         }
     }
 
-    /// A run that pastes nothing gives the user's clipboard back: a cancel,
-    /// a failure or a silent instruction.
+    /// Every run gives the user's clipboard back, since none pastes: as soon
+    /// as the reply is in, or on a cancel, a failure or a silent instruction.
     pub fn give_back(mut self, desktop: &dyn Desktop) {
         self.late_copy(desktop);
         if let Some(borrowed) = &self.borrowed {
@@ -174,12 +176,40 @@ pub fn today() -> String {
     String::new()
 }
 
+/// A text reply's kind (ADR-0003): it picks the Card's main button, never
+/// whether Parla pastes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// Text meant to go into the document: Replace or Paste.
+    Edit,
+    /// Text addressed to the user: Copy.
+    Answer,
+}
+
+/// The Card's buttons for a reply, the main one first. With nothing editable
+/// in focus only Copy; otherwise Replace over the selection, or Paste at the
+/// cursor. An edit leads with that, an answer with Copy.
+fn buttons(kind: Kind, selected: bool, verdict: Verdict) -> Vec<Action> {
+    let insert = if selected {
+        Action::Replace
+    } else {
+        Action::Paste
+    };
+    match (verdict, kind) {
+        (Verdict::NotEditable, _) => vec![Action::Copy],
+        (_, Kind::Edit) => vec![insert, Action::Copy],
+        (_, Kind::Answer) => vec![Action::Copy, insert],
+    }
+}
+
 /// What the pill and the notification show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// An empty or silent instruction: nothing shown, no row.
     Silent,
-    Pasted,
+    /// The text reply, in the Card above the pill's check.
+    Shown(Card),
     /// `open_url` opened a page: the pill names its host.
     Opened {
         host: String,
@@ -188,30 +218,11 @@ pub enum Outcome {
     Failed(Failure),
 }
 
-impl Outcome {
-    /// The pill's check or cross; None drops the pill without one.
-    pub fn pill(&self) -> Option<bool> {
-        match self {
-            Outcome::Silent | Outcome::Cancelled => None,
-            Outcome::Pasted | Outcome::Opened { .. } => Some(true),
-            Outcome::Failed(_) => Some(false),
-        }
-    }
-
-    /// What the pill says beside its check.
-    pub fn label(&self) -> Option<String> {
-        match self {
-            Outcome::Opened { host } => Some(format!("Opened {host}")),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     /// The instruction could not be transcribed: the provider's notification.
     Transcription(ProviderError),
-    /// The LLM step or the paste: command mode's notification.
+    /// The LLM step or the tool: command mode's notification.
     Command(ProviderError),
 }
 
@@ -247,10 +258,9 @@ pub fn run(
         }
         Some(Ok(())) => reply_and_act(ports, &run, &mut record, &selection),
     };
-    // A paste gives the clipboard back itself, once.
-    if outcome != Outcome::Pasted {
-        selection.give_back(ports.desktop);
-    }
+    // Before the Card opens: its Replace or Paste saves and restores the
+    // user's clipboard like any paste.
+    selection.give_back(ports.desktop);
     if outcome == Outcome::Silent {
         return outcome;
     }
@@ -259,7 +269,7 @@ pub fn run(
     }
     record.outcome = Some(match outcome {
         Outcome::Silent => unreachable!("a silent run returned above"),
-        Outcome::Pasted => CommandOutcome::Pasted,
+        Outcome::Shown(_) => CommandOutcome::Shown,
         Outcome::Opened { .. } => CommandOutcome::Opened,
         Outcome::Cancelled => CommandOutcome::Cancelled,
         Outcome::Failed(_) => CommandOutcome::Failed,
@@ -268,7 +278,7 @@ pub fn run(
     outcome
 }
 
-/// Asks the LLM, then pastes its text or runs the tool it called.
+/// Asks the LLM, then opens its text in the Card or runs the tool it called.
 fn reply_and_act(
     ports: &Ports,
     run: &Run,
@@ -305,32 +315,31 @@ fn reply_and_act(
     if let Some(call) = &reply.call {
         return run_tool(ports, run, record, call);
     }
-    if reply.text.trim().is_empty() {
-        return Outcome::Failed(Failure::Command(ProviderError::Other(
-            "the reply was empty.".into(),
-        )));
-    }
-    // The reply's end comes trimmed; a selection's own trailing line break
-    // (a triple-clicked paragraph) stays, or the next line would join it.
-    let text = match &selection.text {
-        Some(selected) => reply.text + &selected[selected.trim_end().len()..],
-        None => reply.text,
-    };
-    // Over the selection, which is still selected, or at the cursor.
-    let pasted = ports.desktop.paste(&text, selection.borrowed.as_ref());
-    record.reply = Some(text);
-    match pasted {
-        Ok(at) => {
-            record.pasted = Some(timing::offset_ms(run.key_up, at));
-            Outcome::Pasted
+    let kind = match reply.kind {
+        Some(kind) if !reply.text.trim().is_empty() => kind,
+        _ => {
+            return Outcome::Failed(Failure::Command(ProviderError::Other(
+                "the reply was empty.".into(),
+            )))
         }
-        Err(error) => Outcome::Failed(Failure::Command(ProviderError::Other(format!(
-            "could not paste the reply ({error})."
-        )))),
-    }
+    };
+    // The reply's end comes trimmed; an edit keeps a selection's own trailing
+    // line break (a triple-clicked paragraph), or Replace would join the next
+    // line to it.
+    let text = match (&selection.text, kind) {
+        (Some(selected), Kind::Edit) => reply.text + &selected[selected.trim_end().len()..],
+        _ => reply.text,
+    };
+    let actions = crate::focus_probe::around_paste(run.focus, "command", |verdict| {
+        buttons(kind, selection.text.is_some(), verdict)
+    });
+    let card = Card::command(record.text.trim().to_owned(), text.clone(), actions);
+    record.reply = Some(text);
+    record.reply_kind = Some(kind);
+    Outcome::Shown(card)
 }
 
-/// A tool call instead of a paste. Nothing goes back to the model.
+/// A tool call instead of a text reply. Nothing goes back to the model.
 fn run_tool(
     ports: &Ports,
     run: &Run,
@@ -360,10 +369,39 @@ fn run_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::card::Tag;
+    use crate::focus_probe::test_support::{answered, probe_on};
     use std::{
         cell::{Cell, RefCell},
+        sync::mpsc,
         time::SystemTime,
     };
+
+    #[test]
+    fn the_buttons_follow_the_kind_the_selection_and_the_probe() {
+        use Action::{Copy, Paste, Replace};
+        use Kind::{Answer, Edit};
+        use Verdict::{Editable, NotEditable, Unknown};
+        let cases = [
+            // An edit's main button puts it in the document.
+            (Edit, true, Unknown, vec![Replace, Copy]),
+            (Edit, true, Editable, vec![Replace, Copy]),
+            (Edit, false, Unknown, vec![Paste, Copy]),
+            // An answer's is Copy; Replace or Paste stays on offer.
+            (Answer, true, Unknown, vec![Copy, Replace]),
+            (Answer, false, Editable, vec![Copy, Paste]),
+            // Nothing editable: Copy only, whatever the kind.
+            (Edit, true, NotEditable, vec![Copy]),
+            (Answer, false, NotEditable, vec![Copy]),
+        ];
+        for (kind, selected, verdict, want) in cases {
+            assert_eq!(
+                buttons(kind, selected, verdict),
+                want,
+                "{kind:?}, selected {selected}, {verdict:?}"
+            );
+        }
+    }
 
     /// A focused app and its clipboard. Ctrl+Insert copies `selected` (None:
     /// the app copies nothing) after `copy_lag` polls.
@@ -378,10 +416,9 @@ mod tests {
         app: Option<String>,
         copies: Cell<usize>,
         waited: Cell<Duration>,
-        /// Every clipboard write by Parla: pastes and restores.
+        /// Every clipboard write by Parla: only the give-back, since a run
+        /// never pastes.
         writes: RefCell<Vec<String>>,
-        pasted: RefCell<Vec<String>>,
-        fail_paste: bool,
     }
     impl FakeDesktop {
         fn new(clipboard: Option<&str>) -> Self {
@@ -397,8 +434,6 @@ mod tests {
                 copies: Cell::new(0),
                 waited: Cell::new(Duration::ZERO),
                 writes: RefCell::default(),
-                pasted: RefCell::default(),
-                fail_paste: false,
             }
         }
         fn write(&self, text: &str) {
@@ -440,24 +475,6 @@ mod tests {
                 Some(left) => self.copy_due.set(Some(left - 1)),
                 None => {}
             }
-        }
-        /// The inserter's contract: the clipboard is the reply while pasting,
-        /// then the user's text once the restore delay passes.
-        fn paste(&self, text: &str, borrowed: Option<&Borrowed>) -> Result<Instant, String> {
-            if self.fail_paste {
-                return Err("clipboard unavailable".into());
-            }
-            let current = self.clipboard.borrow().clone();
-            let owed = match borrowed {
-                Some(borrowed) if current == borrowed.copied => borrowed.saved.clone(),
-                _ => current,
-            };
-            self.write(text);
-            self.pasted.borrow_mut().push(text.into());
-            if let Some(owed) = owed {
-                self.write(&owed);
-            }
-            Ok(Instant::now())
         }
         fn give_back(&self, borrowed: &Borrowed) {
             if *self.clipboard.borrow() == borrowed.copied {
@@ -520,10 +537,26 @@ mod tests {
     fn text(reply: &str) -> Result<Reply, ProviderError> {
         Ok(Reply {
             text: reply.into(),
+            kind: Some(Kind::Edit),
             call: None,
             tokens_in: Some(92),
             tokens_out: Some(18),
         })
+    }
+
+    fn answer(reply: &str) -> Result<Reply, ProviderError> {
+        text(reply).map(|reply| Reply {
+            kind: Some(Kind::Answer),
+            ..reply
+        })
+    }
+
+    /// The Card a run opened; panics on any other outcome.
+    fn card(outcome: Outcome) -> Card {
+        match outcome {
+            Outcome::Shown(card) => card,
+            other => panic!("no Card: {other:?}"),
+        }
     }
 
     struct Harness {
@@ -535,6 +568,7 @@ mod tests {
         settings: CommandSettings,
         /// Polls that pass between the selection read and key-up.
         speaking: usize,
+        focus: Option<crate::focus_probe::Pending>,
     }
     impl Harness {
         fn new(reply: Result<Reply, ProviderError>) -> Self {
@@ -546,6 +580,7 @@ mod tests {
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
                 speaking: 0,
+                focus: None,
             }
         }
         fn run_with(
@@ -565,6 +600,7 @@ mod tests {
                 date: "2026-10-17".into(),
                 cancelled: &self.cancelled,
                 hold_error,
+                focus: self.focus.as_ref(),
             };
             // Read at the confirmed hold, before the instruction is in.
             let selection = read_selection(&self.desktop);
@@ -594,16 +630,35 @@ mod tests {
         fn rows(&self) -> Vec<DictationRecord> {
             self.history.0.borrow().clone()
         }
-        fn pasted(&self) -> Vec<String> {
-            self.desktop.pasted.borrow().clone()
-        }
     }
 
     #[test]
-    fn the_reply_is_pasted_once_and_the_clipboard_restored() {
+    fn a_reply_opens_the_card_without_waiting_for_a_slow_probe() {
+        // The desktop, but still probing when the reply is in.
+        let (open, gate) = mpsc::channel();
+        let worker = probe_on("Progman", gate);
+        let mut h = Harness::new(text("Buongiorno"));
+        h.focus = Some(worker.start());
+        let started = Instant::now();
+        let card = card(h.run("Scrivi un saluto"));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // Not answered yet: Unknown, which counts as editable.
+        assert_eq!(card.actions, [Action::Paste, Action::Copy]);
+        open.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_reply_opens_in_the_card_and_its_row_is_shown() {
         let h = Harness::new(text("Ciao a tutti, buona giornata!"));
-        assert_eq!(h.run("Scrivi un saluto breve"), Outcome::Pasted);
-        assert_eq!(h.pasted(), ["Ciao a tutti, buona giornata!"]);
+        let card = card(h.run("Scrivi un saluto breve"));
+        assert_eq!(card.tag, Tag::Command);
+        assert_eq!(card.header.as_deref(), Some("Scrivi un saluto breve"));
+        assert_eq!(card.text, "Ciao a tutti, buona giornata!");
+        // An edit with nothing selected: Paste at the cursor leads.
+        assert_eq!(card.actions, [Action::Paste, Action::Copy]);
+        assert_eq!(card.primary, Action::Paste);
+        // Never pasted, and the clipboard was never touched.
+        assert!(h.writes().is_empty());
         assert_eq!(h.desktop.clipboard.borrow().as_deref(), Some("user copy"));
         assert_eq!(
             *h.llm.requests.borrow(),
@@ -621,25 +676,92 @@ mod tests {
         };
         assert_eq!(row.kind, "command");
         assert_eq!(row.text, "Scrivi un saluto breve");
-        assert_eq!(row.outcome, Some(CommandOutcome::Pasted));
+        assert_eq!(row.outcome, Some(CommandOutcome::Shown));
+        assert_eq!(row.reply_kind, Some(Kind::Edit));
         assert_eq!(row.llm_model.as_deref(), Some("gpt-6-luna"));
         assert_eq!((row.tokens_in, row.tokens_out), (Some(92), Some(18)));
         assert_eq!(row.reply.as_deref(), Some("Ciao a tutti, buona giornata!"));
-        assert!(row.error.is_none());
-        // Stage offsets from key-up, in order: transcribed, LLM reply, pasted.
-        let (transcribed, replied, pasted) = (
-            row.provider_returned.unwrap(),
-            row.llm_returned.unwrap(),
-            row.pasted.unwrap(),
+        assert!(row.error.is_none() && row.pasted.is_none());
+        // Stage offsets from key-up, in order: transcribed, LLM reply.
+        assert!(row.provider_returned.unwrap() <= row.llm_returned.unwrap());
+        let json = serde_json::to_value(row).unwrap();
+        assert_eq!(json["outcome"], "shown");
+        assert_eq!(json["reply_kind"], "edit");
+        assert_eq!(json["kind"], "command");
+    }
+
+    #[test]
+    fn an_edit_over_a_selection_offers_replace_first_and_gives_the_clipboard_back() {
+        let h = Harness::selecting(
+            text("Ciao Giulia, grazie di cuore!"),
+            "Gentile Giulia, grazie.",
         );
-        assert!(transcribed <= replied && replied <= pasted);
+        let card = card(h.run("Rendilo più personale"));
+        assert_eq!(card.actions, [Action::Replace, Action::Copy]);
+        assert_eq!(card.primary, Action::Replace);
+        assert_eq!(card.text, "Ciao Giulia, grazie di cuore!");
+        // The copy borrowed the clipboard: the user's text is back before the
+        // Card opens, so Replace saves and restores it like any paste.
+        assert_eq!(h.writes(), ["user copy"]);
+        assert_eq!(h.clipboard().as_deref(), Some("user copy"));
+    }
+
+    #[test]
+    fn an_answer_leads_with_copy_and_keeps_replace_or_paste_on_offer() {
+        let h = Harness::selecting(
+            answer("Vuol dire che il foro competente è quello di Milano."),
+            "Art. 13 — Foro competente: Milano.",
+        );
+        let explained = card(h.run("Cosa significa questa clausola?"));
+        assert_eq!(explained.primary, Action::Copy);
+        assert_eq!(explained.actions, [Action::Copy, Action::Replace]);
+        assert_eq!(h.rows()[0].reply_kind, Some(Kind::Answer));
+        let h = Harness::new(answer("Canberra."));
+        let capital = card(h.run("What's the capital of Australia?"));
+        assert_eq!(capital.actions, [Action::Copy, Action::Paste]);
+    }
+
+    #[test]
+    fn with_nothing_editable_in_focus_the_card_offers_copy_only() {
+        for reply in [text("Buongiorno a tutti."), answer("È una clausola.")] {
+            let mut h = Harness::selecting(reply, "ciao a tutti");
+            let (open, gate) = mpsc::channel();
+            let worker = probe_on("Progman", gate);
+            let focus = worker.start();
+            open.send(()).unwrap();
+            answered(&focus);
+            h.focus = Some(focus);
+            let card = card(h.run("Rendilo più formale"));
+            assert_eq!(card.actions, [Action::Copy]);
+            assert_eq!(card.primary, Action::Copy);
+            assert_eq!(h.writes(), ["user copy"]);
+        }
+    }
+
+    #[test]
+    fn no_reply_is_ever_pasted() {
+        // Every kind, with and without a selection: the only clipboard write
+        // is the give-back of a borrowed clipboard, never the reply.
+        for reply in [text("Hello"), answer("It means hello.")] {
+            for selected in [None, Some("ciao")] {
+                let mut h = Harness::new(reply.clone());
+                h.desktop.selected = selected.map(Into::into);
+                assert!(matches!(h.run("Traduci"), Outcome::Shown(_)));
+                let owed: &[&str] = if selected.is_some() {
+                    &["user copy"]
+                } else {
+                    &[]
+                };
+                assert_eq!(h.writes(), owed, "{selected:?}");
+            }
+        }
     }
 
     #[test]
     fn a_blank_model_setting_asks_the_default_model() {
         let mut h = Harness::new(text("Ciao"));
         h.settings.model = "  ".into();
-        assert_eq!(h.run("Scrivi"), Outcome::Pasted);
+        assert!(matches!(h.run("Scrivi"), Outcome::Shown(_)));
         assert_eq!(h.llm.requests.borrow()[0].model, "gpt-6-luna");
         assert_eq!(h.rows()[0].llm_model.as_deref(), Some("gpt-6-luna"));
     }
@@ -650,12 +772,11 @@ mod tests {
         assert_eq!(h.run_with(None, None), Outcome::Silent);
         assert!(h.llm.requests.borrow().is_empty());
         assert!(h.rows().is_empty());
-        assert!(h.pasted().is_empty());
         assert_eq!(h.desktop.clipboard.borrow().as_deref(), Some("user copy"));
     }
 
     #[test]
-    fn a_timeout_or_an_api_error_fails_with_nothing_pasted() {
+    fn a_timeout_or_an_api_error_fails_with_no_card() {
         for error in [
             ProviderError::Timeout,
             ProviderError::Http {
@@ -670,7 +791,6 @@ mod tests {
                 h.run("Scrivi un saluto"),
                 Outcome::Failed(Failure::Command(error.clone()))
             );
-            assert!(h.pasted().is_empty(), "{error:?}");
             let [row] = &h.rows()[..] else {
                 panic!("one row")
             };
@@ -688,10 +808,10 @@ mod tests {
             h.run("Scrivi un saluto"),
             Outcome::Failed(Failure::Command(_))
         ));
-        assert!(h.pasted().is_empty());
         let row = &h.rows()[0];
         assert_eq!(row.outcome, Some(CommandOutcome::Failed));
         assert_eq!(row.tokens_out, Some(18));
+        assert!(row.reply.is_none() && row.reply_kind.is_none());
     }
 
     #[test]
@@ -699,7 +819,6 @@ mod tests {
         let mut h = Harness::new(text("too late"));
         h.llm.late = true;
         assert_eq!(h.run("Scrivi un saluto"), Outcome::Cancelled);
-        assert!(h.pasted().is_empty());
         let [row] = &h.rows()[..] else {
             panic!("one row")
         };
@@ -745,19 +864,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_failed_paste_fails_and_keeps_the_reply() {
-        let mut h = Harness::new(text("Ciao"));
-        h.desktop.fail_paste = true;
-        assert!(matches!(
-            h.run("Scrivi"),
-            Outcome::Failed(Failure::Command(_))
-        ));
-        let row = &h.rows()[0];
-        assert_eq!(row.reply.as_deref(), Some("Ciao"));
-        assert!(row.pasted.is_none());
-    }
-
     impl Harness {
         fn selecting(reply: Result<Reply, ProviderError>, selected: &str) -> Self {
             let mut h = Self::new(reply);
@@ -773,18 +879,16 @@ mod tests {
     }
 
     #[test]
-    fn a_selection_is_sent_as_data_and_the_reply_replaces_it() {
+    fn a_selection_is_sent_as_data_and_never_kept() {
         let h = Harness::selecting(text("Buongiorno a tutti."), "ciao a tutti");
-        assert_eq!(h.run("Rendilo più formale"), Outcome::Pasted);
+        assert!(matches!(h.run("Rendilo più formale"), Outcome::Shown(_)));
         let request = &h.llm.requests.borrow()[0];
         assert_eq!(request.selection.as_deref(), Some("ciao a tutti"));
         assert_eq!(request.app.as_deref(), Some("notepad.exe"));
         assert_eq!(request.date, "2026-10-17");
-        // Copied with Ctrl+Insert, then one paste over the still-selected text.
+        // Copied with Ctrl+Insert; the user's clipboard comes back once.
         assert_eq!(h.desktop.copies.get(), 1);
-        assert_eq!(h.pasted(), ["Buongiorno a tutti."]);
-        // The user's clipboard comes back once, after the paste, not the selection.
-        assert_eq!(h.writes(), ["Buongiorno a tutti.", "user copy"]);
+        assert_eq!(h.writes(), ["user copy"]);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
         let row = &h.rows()[0];
         assert_eq!(row.selection_chars, Some(12));
@@ -797,26 +901,32 @@ mod tests {
     }
 
     #[test]
-    fn a_selected_paragraph_keeps_its_trailing_line_break() {
-        // The parser trims the reply's end; the selection's own end comes back.
+    fn an_edit_of_a_selected_paragraph_keeps_its_trailing_line_break() {
+        // The parser trims the reply's end; the selection's own end comes
+        // back, so Replace does not join the next line.
         let h = Harness::selecting(text("Buongiorno a tutti."), "ciao a tutti\r\n");
-        assert_eq!(h.run("Rendilo più formale"), Outcome::Pasted);
-        assert_eq!(h.pasted(), ["Buongiorno a tutti.\r\n"]);
+        assert_eq!(
+            card(h.run("Rendilo più formale")).text,
+            "Buongiorno a tutti.\r\n"
+        );
         assert_eq!(
             h.rows()[0].reply.as_deref(),
             Some("Buongiorno a tutti.\r\n")
         );
+        // An answer is about the selection, not in its place.
+        let h = Harness::selecting(answer("Un saluto."), "ciao a tutti\r\n");
+        assert_eq!(card(h.run("Cos'è?")).text, "Un saluto.");
     }
 
     #[test]
-    fn with_nothing_selected_the_reply_goes_in_at_the_cursor() {
+    fn with_nothing_selected_the_card_offers_paste_at_the_cursor() {
         let h = Harness::new(text("Ciao!"));
-        assert_eq!(h.run("Scrivi un saluto"), Outcome::Pasted);
+        assert_eq!(card(h.run("Scrivi un saluto")).primary, Action::Paste);
         assert_eq!(h.llm.requests.borrow()[0].selection, None);
         assert_eq!(h.desktop.copies.get(), 1);
         // The copy got the whole wait, and the clipboard was never borrowed.
         assert_eq!(h.desktop.waited.get(), COPY_WAIT);
-        assert_eq!(h.pasted(), ["Ciao!"]);
+        assert!(h.writes().is_empty());
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
         let row = &h.rows()[0];
         assert_eq!(row.selection_chars, Some(0));
@@ -841,12 +951,12 @@ mod tests {
         h.desktop.copy_lag = polls + 3;
         // The user keeps speaking past the wait; the slow app's copy lands.
         h.speaking = 3;
-        assert_eq!(h.run("Traduci"), Outcome::Pasted);
+        assert_eq!(card(h.run("Traduci")).primary, Action::Replace);
         assert_eq!(
             h.llm.requests.borrow()[0].selection.as_deref(),
             Some("ciao")
         );
-        assert_eq!(h.writes(), ["Hello", "user copy"]);
+        assert_eq!(h.writes(), ["user copy"]);
         // A cancel gives the user's clipboard back over the late copy too.
         let mut h = Harness::selecting(text("Hello"), "ciao");
         h.desktop.copy_lag = polls + 3;
@@ -860,18 +970,18 @@ mod tests {
     fn vs_codes_empty_selection_line_copy_counts_as_no_selection() {
         let mut h = Harness::selecting(text("// hello"), "    let x = 1;\r\n");
         h.desktop.vscode_line = true;
-        assert_eq!(h.run("Scrivi un commento"), Outcome::Pasted);
+        assert_eq!(card(h.run("Scrivi un commento")).primary, Action::Paste);
         assert_eq!(h.llm.requests.borrow()[0].selection, None);
         assert_eq!(h.rows()[0].selection_chars, Some(0));
         // VS Code still overwrote the clipboard with the line: it is given back.
-        assert_eq!(h.writes(), ["// hello", "user copy"]);
+        assert_eq!(h.writes(), ["user copy"]);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
     }
 
     #[test]
     fn an_empty_copy_counts_as_no_selection() {
         let h = Harness::selecting(text("Hi"), "");
-        assert_eq!(h.run("Saluta"), Outcome::Pasted);
+        assert_eq!(card(h.run("Saluta")).primary, Action::Paste);
         assert_eq!(h.llm.requests.borrow()[0].selection, None);
         assert_eq!(h.clipboard().as_deref(), Some("user copy"));
     }
@@ -889,17 +999,13 @@ mod tests {
     #[test]
     fn cancelled_failed_and_silent_runs_give_the_clipboard_back_once() {
         type Setup = fn(&mut Harness) -> Option<Result<&'static str, ProviderError>>;
-        let cases: [(&str, Setup); 5] = [
+        let cases: [(&str, Setup); 4] = [
             ("esc while waiting", |h| {
                 h.llm.late = true;
                 Some(Ok("Traduci"))
             }),
             ("api error", |h| {
                 h.llm.reply = Err(ProviderError::Timeout);
-                Some(Ok("Traduci"))
-            }),
-            ("failed paste", |h| {
-                h.desktop.fail_paste = true;
                 Some(Ok("Traduci"))
             }),
             ("failed transcription", |_| {
@@ -910,8 +1016,8 @@ mod tests {
         for (case, setup) in cases {
             let mut h = Harness::selecting(text("Hello"), "ciao");
             let transcript = setup(&mut h);
-            assert_ne!(h.run_with(None, transcript), Outcome::Pasted, "{case}");
-            assert!(h.pasted().is_empty(), "{case}");
+            let outcome = h.run_with(None, transcript);
+            assert!(!matches!(outcome, Outcome::Shown(_)), "{case}");
             assert_eq!(h.writes(), ["user copy"], "{case}");
         }
         // Esc while still holding: the run never starts, flow gives it back.
@@ -941,6 +1047,7 @@ mod tests {
     fn tool(name: &str, url: &str) -> Result<Reply, ProviderError> {
         Ok(Reply {
             text: String::new(),
+            kind: None,
             call: Some(responses::ToolCall {
                 name: name.into(),
                 arguments: serde_json::json!({ "url": url }).to_string(),
@@ -957,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn open_url_opens_the_page_pastes_nothing_and_gives_the_clipboard_back() {
+    fn open_url_opens_the_page_with_no_card_and_gives_the_clipboard_back() {
         let h = Harness::selecting(
             tool("open_url", "https://it.wikipedia.org/wiki/Roma"),
             "ciao",
@@ -969,11 +1076,7 @@ mod tests {
                 host: "it.wikipedia.org".into()
             }
         );
-        // The pill: the check, with the host beside it.
-        assert_eq!(outcome.pill(), Some(true));
-        assert_eq!(outcome.label().as_deref(), Some("Opened it.wikipedia.org"));
         assert_eq!(h.opened(), ["https://it.wikipedia.org/wiki/Roma"]);
-        assert!(h.pasted().is_empty());
         // The copy borrowed the clipboard; the user's text comes back once.
         assert_eq!(h.writes(), ["user copy"]);
         assert_eq!(h.llm.requests.borrow().len(), 1, "a single round trip");
@@ -988,6 +1091,7 @@ mod tests {
         );
         assert_eq!((row.tokens_in, row.tokens_out), (Some(295), Some(25)));
         assert!(row.error.is_none() && row.reply.is_none() && row.pasted.is_none());
+        assert!(row.reply_kind.is_none());
         assert!(row.llm_returned.unwrap() <= row.opened.unwrap());
         let json = serde_json::to_value(row).unwrap();
         assert_eq!(json["outcome"], "opened");
@@ -1007,7 +1111,7 @@ mod tests {
                 matches!(h.run("Apri"), Outcome::Failed(Failure::Command(_))),
                 "{url}"
             );
-            assert!(h.opened().is_empty() && h.pasted().is_empty(), "{url}");
+            assert!(h.opened().is_empty(), "{url}");
             assert_eq!(h.writes(), ["user copy"], "{url}");
             let row = &h.rows()[0];
             assert_eq!(row.outcome, Some(CommandOutcome::Failed));
@@ -1023,7 +1127,7 @@ mod tests {
             h.run("Apri"),
             Outcome::Failed(Failure::Command(_))
         ));
-        assert!(h.opened().is_empty() && h.pasted().is_empty());
+        assert!(h.opened().is_empty());
         let row = &h.rows()[0];
         assert_eq!(row.outcome, Some(CommandOutcome::Failed));
         assert!(row.error.as_deref().unwrap().contains("unknown tool"));

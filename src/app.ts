@@ -185,6 +185,8 @@ function commandOutcome(record: DictationRecord): string {
   switch (record.outcome) {
     case "pasted":
       return "Reply pasted";
+    case "shown":
+      return record.reply_kind === "answer" ? "Answer shown in the Card" : "Edit shown in the Card";
     case "opened": {
       try {
         return `Opened ${new URL(record.url ?? "").host}`;
@@ -208,6 +210,8 @@ function rowParts(record: DictationRecord): { text: string; meta: HTMLDivElement
   if (!isCommand(record)) {
     const parts = [providerName(record.provider_id), seconds(record.audio_ms)];
     if (ok) parts.push(`${number.format(wordCount(record.text))} words`);
+    // Caught by the Safety Net: nothing was pasted (PARLA-80).
+    if (record.outcome === "shown") parts.push("Not pasted, shown in the Card");
     meta.textContent = parts.join(" · ");
     return { text: ok ? record.text : `Failed: ${record.error}`, meta, copy: ok ? record.text : undefined };
   }
