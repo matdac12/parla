@@ -152,7 +152,16 @@ The Card is fed two ways:
 - A second probe at key-up for focus changes during the hold.
 - A per-app allow or deny list for the probe. Add one only if the logs show recurring false negatives.
 
-## Open Questions
+## Settled after the session (Mattia accepted the recommendations)
 
-- **The Card action in history:** history is append-only, so the action is only logged. If Mattia wants "replaced vs dismissed" visible in the main window, the row has to be written when the Card closes, or support an update.
-- **Multi-monitor:** the Card follows the pill to the primary monitor. Mattia hasn't asked for it to follow the focused window's monitor.
+- **The Card action in history:** history stays append-only. The action (replaced, pasted, copied, dismissed) is written to the log only.
+- **Multi-monitor:** the Card follows the pill to the primary monitor.
+- **The Safety Net toggle** is in Settings only, not in the flyout.
+- **The Card never fires auto-send.**
+
+## Tickets
+
+Sub-issues of PARLA-54, each blocked by the one before:
+- PARLA-79: the editable probe, logged, behind a setting.
+- PARLA-80: the Card, and the Safety Net for dictation.
+- PARLA-81: command replies open in the Card.
