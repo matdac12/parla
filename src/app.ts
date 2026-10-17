@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./app.css";
-import { clock, el, fullDate, must, providerName, reconcile, seconds, type DictationRecord } from "./records";
+import { clock, combo, copyButton, el, fullDate, must, parseShortcut, providerName, reconcile, seconds, type DictationRecord } from "./records";
 // The settings pages live in this window; importing wires their form.
 import { onApplied } from "./settings";
 import { renderTimings } from "./timings";
@@ -116,22 +116,9 @@ function showStats(stats: Stats): void {
     : `≈ ${formatCost((stats.cost_usd / used) * 365)}/yr vs $${WISPR_FLOW_PER_YEAR} Wispr Flow`;
 }
 
-const MODIFIERS = new Set(["ctrl", "control", "alt", "option", "shift", "super", "meta", "cmd", "command", "cmdorctrl", "commandorcontrol"]);
-
-function combo(keys: string[]): Node[] {
-  return keys.flatMap((key, index) => {
-    const label = key.replace(/^Key(?=[A-Z]$)/, "").replace(/^Digit(?=\d$)/, "");
-    const kbd = el("kbd", undefined, label);
-    return index === 0 ? [kbd] : [el("span", "plus", "+"), kbd];
-  });
-}
-
-/** Mirrors hotkey.rs: two or more modifiers make holding them push-to-talk and
- *  tapping the full shortcut lock hands-free; otherwise it is tap on, tap off. */
 function showShortcut(hotkey: string): void {
-  const keys = hotkey.split("+").map((key) => key.trim()).filter(Boolean);
-  const modifiers = keys.filter((key) => MODIFIERS.has(key.toLowerCase()));
-  const rows: [string, ...(string | Node[])[]][] = modifiers.length >= 2
+  const { keys, modifiers, hold } = parseShortcut(hotkey);
+  const rows: [string, ...(string | Node[])[]][] = hold
     ? [
         ["Push to talk", "Hold ", combo(modifiers)],
         ["Hands-free", "Tap ", combo(keys), [el("span", "muted", " · "), ...combo(modifiers), el("span", "muted", " stops")]],
@@ -171,23 +158,6 @@ function dayLabel(day: number, today: number): string {
   return (sameYear ? dayFormat : dayYearFormat).format(day);
 }
 
-async function copyText(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Fallback for contexts where the async clipboard API is unavailable.
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    if (!ok) throw new Error("copy failed");
-  }
-}
-
 /** Retries the saved clip into history (nothing is pasted: Parla has focus). */
 function wireRetry(button: HTMLButtonElement): void {
   button.addEventListener("click", () => {
@@ -201,30 +171,6 @@ function wireRetry(button: HTMLButtonElement): void {
       },
     );
   });
-}
-
-function copyButton(text: string): HTMLButtonElement {
-  const button = el("button", "small", "Copy");
-  button.type = "button";
-  button.setAttribute("aria-label", "Copy transcript");
-  let timer: number | undefined;
-  button.addEventListener("click", () => {
-    void copyText(text).then(
-      () => {
-        button.textContent = "Copied";
-        button.classList.add("copied");
-        window.clearTimeout(timer);
-        timer = window.setTimeout(() => {
-          button.textContent = "Copy";
-          button.classList.remove("copied");
-        }, 1400);
-      },
-      () => {
-        button.textContent = "Failed";
-      },
-    );
-  });
-  return button;
 }
 
 /** `today` is set on Home, where rows are not grouped by day: older rows

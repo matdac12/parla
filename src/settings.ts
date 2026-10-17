@@ -2,27 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./settings.css";
-
-interface Settings {
-  active_provider: string;
-  hotkey: string;
-  restore_delay_ms: number;
-  paste_compatibility_mode: boolean;
-  streaming_enabled: boolean;
-  live_captions: boolean;
-  vocabulary: string[];
-  local_model: string;
-  dim_other_audio: boolean;
-  dim_audio_level: number;
-  providers: Record<string, Record<string, unknown>>;
-}
-
-interface ProviderInfo {
-  id: string;
-  display_name: string;
-  available: boolean;
-  reason: string | null;
-}
+import { engineStatus, type LocalModelStatus, type ProviderInfo, type Settings } from "./records";
 
 interface SaveResult {
   warning: string | null;
@@ -147,17 +127,7 @@ export function onApplied(listener: (applied: Applied) => void): void {
 function notifyApplied(): void {
   if (!appliedListener || state.baseline === "") return;
   const saved: Settings = JSON.parse(state.baseline);
-  const provider = state.providers.find((p) => p.id === saved.active_provider);
-  const model = models.find((m) => m.id === saved.local_model);
-  const engine = saved.active_provider === "parakeet" && model
-    ? model.name
-    : provider?.display_name ?? saved.active_provider;
-  appliedListener({
-    hotkey: saved.hotkey,
-    engine,
-    ready: provider?.available ?? false,
-    reason: provider ? provider.reason : "Provider not registered",
-  });
+  appliedListener({ hotkey: saved.hotkey, ...engineStatus(saved, state.providers, models) });
 }
 
 function textEl(tag: string, text: string, className?: string): HTMLElement {
@@ -338,17 +308,6 @@ function buildField(providerId: string, spec: FieldSpec): HTMLElement {
     wrapper.append(textEl("p", `${spec.envHint} overrides this value at request time.`, "hint"));
   }
   return wrapper;
-}
-
-/** Shape of `list_models` (PARLA-37): one entry per local Parakeet export. */
-interface LocalModelStatus {
-  id: string;
-  name: string;
-  size: number;
-  model_dir: string;
-  available: boolean;
-  downloading: boolean;
-  selected: boolean;
 }
 
 interface ParakeetUi {
@@ -700,6 +659,37 @@ function discard(): void {
   updateDirty();
 }
 
+/** Another window (the tray flyout) saved settings: take every field this form
+ *  has not touched, keep the unsaved edits, and rebase on what was saved. */
+async function onSettingsChanged(): Promise<void> {
+  if (!state.settings || state.baseline === "") return;
+  let saved: Settings;
+  try {
+    saved = await invoke<Settings>("get_settings");
+  } catch {
+    return;
+  }
+  const form = state.settings as unknown as Record<string, unknown>;
+  const baseline = JSON.parse(state.baseline) as Record<string, unknown>;
+  const touched = new Set(Object.keys(form).filter((key) => JSON.stringify(form[key]) !== JSON.stringify(baseline[key])));
+  for (const [key, value] of Object.entries(saved)) {
+    if (!touched.has(key)) form[key] = value;
+  }
+  state.baseline = JSON.stringify(saved);
+  // Text being edited keeps what was typed (spaces, blank lines), not its parsed value.
+  const texts = [[els.hotkey, "hotkey"], [els.delay, "restore_delay_ms"], [els.vocabulary, "vocabulary"]] as const;
+  const typed = texts.map(([input]) => input.value);
+  fillForm(state.settings);
+  texts.forEach(([input, key], index) => {
+    if (touched.has(key)) input.value = typed[index];
+  });
+  if (!touched.has("providers")) for (const sync of fieldSyncs) sync();
+  renderProviderRadios();
+  updateDirty();
+  await refreshProviders();
+  await refreshParakeetStatus?.();
+}
+
 function fillForm(settings: Settings): void {
   els.hotkey.value = settings.hotkey;
   els.delay.value = String(settings.restore_delay_ms);
@@ -782,6 +772,7 @@ async function main(): Promise<void> {
     state.baseline = JSON.stringify(settings);
     updateDirty();
     notifyApplied();
+    void listen("settings://changed", () => void onSettingsChanged());
   } catch (error) {
     els.loadError.hidden = false;
     els.loadError.textContent = `Could not load settings: ${String(error)}`;

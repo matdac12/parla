@@ -3,31 +3,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { clock, el, must, providerName, type DictationRecord } from "./records";
+import {
+  clock, combo, copyButton, el, engineStatus, must, parseShortcut, providerName,
+  type DictationRecord, type LocalModelStatus, type ProviderInfo, type Settings,
+} from "./records";
 import "./theme.css";
 import "./flyout.css";
 
 type Toggle = "live_captions" | "dim_other_audio" | "streaming_enabled";
-
-/** Only the fields the flyout reads; saves send back the whole object. */
-interface Settings extends Record<Toggle, boolean> {
-  active_provider: string;
-  hotkey: string;
-  local_model: string;
-  dim_audio_level: number;
-}
-
-interface ProviderInfo {
-  id: string;
-  display_name: string;
-  available: boolean;
-  reason: string | null;
-}
-
-interface LocalModel {
-  id: string;
-  name: string;
-}
 
 const SHOWN = 4;
 
@@ -44,35 +27,21 @@ const tiles = [...document.querySelectorAll<HTMLButtonElement>("[data-toggle]")]
 
 let settings: Settings | null = null;
 let providers: ProviderInfo[] = [];
-let models: LocalModel[] = [];
+let models: LocalModelStatus[] = [];
 let busy = false;
 
-const MODIFIERS = new Set(["ctrl", "control", "alt", "option", "shift", "super", "meta", "cmd", "command", "cmdorctrl", "commandorcontrol"]);
-
-/** Same rule and key names as the Home page (hotkey.rs): with two or more
- *  modifiers, holding them is push-to-talk; otherwise the shortcut toggles. */
+/** The Home page's push-to-talk keys, or the toggle shortcut. */
 function showHotkey(shortcut: string): void {
-  const keys = shortcut.split("+").map((key) => key.trim()).filter(Boolean);
-  const modifiers = keys.filter((key) => MODIFIERS.has(key.toLowerCase()));
-  const hold = modifiers.length >= 2;
-  const shown = (hold ? modifiers : keys).flatMap((key, index) => {
-    const kbd = el("kbd", undefined, key.replace(/^Key(?=[A-Z]$)/, "").replace(/^Digit(?=\d$)/, ""));
-    return index === 0 ? [kbd] : [el("span", "plus", "+"), kbd];
-  });
-  hotkey.replaceChildren(hold ? "Hold " : "Tap ", ...shown);
+  const { keys, modifiers, hold } = parseShortcut(shortcut);
+  hotkey.replaceChildren(hold ? "Hold " : "Tap ", ...combo(hold ? modifiers : keys));
 }
 
 function renderControls(): void {
   if (settings === null) return;
-  const active = providers.find((p) => p.id === settings!.active_provider);
-  const model = models.find((m) => m.id === settings!.local_model);
-  const engine = settings.active_provider === "parakeet" && model
-    ? model.name
-    : active?.display_name ?? settings.active_provider;
-  const ready = active?.available ?? false;
+  const { engine, ready, reason } = engineStatus(settings, providers, models);
   statusText.textContent = `${ready ? "Ready" : "Not ready"} · ${engine}`;
   status.classList.toggle("not-ready", !ready);
-  status.title = ready ? "" : (active ? (active.reason ?? "") : "Provider not registered");
+  status.title = ready ? "" : (reason ?? "");
   for (const button of providerButtons) {
     const provider = providers.find((p) => p.id === button.dataset.provider);
     button.setAttribute("aria-checked", String(button.dataset.provider === settings.active_provider));
@@ -141,24 +110,6 @@ function ago(ms: number): string {
 
 function textOf(record: DictationRecord): string {
   return record.error === null ? record.text : `Failed: ${record.error}`;
-}
-
-function copyButton(text: string): HTMLButtonElement {
-  const button = el("button", "small", "Copy");
-  button.type = "button";
-  button.setAttribute("aria-label", "Copy transcript");
-  let timer: number | undefined;
-  button.addEventListener("click", () => {
-    navigator.clipboard.writeText(text).then(
-      () => {
-        button.textContent = "Copied";
-        window.clearTimeout(timer);
-        timer = window.setTimeout(() => { button.textContent = "Copy"; }, 1400);
-      },
-      () => { button.textContent = "Failed"; },
-    );
-  });
-  return button;
 }
 
 /** Retries the saved clip into history, as the app window does. */
@@ -251,7 +202,7 @@ document.addEventListener("keydown", (event) => {
 Promise.all([
   invoke<Settings>("get_settings"),
   invoke<ProviderInfo[]>("list_providers"),
-  invoke<LocalModel[]>("list_models"),
+  invoke<LocalModelStatus[]>("list_models"),
   loadHistory(),
 ]).then(([loaded, listed, local]) => {
   settings = loaded;

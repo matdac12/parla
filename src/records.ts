@@ -1,4 +1,4 @@
-/** Shared by the app window's Home, History and Timings pages. */
+/** Shared by the app window (Home, History, Timings, settings) and the tray flyout. */
 export interface DictationRecord {
   id: string;
   kind: string;
@@ -62,4 +62,115 @@ export function clock(ms: number): string {
 
 export function fullDate(ms: number): string {
   return fullFormat.format(ms);
+}
+
+/** `get_settings` / `save_settings`. Saves send back the whole object. */
+export interface Settings {
+  active_provider: string;
+  hotkey: string;
+  restore_delay_ms: number;
+  paste_compatibility_mode: boolean;
+  streaming_enabled: boolean;
+  live_captions: boolean;
+  vocabulary: string[];
+  local_model: string;
+  dim_other_audio: boolean;
+  dim_audio_level: number;
+  providers: Record<string, Record<string, unknown>>;
+}
+
+/** `list_providers`. */
+export interface ProviderInfo {
+  id: string;
+  display_name: string;
+  available: boolean;
+  reason: string | null;
+}
+
+/** `list_models` (PARLA-37): one entry per local Parakeet export. */
+export interface LocalModelStatus {
+  id: string;
+  name: string;
+  size: number;
+  model_dir: string;
+  available: boolean;
+  downloading: boolean;
+  selected: boolean;
+}
+
+/** The "Ready · <engine>" line: the active provider, or the local model's name. */
+export function engineStatus(
+  settings: Settings,
+  providers: ProviderInfo[],
+  models: LocalModelStatus[],
+): { engine: string; ready: boolean; reason: string | null } {
+  const provider = providers.find((p) => p.id === settings.active_provider);
+  const model = models.find((m) => m.id === settings.local_model);
+  return {
+    engine: settings.active_provider === "parakeet" && model
+      ? model.name
+      : provider?.display_name ?? settings.active_provider,
+    ready: provider?.available ?? false,
+    reason: provider ? provider.reason : "Provider not registered",
+  };
+}
+
+const MODIFIERS = new Set(["ctrl", "control", "alt", "option", "shift", "super", "meta", "cmd", "command", "cmdorctrl", "commandorcontrol"]);
+
+/** Mirrors hotkey.rs: two or more modifiers make holding them push-to-talk and
+ *  tapping the full shortcut lock hands-free; otherwise it is tap on, tap off. */
+export function parseShortcut(hotkey: string): { keys: string[]; modifiers: string[]; hold: boolean } {
+  const keys = hotkey.split("+").map((key) => key.trim()).filter(Boolean);
+  const modifiers = keys.filter((key) => MODIFIERS.has(key.toLowerCase()));
+  return { keys, modifiers, hold: modifiers.length >= 2 };
+}
+
+/** `keys` as <kbd> chips joined by "+", with key codes shown as their key. */
+export function combo(keys: string[]): Node[] {
+  return keys.flatMap((key, index) => {
+    const label = key.replace(/^Key(?=[A-Z]$)/, "").replace(/^Digit(?=\d$)/, "");
+    const kbd = el("kbd", undefined, label);
+    return index === 0 ? [kbd] : [el("span", "plus", "+"), kbd];
+  });
+}
+
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Fallback for contexts where the async clipboard API is unavailable.
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    if (!ok) throw new Error("copy failed");
+  }
+}
+
+export function copyButton(text: string): HTMLButtonElement {
+  const button = el("button", "small", "Copy");
+  button.type = "button";
+  button.setAttribute("aria-label", "Copy transcript");
+  let timer: number | undefined;
+  button.addEventListener("click", () => {
+    void copyText(text).then(
+      () => {
+        button.textContent = "Copied";
+        button.classList.add("copied");
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          button.textContent = "Copy";
+          button.classList.remove("copied");
+        }, 1400);
+      },
+      () => {
+        button.textContent = "Failed";
+      },
+    );
+  });
+  return button;
 }

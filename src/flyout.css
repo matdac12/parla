@@ -62,6 +62,7 @@ kbd {
 .recent span { flex: 1; overflow: hidden; color: var(--text-2); white-space: nowrap; text-overflow: ellipsis; }
 .recent small { color: var(--text-3); font-variant-numeric: tabular-nums; }
 .recent .failed span { color: var(--danger); }
+.flyout .copied { color: var(--success); border-color: var(--success); background: var(--success-bg); }
 .flyout .small { padding: 0.15rem 0.55rem; font-size: 11px; }
 
 .empty { margin: 4px 0 0; color: var(--text-3); }
