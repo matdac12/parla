@@ -235,6 +235,8 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
         401 | 403 => Err(ProviderError::Auth(format!(
             "OpenAI authentication rejected (HTTP {status})"
         ))),
+        // The server timed the request out, as in provider/openai.rs.
+        408 => Err(ProviderError::Timeout),
         _ => Err(ProviderError::Http {
             status,
             body: serde_json::from_str::<ApiError>(body)
@@ -479,6 +481,7 @@ mod tests {
                 body: String::new()
             })
         );
+        assert_eq!(parse(408, "private body"), Err(ProviderError::Timeout));
         assert!(matches!(
             parse(200, "not json"),
             Err(ProviderError::Other(_))
