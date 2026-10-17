@@ -7,13 +7,10 @@ pub async fn card_bounds(generation: u64, bounds: crate::overlay::Bounds) {
 }
 
 /// A Card button. Off the main thread: Copy and Paste wait on the clipboard.
+/// The outcome goes to the log.
 #[tauri::command]
-pub async fn card_action(
-    app: tauri::AppHandle,
-    generation: u64,
-    action: crate::card::Action,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || crate::card::act(&app, generation, action))
-        .await
-        .map_err(|_| "The Card's action could not complete".to_string())
+pub async fn card_action(app: tauri::AppHandle, generation: u64, action: crate::card::Action) {
+    let _ =
+        tauri::async_runtime::spawn_blocking(move || crate::card::act(&app, generation, action))
+            .await;
 }

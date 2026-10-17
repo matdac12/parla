@@ -16,18 +16,23 @@ body {
   width: 116px;
   height: 32px;
 }
-.captions {
+/* The captions box, and the Card (PARLA-80) that grows from it: dark glass
+   above the pill. */
+.captions,
+.card {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
   box-sizing: border-box;
-  width: 330px;
-  max-width: calc(100vw - 36px);
-  padding: 9px 13px;
   border-radius: 11px;
   background: rgba(18, 18, 20, 0.88);
   box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 4px 13px rgba(0, 0, 0, 0.17);
+}
+.captions {
+  width: 330px;
+  max-width: calc(100vw - 36px);
+  padding: 9px 13px;
   font: 13px/19px "Segoe UI", sans-serif;
   pointer-events: none;
   animation: caption-appear 140ms ease-out;
@@ -240,21 +245,12 @@ body {
 /* The Card (PARLA-80, prototype variant A): the captions box grown up, above
    the check. Always dark, whatever the system theme. */
 .card {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  box-sizing: border-box;
   width: 420px;
   padding: 10px 13px 9px;
-  border-radius: 11px;
-  background: rgba(18, 18, 20, 0.88);
-  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 4px 13px rgba(0, 0, 0, 0.17);
   color: rgba(255, 255, 255, 0.88);
   font: 13px/19px "Segoe UI Variable Text", "Segoe UI", sans-serif;
   animation: card-appear 180ms cubic-bezier(0.2, 0, 0, 1);
 }
-.card[hidden] { display: none; }
 .card-head {
   display: flex;
   align-items: center;

@@ -222,8 +222,7 @@ pub struct Overlay {
 /// short delay (so brief or cancelled holds never flash it) and streams
 /// microphone levels. `held` is how long they were already down.
 pub fn begin(app: &tauri::AppHandle, captions: bool, held: Duration) -> Overlay {
-    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    close_card(app, "closed by the next session");
+    let generation = next_session(app, "closed by the next session");
     let metering = Arc::new(AtomicBool::new(true));
     // Back to normal well before the delayed reveal.
     if let Some(window) = app.get_webview_window(LABEL) {
@@ -249,7 +248,7 @@ pub fn begin(app: &tauri::AppHandle, captions: bool, held: Duration) -> Overlay 
             if !live() {
                 return;
             }
-            reveal(&handle);
+            let _ = reveal(&handle);
             while live() {
                 let _ = handle.emit_to(LABEL, "level", crate::recorder::current_level());
                 std::thread::sleep(Duration::from_millis(40));
@@ -273,8 +272,7 @@ fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
 
 /// Starts a session already in the transcribing phase (used by Retry).
 pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
-    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    close_card(app, "closed by a retry");
+    let generation = next_session(app, "closed by a retry");
     set_interactive(app, false);
     // A retry is a dictation, even right after an orange command pill.
     set_mode(app, PillMode::Hold);
@@ -290,8 +288,16 @@ pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
     overlay
 }
 
-fn reveal(app: &tauri::AppHandle) {
-    let _ = place(app);
+/// A new session's generation. It replaces the Card, if one is open.
+fn next_session(app: &tauri::AppHandle, why: &str) -> u64 {
+    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    close_card(app, why);
+    generation
+}
+
+/// Shows the window where `place` puts it, and returns that.
+fn reveal(app: &tauri::AppHandle) -> Option<(PhysicalPosition<i32>, f64)> {
+    let placed = place(app);
     if let Some(window) = app.get_webview_window(LABEL) {
         // Usually already normal since `begin`; Retry and a racing delayed
         // `hide` reach here without it.
@@ -301,6 +307,7 @@ fn reveal(app: &tauri::AppHandle) {
         // Resume rendering; see `hide`.
         let _ = window.as_ref().show();
     }
+    placed
 }
 
 fn hide(app: &tauri::AppHandle) {
@@ -340,12 +347,21 @@ pub struct Bounds {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Bounds {
-    /// Whether the physical point `cursor` is inside, for a window at `origin`
-    /// with this `scale`.
-    fn contains(&self, cursor: (i32, i32), origin: PhysicalPosition<i32>, scale: f64) -> bool {
+    /// Whether the physical point `cursor` is inside, or within `margin` CSS
+    /// pixels of it, for a window at `origin` with this `scale`.
+    fn contains(
+        &self,
+        cursor: (i32, i32),
+        origin: PhysicalPosition<i32>,
+        scale: f64,
+        margin: f64,
+    ) -> bool {
         let x = f64::from(cursor.0 - origin.x) / scale;
         let y = f64::from(cursor.1 - origin.y) / scale;
-        x >= self.left && x < self.left + self.width && y >= self.top && y < self.top + self.height
+        x >= self.left - margin
+            && x < self.left + self.width + margin
+            && y >= self.top - margin
+            && y < self.top + self.height + margin
     }
 }
 
@@ -364,11 +380,9 @@ pub fn set_card_bounds(generation: u64, bounds: Bounds) {
 /// A button's click: the Card of `generation`, taken once and closed with the
 /// window. None if it is gone: clicked twice, or a newer session closed it.
 pub fn take_card(app: &tauri::AppHandle, generation: u64) -> Option<crate::card::Card> {
-    let card = {
-        let mut shown = shown_card();
-        shown.as_ref().filter(|s| s.generation == generation)?;
-        shown.take()?.card
-    };
+    let card = shown_card()
+        .take_if(|shown| shown.generation == generation)?
+        .card;
     let _ = app.emit_to(LABEL, "card", serde_json::Value::Null);
     if GENERATION.load(Ordering::Acquire) == generation {
         hide(app);
@@ -388,17 +402,20 @@ fn close_card(app: &tauri::AppHandle, why: &str) {
 
 /// The window takes clicks only while the cursor is over the Card, so the
 /// empty space around it never blocks the app underneath. Polls on its own
-/// thread while the Card is open.
+/// thread while the Card is open: often near the Card, rarely away from it.
 #[cfg(windows)]
 fn follow_cursor(app: &tauri::AppHandle, generation: u64) {
     use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+    /// Close enough (CSS pixels) that the next poll must come soon.
+    const NEAR: f64 = 60.0;
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("parla-card-cursor".into())
         .spawn(move || {
-            let mut over = None;
+            // `settle` left the window click-through.
+            let (mut over, mut near) = (false, true);
             loop {
-                std::thread::sleep(Duration::from_millis(30));
+                std::thread::sleep(Duration::from_millis(if near { 30 } else { 150 }));
                 let mut cursor = POINT { x: 0, y: 0 };
                 // SAFETY: a valid out pointer.
                 let read = unsafe { GetCursorPos(&mut cursor) } != 0;
@@ -409,15 +426,17 @@ fn follow_cursor(app: &tauri::AppHandle, generation: u64) {
                 let Some(shown) = shown.as_ref().filter(|s| s.generation == generation) else {
                     return;
                 };
-                let inside = read
-                    && match (shown.placed, shown.bounds) {
-                        (Some((origin, scale)), Some(bounds)) => {
-                            bounds.contains((cursor.x, cursor.y), origin, scale)
-                        }
-                        _ => false,
-                    };
-                if over != Some(inside) {
-                    over = Some(inside);
+                let within = |margin| {
+                    read && shown.placed.zip(shown.bounds).is_some_and(
+                        |((origin, scale), bounds)| {
+                            bounds.contains((cursor.x, cursor.y), origin, scale, margin)
+                        },
+                    )
+                };
+                near = within(NEAR);
+                let inside = near && within(0.0);
+                if over != inside {
+                    over = inside;
                     set_interactive(&app, inside);
                 }
             }
@@ -461,62 +480,62 @@ impl Overlay {
     /// Recording ended; the clip is being transcribed. Shows a spinner.
     pub fn processing(&self) {
         self.metering.store(false, Ordering::Release);
-        reveal(&self.app);
+        let _ = reveal(&self.app);
         let _ = self.app.emit_to(LABEL, "phase", "processing");
     }
 
     /// Shows a short confirmation (check on success, cross on failure), then
     /// hides the pill.
     pub fn finish(self, ending: Ending) {
-        let hold = match ending {
-            Ending::Done => DONE_HOLD,
-            Ending::Failed { .. } => ERROR_HOLD,
-            Ending::Card(card) => return self.show_card(card),
-        };
-        self.settle(ending, hold);
+        match ending {
+            Ending::Done => {
+                self.settle(true, Some(DONE_HOLD));
+            }
+            Ending::Failed { retry } => {
+                // Before the phase, like the label: the cross renders with or
+                // without its Retry button.
+                let _ = self.app.emit_to(LABEL, "retry", retry);
+                self.settle(false, Some(ERROR_HOLD));
+            }
+            Ending::Card(card) => self.show_card(card),
+        }
     }
 
     /// The check, with the Card above it until a button closes it or the
     /// next session starts: no timer.
-    fn show_card(mut self, card: crate::card::Card) {
-        self.clear_captions();
-        self.settled = true;
-        self.metering.store(false, Ordering::Release);
-        let generation = self.generation;
-        Size::Card.apply(&self.app);
-        let placed = place(&self.app);
+    fn show_card(self, card: crate::card::Card) {
+        let (app, generation) = (self.app.clone(), self.generation);
+        Size::Card.apply(&app);
         let view = serde_json::json!({"generation": generation, "card": &card});
         // Before the page lays it out, so its box is never dropped.
         *shown_card() = Some(ShownCard {
             generation,
             card,
-            placed,
+            placed: None,
             bounds: None,
         });
-        let _ = self.app.emit_to(LABEL, "card", view);
-        reveal(&self.app);
-        let _ = self.app.emit_to(LABEL, "phase", "done");
-        follow_cursor(&self.app, generation);
+        let _ = app.emit_to(LABEL, "card", view);
+        let placed = self.settle(true, None);
+        if let Some(shown) = shown_card().as_mut().filter(|s| s.generation == generation) {
+            shown.placed = placed;
+        }
+        follow_cursor(&app, generation);
     }
 
     /// The check with `label` beside it, held a little longer to be read.
     pub fn finish_labelled(self, label: &str) {
         Size::Labelled.apply(&self.app);
         let _ = self.app.emit_to(LABEL, "label", label);
-        self.settle(Ending::Done, LABELLED_HOLD);
+        self.settle(true, Some(LABELLED_HOLD));
     }
 
-    fn settle(mut self, ending: Ending, hold: Duration) {
-        let ok = ending == Ending::Done;
-        if let Ending::Failed { retry } = ending {
-            // Before the phase, like the label: the cross renders with or
-            // without its Retry button.
-            let _ = self.app.emit_to(LABEL, "retry", retry);
-        }
+    /// The check, or the cross, then hides the pill after `hold` (never, for
+    /// the Card). Returns where the window was placed.
+    fn settle(mut self, ok: bool, hold: Option<Duration>) -> Option<(PhysicalPosition<i32>, f64)> {
         self.clear_captions();
         self.settled = true;
         self.metering.store(false, Ordering::Release);
-        reveal(&self.app);
+        let placed = reveal(&self.app);
         if !ok {
             FAILED.store(self.generation, Ordering::Release);
         }
@@ -524,16 +543,19 @@ impl Overlay {
         let _ = self
             .app
             .emit_to(LABEL, "phase", if ok { "done" } else { "error" });
-        let app = self.app.clone();
-        let generation = self.generation;
-        let _ = std::thread::Builder::new()
-            .name("parla-overlay-hide".into())
-            .spawn(move || {
-                std::thread::sleep(hold);
-                if GENERATION.load(Ordering::Acquire) == generation {
-                    hide(&app);
-                }
-            });
+        if let Some(hold) = hold {
+            let app = self.app.clone();
+            let generation = self.generation;
+            let _ = std::thread::Builder::new()
+                .name("parla-overlay-hide".into())
+                .spawn(move || {
+                    std::thread::sleep(hold);
+                    if GENERATION.load(Ordering::Acquire) == generation {
+                        hide(&app);
+                    }
+                });
+        }
+        placed
     }
 }
 
@@ -562,7 +584,10 @@ mod tests {
             height: 100.0,
         };
         let window = PhysicalPosition::new(1000, 2000);
-        let at = |x: f64, y: f64| card.contains((1000 + x as i32, 2000 + y as i32), window, 1.5);
+        let near = |x: f64, y: f64, margin| {
+            card.contains((1000 + x as i32, 2000 + y as i32), window, 1.5, margin)
+        };
+        let at = |x, y| near(x, y, 0.0);
         // Its corners, in physical pixels.
         assert!(at(27.0, 375.0));
         assert!(at(656.0, 524.0));
@@ -571,6 +596,9 @@ mod tests {
         assert!(!at(658.0, 400.0));
         assert!(!at(300.0, 373.0));
         assert!(!at(300.0, 526.0));
+        // Within 60 px is near: the cursor thread polls it more often.
+        assert!(near(300.0, 526.0, 60.0));
+        assert!(!near(300.0, 616.0, 60.0));
     }
 
     #[test]

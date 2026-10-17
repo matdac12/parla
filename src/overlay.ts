@@ -176,7 +176,8 @@ void listen<CaptionUpdate>("caption", (event) => queueCaption(event.payload));
 // The Card (PARLA-80): text Parla did not paste, above the check, until a
 // button closes it or the next session starts. Rust says what it shows; the
 // window takes clicks only over the box reported here.
-type CardAction = "copy" | "paste" | "dismiss";
+/** The footer's buttons; Dismiss is always the ✕. */
+type CardAction = "copy" | "paste";
 interface CardView {
   tag: "not_pasted";
   header: string | null;
@@ -185,8 +186,9 @@ interface CardView {
   primary: CardAction;
 }
 const TAGS: Record<CardView["tag"], string> = { not_pasted: "Not pasted · no text field" };
-const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste", dismiss: "Dismiss" };
+const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste" };
 const card = document.getElementById("card") as HTMLElement;
+const cardClose = card.querySelector(".card-close") as HTMLButtonElement;
 const cardTag = card.querySelector(".card-tag span") as HTMLSpanElement;
 const cardHeader = card.querySelector(".card-header") as HTMLSpanElement;
 const cardBody = card.querySelector(".card-body") as HTMLDivElement;
@@ -204,7 +206,6 @@ function reportCardBounds(): void {
 
 function showCard(generation: number, view: CardView): void {
   cardGeneration = generation;
-  card.dataset.tag = view.tag;
   card.setAttribute("aria-label", TAGS[view.tag]);
   cardTag.textContent = TAGS[view.tag];
   cardHeader.textContent = view.header === null ? "" : `“${view.header}”`;
@@ -218,7 +219,7 @@ function showCard(generation: number, view: CardView): void {
     button.textContent = ACTIONS[action];
     return button;
   }));
-  card.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+  cardClose.disabled = false;
   card.hidden = false;
   // Laid out already; again once the window has grown and the entrance ends.
   reportCardBounds();
