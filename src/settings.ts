@@ -86,6 +86,7 @@ const els = {
   delay: byId<HTMLInputElement>("delay"),
   pasteCompatibility: byId<HTMLInputElement>("paste-compatibility"),
   autoSend: byId<HTMLInputElement>("auto-send"),
+  safetyNet: byId<HTMLInputElement>("safety-net"),
   streaming: byId<HTMLInputElement>("streaming-enabled"),
   vocabulary: byId<HTMLTextAreaElement>("vocabulary"),
   liveCaptions: byId<HTMLInputElement>("live-captions"),
@@ -825,6 +826,7 @@ function fillForm(settings: Settings): void {
   els.delay.value = String(settings.restore_delay_ms);
   els.pasteCompatibility.checked = settings.paste_compatibility_mode;
   els.autoSend.checked = settings.auto_send;
+  els.safetyNet.checked = settings.safety_net;
   els.streaming.checked = settings.streaming_enabled;
   els.liveCaptions.checked = settings.live_captions;
   els.dimAudio.checked = settings.dim_other_audio;
@@ -888,6 +890,11 @@ function wireForm(): void {
   els.autoSend.addEventListener("change", () => {
     if (!state.settings) return;
     state.settings.auto_send = els.autoSend.checked;
+    updateDirty();
+  });
+  els.safetyNet.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.safety_net = els.safetyNet.checked;
     updateDirty();
   });
   els.streaming.addEventListener("change", () => {

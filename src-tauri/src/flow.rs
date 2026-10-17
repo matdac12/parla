@@ -2,7 +2,7 @@
 //! holds while one session worker owns recording, transcription and paste.
 pub use crate::failure::on_failure;
 use crate::{
-    command_mode,
+    command_mode, focus_probe,
     hotkey::{Chord, Hotkey, HotkeyEvent},
     inserter,
     overlay::{Ending, PillMode},
@@ -272,6 +272,9 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
+    // After the mic started, so it never delays the first syllable. A
+    // cancelled hold drops it unread.
+    let focus = (recording.is_ok() && settings.safety_net).then(focus_probe::start);
     // A dictation is confirmed at key-down, a command hold at MIN_HOLD. Until
     // then a quick Ctrl+Shift shortcut costs no pill, dimming, live session or
     // warm-up, and its Esc reaches the app (Ctrl+Shift+Esc). The recorder
@@ -376,6 +379,7 @@ fn run_session(
             date: command_mode::today(),
             cancelled: &cancelled,
             hold_error,
+            focus: focus.as_ref(),
         };
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
@@ -401,6 +405,7 @@ fn run_session(
             auto_send: settings.auto_send,
             stream,
             batch,
+            focus,
         },
     );
     // Cancelled after key-up: the pill hides unfinished, as for Esc while
@@ -452,6 +457,7 @@ pub fn finish_session(
             auto_send: false,
             stream: None,
             batch: None,
+            focus: None,
         },
     );
 }
@@ -463,6 +469,8 @@ struct Completion {
     stream: Option<crate::streaming::Session>,
     /// A hotkey dictation's: Esc may cancel it until the paste.
     batch: Option<BatchWorker>,
+    /// The editable probe from key-down, with the Safety Net on.
+    focus: Option<focus_probe::Pending>,
 }
 
 /// None when Esc cancelled the dictation after key-up.
@@ -522,11 +530,19 @@ fn finish_session_with_error(
                                     .auto_send
                                     .then(|| inserter::strip_send_trigger(text))
                                     .flatten();
-                                inserter::paste_text_with_options(
-                                    stripped.unwrap_or(text),
-                                    delay,
-                                    settings.paste_compatibility_mode,
-                                    stripped.is_some(),
+                                // The Safety Net acts on the verdict from
+                                // PARLA-80; until then every dictation pastes.
+                                focus_probe::around_paste(
+                                    completion.focus.as_ref(),
+                                    "dictation",
+                                    |_verdict| {
+                                        inserter::paste_text_with_options(
+                                            stripped.unwrap_or(text),
+                                            delay,
+                                            settings.paste_compatibility_mode,
+                                            stripped.is_some(),
+                                        )
+                                    },
                                 )
                                 .map_err(|e| e.to_string())
                             } else {

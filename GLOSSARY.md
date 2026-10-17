@@ -41,7 +41,7 @@ The floating panel above the pill that shows text Parla did not paste: a command
 _Avoid_: popup, toast, preview window, answer window, safety net window
 
 **Safety Net**:
-The rule that sends a dictation to the Card instead of pasting it when nothing editable has focus. It only acts on a confident "not editable"; when unsure, Parla pastes.
+The rule that sends a dictation to the Card instead of pasting it when nothing editable has focus. It only acts on a confident "not editable"; when unsure, Parla pastes. Its setting (`safety_net`) also gates the editable probe that command replies use to pick the Card's buttons.
 _Avoid_: fallback, editable check, focus guard
 
 **Edit** and **Answer**:

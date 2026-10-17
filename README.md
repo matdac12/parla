@@ -257,6 +257,16 @@ only, so "resend" doesn't count), Parla pastes the text without that word and
 then presses Enter. A dictation that is only "Send." is pasted as text. History
 keeps the raw transcript; a tray Retry pastes but never sends.
 
+**Safety Net** (Settings, on by default, `safety_net`): at key-down of every
+dictation and command hold, a probe on its own thread checks whether the
+paste has somewhere to land. An app in the foreground always counts as
+editable and is never queried; only on the desktop or taskbar, or with no
+foreground window, does Parla ask UI Automation what has focus. At the paste,
+Parla reads the verdict without waiting (no answer yet counts as editable) and
+logs it to stderr: `Parla focus probe (dictation): Unknown by App, app
+notepad.exe, window Notepad, …`. For now nothing else changes; pasting is as
+before. Off, no probe runs.
+
 ### Recording pill
 
 A small dark pill appears at the bottom centre of the primary monitor about
@@ -440,6 +450,7 @@ defaults. Example:
   "restore_delay_ms": 250,
   "paste_compatibility_mode": false,
   "auto_send": true,
+  "safety_net": true,
   "local_model": "parakeet-v3",
   "dim_other_audio": true,
   "dim_audio_level": 30,

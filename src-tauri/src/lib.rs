@@ -7,6 +7,7 @@ mod commands;
 pub mod dim;
 pub mod failure;
 mod flow;
+pub mod focus_probe;
 pub mod history;
 pub mod hotkey;
 pub mod inserter;

@@ -75,6 +75,9 @@ pub struct Run<'a> {
     pub cancelled: &'a AtomicBool,
     /// The hold hit the cap: the instruction is recorded but not sent.
     pub hold_error: Option<String>,
+    /// The editable probe from key-down, with the Safety Net on. Only
+    /// logged for now (PARLA-79).
+    pub focus: Option<&'a crate::focus_probe::Pending>,
 }
 
 /// How long the focused app gets to answer Ctrl+Insert.
@@ -317,7 +320,9 @@ fn reply_and_act(
         None => reply.text,
     };
     // Over the selection, which is still selected, or at the cursor.
-    let pasted = ports.desktop.paste(&text, selection.borrowed.as_ref());
+    let pasted = crate::focus_probe::around_paste(run.focus, "command", |_verdict| {
+        ports.desktop.paste(&text, selection.borrowed.as_ref())
+    });
     record.reply = Some(text);
     match pasted {
         Ok(at) => {
@@ -535,6 +540,7 @@ mod tests {
         settings: CommandSettings,
         /// Polls that pass between the selection read and key-up.
         speaking: usize,
+        focus: Option<crate::focus_probe::Pending>,
     }
     impl Harness {
         fn new(reply: Result<Reply, ProviderError>) -> Self {
@@ -546,6 +552,7 @@ mod tests {
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
                 speaking: 0,
+                focus: None,
             }
         }
         fn run_with(
@@ -565,6 +572,7 @@ mod tests {
                 date: "2026-10-17".into(),
                 cancelled: &self.cancelled,
                 hold_error,
+                focus: self.focus.as_ref(),
             };
             // Read at the confirmed hold, before the instruction is in.
             let selection = read_selection(&self.desktop);
@@ -597,6 +605,30 @@ mod tests {
         fn pasted(&self) -> Vec<String> {
             self.desktop.pasted.borrow().clone()
         }
+    }
+
+    #[test]
+    fn a_reply_pastes_without_waiting_for_a_slow_probe() {
+        use crate::focus_probe::{Facts, Focus};
+        let (answer, gate) = std::sync::mpsc::channel::<()>();
+        let worker = crate::focus_probe::worker(move || {
+            move || {
+                // Still running when the reply is pasted.
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+                Facts {
+                    foreground: Some("Progman".into()),
+                    app: None,
+                    focus: Focus::Nothing,
+                }
+            }
+        });
+        let mut h = Harness::new(text("Buongiorno"));
+        h.focus = Some(worker.start());
+        let started = Instant::now();
+        assert_eq!(h.run("Scrivi un saluto"), Outcome::Pasted);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(h.pasted(), ["Buongiorno"]);
+        answer.send(()).unwrap();
     }
 
     #[test]
