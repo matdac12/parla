@@ -1,4 +1,4 @@
-// Timings page: the latency log (history.html) as tiles, one stacked bar per
+// Timings page: the latency log as tiles, one stacked bar per
 // dictation and the old table behind a disclosure. Rendered only while visible.
 import { clock, el, fullDate, must, providerName, reconcile, seconds, type DictationRecord } from "./records";
 

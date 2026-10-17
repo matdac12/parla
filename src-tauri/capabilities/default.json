@@ -4,8 +4,6 @@
   "description": "Core events for Parla pages; custom commands are registered in lib.rs.",
   "windows": [
     "app",
-    "settings",
-    "history",
     "bench",
     "overlay"
   ],
