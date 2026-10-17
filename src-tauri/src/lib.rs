@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod bench;
 pub mod clip;
+pub mod command_mode;
 mod commands;
 pub mod dim;
 pub mod failure;
@@ -90,6 +91,7 @@ pub fn run() {
             commands::settings::save_settings,
             commands::settings::select_provider,
             commands::settings::select_model,
+            commands::settings::check_command_hotkey,
             commands::history::get_history,
             commands::history::clear_history,
             commands::failure::retry_last_failed,

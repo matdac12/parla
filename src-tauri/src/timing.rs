@@ -12,7 +12,7 @@ use tauri::{Emitter, Manager};
 pub struct DictationRecord {
     pub id: String,
     /// Row origin in `history.jsonl`; PARLA-10 reuses the file for `benchmark`
-    /// rows. `#[serde(default)]` keeps older rows loadable.
+    /// rows and command mode for `command` rows. `#[serde(default)]` keeps older rows loadable.
     #[serde(default = "default_kind")]
     pub kind: String,
     pub started_at: u64,
@@ -42,6 +42,49 @@ pub struct DictationRecord {
     pub stream_setup_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_caption_ms: Option<u64>,
+    /// Command runs only (PARLA-63). `text` is the instruction and `model` its
+    /// speech model; these describe the LLM step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<CommandOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
+    /// Key-up to the LLM reply, like the other stage offsets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_returned: Option<u64>,
+    /// The LLM's text reply, kept for Copy (PARLA-66) even if the paste failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    /// The selection's length in characters, 0 for none (PARLA-64); its
+    /// text is never kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_chars: Option<u64>,
+    /// The focused app's executable name at the confirmed hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// The allowlisted tool an `opened` run called (PARLA-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The page an `opened` run opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Key-up to the page handed to the browser, like `pasted` for a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened: Option<u64>,
+}
+
+/// How a command run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandOutcome {
+    Pasted,
+    /// A tool opened a page instead of a paste.
+    Opened,
+    Failed,
+    Cancelled,
 }
 impl DictationRecord {
     pub fn new(started_at: SystemTime, provider_id: &str) -> Self {
@@ -70,6 +113,17 @@ impl DictationRecord {
             stream_model: None,
             stream_setup_ms: None,
             first_caption_ms: None,
+            outcome: None,
+            llm_model: None,
+            tokens_in: None,
+            tokens_out: None,
+            llm_returned: None,
+            reply: None,
+            selection_chars: None,
+            app: None,
+            tool: None,
+            url: None,
+            opened: None,
         }
     }
 }
@@ -78,9 +132,17 @@ pub fn elapsed_ms(key_up: Instant) -> u64 {
     key_up.elapsed().as_millis() as u64
 }
 
+/// The stage offset of `at`, like `elapsed_ms` for an instant already taken.
+pub fn offset_ms(key_up: Instant, at: Instant) -> u64 {
+    at.saturating_duration_since(key_up).as_millis() as u64
+}
+
 fn default_kind() -> String {
     "dictation".into()
 }
+
+/// `kind` of a command run's row (PARLA-61). Never counted as a dictation.
+pub const COMMAND_KIND: &str = "command";
 
 /// Per-stage latencies derived from the monotonic offsets (which are relative
 /// to key-up). A stage is `None` when either endpoint is missing, so partial

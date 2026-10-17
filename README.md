@@ -122,25 +122,32 @@ at the bottom opens the benchmark window.
   newest dictation failed, a banner offers **Retry** (while its recording is
   still saved) and **Dismiss** (hides it for that failure). Below are lifetime
   totals (words dictated, dictations, audio time, cost with the yearly projection
-  against Wispr Flow's $144) and the five most recent dictations.
+  against Wispr Flow's $144) and the five most recent dictations and command
+  runs.
 - **History** lists dictations newest first, grouped by day: time, transcript
   (two lines; click to expand), provider, audio length and word count, with
-  **Copy** on hover. A search box and an **All / Failed** filter narrow the loaded
-  transcripts, new dictations appear at the top as they finish, and **Show older**
-  loads more (200 at a time, up to 2000). Failed dictations are red; the newest
-  one, while its recording is still saved, has **Retry**, which transcribes the
-  saved clip and adds the result to the list (nothing is pasted, since the focus
-  is Parla itself). **Clear history…** truncates the file after a confirmation.
-- **Timings** shows the same loaded dictations as a latency log: median, fastest
-  and slowest key-up-to-pasted tiles, one stacked bar per dictation (Ready,
-  Transcribe, Paste; see [History](#history)) with its total, and the full table
-  behind **Table view**.
+  **Copy** on hover. [Command runs](#command-mode-experimental) sit among them
+  with an orange **Command** tag: the instruction, then the outcome (**Reply
+  pasted**, **Opened <host>**, **Failed: …** or **Cancelled**), the LLM model
+  and the instruction's audio length; **Copy** copies the reply whenever there
+  is one, even if pasting it failed. A search box (transcripts and instructions) and an **All /
+  Failed** filter narrow the loaded rows, new ones appear at the top as they
+  finish, and **Show older** loads more (200 at a time, up to 2000). Failed
+  dictations are red; the newest one, while its recording is still saved, has
+  **Retry**, which transcribes the saved clip and adds the result to the list
+  (nothing is pasted, since the focus is Parla itself). **Clear history…**
+  truncates the file after a confirmation.
+- **Timings** shows the dictations among the loaded rows (command runs are left
+  out) as a latency log: median, fastest and slowest key-up-to-pasted tiles, one
+  stacked bar per dictation (Ready, Transcribe, Paste; see [History](#history))
+  with its total, and the full table behind **Table view**.
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a
-transcript that was pasted successfully; failures and benchmark rows are not
-counted. On first run the counters start from whatever is already in
-`history.jsonl`.
+transcript that was pasted successfully; failures, benchmark rows and command
+runs are not counted, so words, dictations and audio time are about dictation
+only. On first run the counters start from whatever is already in
+`history.jsonl`, by the same rules.
 Counter updates appear immediately; a dedicated writer persists them in order
 in the background and flushes queued updates when Parla exits normally.
 
@@ -150,18 +157,38 @@ streaming) multiplied by built-in list prices in `src-tauri/src/pricing.rs`
 `gpt-transcribe` $0.0045/min, `gpt-live-transcribe` $0.017/min; Parakeet free).
 A provider counts as billed when it returned a transcript, even if pasting then
 failed. A live session that fell back to batch is counted twice. Benchmark runs
-add to cost but not to words, dictations or audio time. Models without a known
-price are left out of the total and shown as a note. The yearly projection
+add to cost but not to words, dictations or audio time. A command run adds the
+transcription of its instruction (billed like a dictation) and its LLM tokens:
+`tokens_in` and `tokens_out` × the model's list price per million tokens
+(`gpt-6-luna` $0.10 in and $0.50 out, checked 2026-10-17). Tokens count
+whenever the reply came back, even if the run then failed; a run cancelled
+before the reply has none. Models without a known price, for audio or tokens,
+are left out of the total and shown as a note. The yearly projection
 (cost per day since first use × 365) appears after 7 days. Counters written by
 older versions keep their words and get audio and cost from `history.jsonl`
 once.
 
 Settings are split into **Transcription** (provider, keys, models, local
-model), **Dictation & hotkey** (shortcut, live transcription and captions),
-**Other audio** ([dimming](#dimming-other-audio)), **Vocabulary** and
-**Clipboard** (paste compatibility, restore delay). Switching provider or local
-model applies at once. Other edits show a **Save** bar at the bottom with
-**Discard**; it stays until you save or discard, across pages.
+model), **Dictation & hotkey** (shortcut, the **Command mode** card, live
+transcription and captions), **Other audio** ([dimming](#dimming-other-audio)),
+**Vocabulary** and **Clipboard** (paste compatibility, restore delay). Switching
+provider or local model applies at once. Other edits show a **Save** bar at the
+bottom with **Discard**; it stays until you save or discard, across pages.
+
+The **Command mode** card holds the `command` section of `settings.json`
+([command mode](#command-mode-experimental)):
+
+- **Enabled**, off by default. It is greyed out, with a hint, until an OpenAI
+  key is set: the one under Transcription → OpenAI (typing it is enough, both
+  save together) or `OPENAI_API_KEY`. If the key later goes away, command mode
+  stays on, with the hint, until you turn it off.
+- **Command hotkey**, default `LCtrl+Shift`; see [Hotkey](#hotkey).
+- **Model**, default `gpt-6-luna`; clearing the field restores it.
+- **Reasoning effort**, `low` (default) or `none`; see the
+  [live eval](#the-command-mode-eval).
+
+Saving arms or disarms the command chord and rebinds it at once, with no
+restart. Model and effort are read by each command run.
 
 ### Tray icon
 
@@ -270,6 +297,130 @@ Settings → Other audio has **Dim other audio while dictating** (on by default,
 **`%APPDATA%\com.matdac6.parla\dimmed-audio.json`**; if Parla crashes or is
 killed, the next start restores them (unless you moved them since) and deletes
 the file. Dimming is Windows-only.
+
+### Command mode (experimental)
+
+Command mode is a separate mode, with its own hotkey, where what you say is an
+**instruction** rather than text to paste. It is the only place Parla will
+call an LLM; dictation always pastes the raw transcript (see
+`docs/adr/0001-command-mode-is-the-only-llm-path.md`). It is being built in
+steps (PARLA-61). **So far it applies an instruction to the selected text,
+answers it at the cursor, or opens a web page** (the `open_url` tool).
+
+It is off by default: turn it on in Settings → **Dictation & hotkey** →
+**Command mode** (see [The Parla window](#the-parla-window)). It needs an
+OpenAI key: the same `providers.openai.api_key` dictation uses, with
+`OPENAI_API_KEY` overriding it. A blank model means `gpt-6-luna`.
+
+- **Hold** the command hotkey (default left **Ctrl** plus either **Shift**;
+  see [Hotkey](#hotkey)), say the instruction, release. It is hold only: no
+  hands-free lock, and Space does nothing special.
+- **Selection:** once the hold passes 300 ms, while you are still speaking,
+  Parla saves your clipboard text, sends **Ctrl+Insert** (never Ctrl+C, so a
+  terminal is never interrupted) and watches the clipboard for about 150 ms.
+  New, non-empty text is the selection; a slower copy is still picked up when
+  you release. Nothing new, or VS Code's copy of the whole line when nothing
+  is selected, means no selection. The focused app's
+  executable name is noted too, and the connection to OpenAI is opened ahead
+  of the request.
+- The pill is **orange** while recording, transcribing and waiting for the
+  reply. The instruction is transcribed by the active provider, the same
+  engine dictation uses, and sent to `model` (`gpt-6-luna`) through the OpenAI
+  **Responses API**: one request with Parla's built-in system prompt,
+  `store: false` (OpenAI keeps nothing), the configured `reasoning_effort`, a
+  cap of about 2,000 output tokens and a 20 s timeout. The request carries the
+  instruction, the selection between `<selection>` tags (data to work on,
+  never instructions), the app name and today's date. It also offers the
+  allowlisted tools (below), `tool_choice: auto`, at most one call per reply.
+  The text comes back as `{"text": ...}` under a strict JSON schema: as free
+  text, a reply ending on a line break (`Buongiorno,` and a newline) sometimes
+  ran on into junk such as `</final`, `</|assistant|>` or stray words, and the
+  closing `"}` now ends it. The reply's trailing spaces and line breaks are
+  trimmed (a selection's own trailing line break is put back), a reply that
+  spells out a chat-template token (`<|…|>`, `</assistant>`, `</final`) fails
+  with nothing pasted, as does a refusal, and when the model calls a tool any
+  text beside the call is dropped.
+- The text reply is **pasted once**, over the selection if there was one,
+  otherwise at the cursor, the same way a dictation is pasted, so one Ctrl+Z
+  brings back what was there. Your clipboard text is restored once, after the
+  paste, and also when a run is cancelled, fails or hears nothing. A copy you
+  make during the run is kept. Non-text clipboard content (an image) is not
+  restored, as with dictation. The pill then shows the check.
+- **Tools.** Instead of text, the model may call a tool from Parla's fixed
+  allowlist (`src-tauri/src/command_mode/tools.rs`). Tools join it one at a
+  time and are never a shell or anything destructive (ADR-0002). Each has a
+  strict JSON schema, a validator and an executor. Parla runs the call and
+  sends nothing back to the model: one round trip. Nothing is pasted and your
+  clipboard text is given back. Today the allowlist holds one tool:
+  - **`open_url`** `{"url": "…"}`: "apri la pagina di Wikipedia su Roma",
+    "cerca ristoranti a Milano" or "open the GitHub page for tauri" open the
+    page in your **default browser**, through the shell's default handler
+    (`ShellExecuteEx` "open"). A search opens a search engine's results page.
+    Only `http` and `https` addresses with a host open; anything else (a
+    `file:` path, a program, `javascript:`, another app's protocol such as
+    `ms-settings:`), a malformed address or an unknown tool shows the red
+    cross and a notification, and nothing opens. The pill shows
+    **"Opened <host>"** beside the check. Esc while waiting for the reply
+    opens nothing.
+- An empty or silent instruction ends quietly: no LLM call and no row.
+- A network error, a timeout, an API error, a reply cut off by the token cap
+  or an empty reply shows the red cross and a "Command mode: …" notification,
+  and nothing is pasted. There is no Retry.
+- **Esc** cancels while you hold, and also after you release, while the
+  instruction is transcribed and the reply is awaited. Nothing is pasted: a
+  late reply is discarded. While waiting for the reply the pill goes away at
+  once; while transcribing, as soon as the transcription stops.
+- A hold that reaches the 120 s cap fails without asking the LLM; the
+  instruction is still recorded.
+- Each run is a `kind: "command"` row in history: the instruction (`text`),
+  `outcome` (`pasted`, `opened`, `failed` or `cancelled`), `llm_model`,
+  `tokens_in` and `tokens_out` (billed whatever the outcome), the `reply`,
+  for an `opened` run the `tool` (`open_url`) and the `url`,
+  `selection_chars` (the selection's length, 0 for none; its text is never
+  kept), `app` (the focused executable), and stage times from key-up
+  (`provider_returned` for the transcript, `llm_returned` for the reply,
+  `pasted` or `opened`). A cancel while you are still holding leaves no row.
+- The dictation safeguards apply: a hold under 300 ms does nothing, any other
+  key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
+  as usual), and the hold stops after 120 s. Recording starts at key-down, but
+  the pill appears and other audio is dimmed only once the hold passes
+  300 ms, and only from then does **Esc** cancel (and get swallowed).
+- While a command run or a dictation is in flight, both hotkeys are ignored.
+- Command runs never count toward words, dictations or audio. Total cost adds
+  the instruction's transcription, like a dictation, and the LLM tokens (see
+  [The Parla window](#the-parla-window)). The History page lists each run with
+  an orange tag.
+- With command mode off, the keyboard hook skips the command chord.
+
+#### The command mode eval
+
+`src-tauri/tests/command_eval.rs` is a live eval of the built-in system prompt
+and the tools, text only, never audio. It sends 26 fixed IT/EN instructions
+(rewrite, correct, shorten, translate both ways, bullets, an injection and
+selections that only mention searching, answers with nothing selected, open a
+page, search) through the real request builder, parser and URL validator,
+3 times at effort `none` and 3 at `low`, taking turns. Each reply is graded:
+the outcome kind (text or `open_url`); for a page, an http(s) address Parla
+would open on a plausible host with the expected terms; for a text, no
+preamble, wrapping quotes, markdown, stray spaces or leaked tags, plus a
+cheap correctness check (the language, words a rewrite must keep, the source
+words a translation must drop, the bullet count). It prints every reply, a
+markdown table per effort (shares, reply time median and p90, tokens and
+cost) and the outcome kinds each effort got wrong. It fails if the default
+effort gets an outcome kind wrong; the text checks only report.
+Re-run it after changing the system prompt (`command_mode/responses.rs`) or
+adding a tool, and read the replies too: the checks are heuristics.
+
+```powershell
+cd src-tauri
+$env:OPENAI_API_KEY = "sk-..."
+cargo test --locked --test command_eval -- --ignored --nocapture
+```
+
+About 160 calls, 3 minutes and well under a cent. Without the key it skips.
+To probe a flaky case, `PARLA_EVAL_CASES=10,17` picks cases by index and
+`PARLA_EVAL_RUNS=10` sets the repeats. Time it only on the machine lock turn
+(see `AGENTS.md`). The grading itself is tested offline by `cargo test`.
 
 ## Providers and API keys
 
@@ -478,6 +629,28 @@ The hold mode uses the shortcut's modifiers as the chord, and needs two or more
 (`Ctrl+Alt+Space`, `Ctrl+Shift+F9`). With fewer, the shortcut is tap to start,
 tap to stop.
 
+The **command hotkey** (Settings → **Command mode** card) starts
+[command mode](#command-mode-experimental). It is a hold only, made of two or
+more modifiers and no other key, written like `LCtrl+Shift` (the default: left
+Ctrl plus either Shift). `Ctrl`, `Shift` and `Win` mean either side, and
+`LCtrl`/`RCtrl`, `LShift`/`RShift` and `LWin`/`RWin` mean only that side;
+`Alt` is left Alt only, and AltGr is never allowed. Every modifier not in the
+chord, the other side of a one-sided modifier included, must stay up. **Record
+keys** takes the modifiers you hold when you release the first one. It keeps
+Ctrl's side and records Shift and Win as either side, so holding left Ctrl and
+a Shift records the default. Saving applies it immediately, with no restart.
+While command mode is enabled, Parla rejects a command hotkey inline, with a
+warning, and does not save it, if:
+
+- its modifiers equal, contain or sit inside the dictation hold's (for example
+  `Ctrl+Alt` or `Ctrl+Alt+Shift` against `Ctrl+Alt+Space`), since pressing one
+  would pass through the other, or
+- it has a main key: **Ctrl+V stays reserved** for pasting.
+
+With command mode off, the keyboard hook skips the command chord with one flag
+check per key. The card still shows the warning, but saving never rejects a
+command hotkey that is off, so it can't block a dictation rebind.
+
 On Windows the hotkey is a keyboard-only low-level hook that ignores injected
 input; Tauri's global-shortcut plugin merely reserves the accelerator. If the
 default is already taken at startup, Parla keeps running with a
@@ -490,8 +663,10 @@ Every completed dictation (success or failure) is appended as one JSON object pe
 line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows
 (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is
 append-only and written on a background thread after the paste, so it never
-blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
-two kinds of row.
+blocks dictation. A `kind` field (`"dictation"`, `"benchmark"` or `"command"`)
+separates the kinds of row. Command rows (see
+[Command mode](#command-mode-experimental)) are listed in the main window next
+to dictations; the tray flyout shows dictations only.
 
 The main window's **History** page is the place to read and copy transcripts;
 its **Timings** page is the latency log. Each dictation's latency is split into

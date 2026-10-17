@@ -722,12 +722,12 @@ mod tests {
                     );
                     std::thread::sleep(Duration::from_millis(20));
                 };
-                let plain = crate::overlay::begin(&handle, false);
+                let plain = crate::overlay::begin(&handle, false, Duration::ZERO);
                 std::thread::sleep(Duration::from_millis(400));
                 let plain_bottom = overlay.outer_position().unwrap().y
                     + overlay.inner_size().unwrap().height as i32;
                 drop(plain);
-                let captioned = crate::overlay::begin(&handle, true);
+                let captioned = crate::overlay::begin(&handle, true, Duration::ZERO);
                 std::thread::sleep(Duration::from_millis(400));
                 let caption_bottom = overlay.outer_position().unwrap().y
                     + overlay.inner_size().unwrap().height as i32;

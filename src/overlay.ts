@@ -45,19 +45,25 @@ function queueCaption(update: CaptionUpdate): void {
 }
 
 // One small clue for the mode: a dot while the keys are held, a padlock once
-// the recording is locked hands-free.
+// the recording is locked hands-free. Command mode turns the pill orange.
+type Mode = "hold" | "locked" | "command";
 const mode = document.createElement("div");
 mode.className = "mode";
 const LOCK = `<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
   <rect x="2" y="5.25" width="8" height="5.5" rx="1.6" fill="currentColor"/>
   <path d="M3.9 5.25V3.9a2.1 2.1 0 0 1 4.2 0v1.35" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
 </svg>`;
-function setLocked(locked: boolean): void {
-  pill.dataset.locked = String(locked);
-  mode.innerHTML = locked ? LOCK : '<span class="dot"></span>';
-  mode.title = locked ? "Locked: press Ctrl+Alt to stop, Esc to cancel" : "Holding";
+const MODE_TITLES: Record<Mode, string> = {
+  hold: "Holding",
+  locked: "Locked: press Ctrl+Alt to stop, Esc to cancel",
+  command: "Command: release when done, Esc to cancel",
+};
+function setMode(next: Mode): void {
+  pill.dataset.mode = next;
+  mode.innerHTML = next === "locked" ? LOCK : '<span class="dot"></span>';
+  mode.title = MODE_TITLES[next];
 }
-setLocked(false);
+setMode("hold");
 
 const container = document.createElement("div");
 container.className = "bars";
@@ -94,7 +100,12 @@ retry.addEventListener("click", () => {
   void invoke("retry_last_failed").catch(() => undefined);
 });
 
-pill.append(mode, container, spinner, result, retry);
+// Beside the check when there is something to say, e.g. "Opened <host>"
+// after command mode opened a page.
+const label = document.createElement("span");
+label.className = "label";
+
+pill.append(mode, container, spinner, result, label, retry);
 
 const bars: HTMLDivElement[] = [];
 for (let i = 0; i < BARS; i++) {
@@ -131,6 +142,11 @@ function setPhase(nextPhase: string): void {
   result.title = failed ? "Dismiss" : "";
   if (failed) result.setAttribute("aria-label", "Dismiss");
   else result.removeAttribute("aria-label");
+  // The label arrives just before "done" and lasts until the next phase.
+  if (phase !== "done") {
+    label.textContent = "";
+    delete pill.dataset.labelled;
+  }
   pill.dataset.phase = phase;
   if (!["recording", "processing"].includes(phase)) clearCaptions();
 }
@@ -141,7 +157,11 @@ void listen<number>("level", (event) => {
   history.push(Math.min(1, Math.sqrt(event.payload) * 2.2));
   render();
 });
-void listen<boolean>("mode", (event) => setLocked(event.payload));
+void listen<Mode>("mode", (event) => setMode(event.payload));
+void listen<string>("label", (event) => {
+  label.textContent = event.payload;
+  pill.dataset.labelled = "";
+});
 void listen<string>("phase", (event) => setPhase(event.payload));
 void listen<{ generation: number; enabled: boolean }>("caption-session", (event) => {
   if (event.payload.generation < generation) return;

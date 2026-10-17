@@ -143,11 +143,50 @@ body {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.85);
 }
-.pill[data-locked="true"] .bar {
+.pill[data-mode="locked"] .bar {
   background: #b9b6ff;
 }
-.pill[data-locked="true"] .mode {
+.pill[data-mode="locked"] .mode {
   color: #b9b6ff;
+}
+/* Command mode: orange while recording and transcribing, so it never looks
+   like dictation. A failed command has no Retry (PARLA-61). */
+.pill[data-mode="command"] {
+  box-shadow:
+    0 0 0 1px rgba(255, 159, 67, 0.75),
+    0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.pill[data-mode="command"] .bar,
+.pill[data-mode="command"] .dot {
+  background: #ff9f43;
+}
+.pill[data-mode="command"] .spinner {
+  border-color: rgba(255, 159, 67, 0.25);
+  border-top-color: #ff9f43;
+}
+.pill[data-mode="command"][data-phase="error"] {
+  width: 40px;
+}
+.pill[data-mode="command"] .retry {
+  display: none;
+}
+/* A label beside the check, e.g. "Opened <host>" (PARLA-65). */
+.label {
+  display: none;
+  max-width: 180px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.9);
+  font: 12px/16px "Segoe UI", sans-serif;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pill[data-labelled][data-phase="done"] {
+  width: auto;
+  gap: 7px;
+  padding: 0 14px 0 12px;
+}
+.pill[data-labelled][data-phase="done"] .label {
+  display: block;
 }
 .bars {
   display: flex;

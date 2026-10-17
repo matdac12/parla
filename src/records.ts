@@ -10,9 +10,23 @@ export interface DictationRecord {
   provider_returned: number | null;
   pasted: number | null;
   audio_ms: number;
+  /** A command run's instruction (`kind: "command"`). */
   text: string;
   error: string | null;
+  /** Command runs only (`timing::DictationRecord`); absent on other rows. */
+  outcome?: CommandOutcome;
+  /** The page an `opened` run opened (PARLA-65). */
+  url?: string;
+  llm_model?: string;
+  tokens_in?: number;
+  tokens_out?: number;
+  llm_returned?: number;
+  /** The LLM's text reply, kept for Copy. */
+  reply?: string;
 }
+
+/** How a command run ended. `opened` is the open_url tool (PARLA-65). */
+export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled";
 
 export function must<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -77,6 +91,9 @@ export interface Settings {
   local_model: string;
   dim_other_audio: boolean;
   dim_audio_level: number;
+  /** Command mode (the Settings "Command mode" card). `hotkey` is a modifier
+   *  hold such as "LCtrl+Shift"; `reasoning_effort` is "none" or "low". */
+  command: { enabled: boolean; hotkey: string; model: string; reasoning_effort: string };
   providers: Record<string, Record<string, unknown>>;
 }
 
@@ -152,10 +169,10 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-export function copyButton(text: string): HTMLButtonElement {
+export function copyButton(text: string, label = "Copy transcript"): HTMLButtonElement {
   const button = el("button", "small", "Copy");
   button.type = "button";
-  button.setAttribute("aria-label", "Copy transcript");
+  button.setAttribute("aria-label", label);
   let timer: number | undefined;
   button.addEventListener("click", () => {
     void copyText(text).then(

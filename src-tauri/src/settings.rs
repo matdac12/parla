@@ -1,4 +1,5 @@
 //! Shared persisted settings. Provider sections remain owned by their providers.
+use crate::hotkey::CommandChord;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -25,7 +26,37 @@ pub struct Settings {
     pub dim_other_audio: bool,
     /// Percent of each app's volume kept while dimmed.
     pub dim_audio_level: u8,
+    /// Command mode (PARLA-61), off by default and the only LLM path (ADR-0001).
+    pub command: CommandSettings,
     pub providers: BTreeMap<String, serde_json::Value>,
+}
+
+/// The `command` section, edited in the Settings "Command mode" card.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandSettings {
+    pub enabled: bool,
+    /// The command hotkey: a hold of 2+ modifiers (`hotkey::parse_command_hotkey`).
+    /// Kept as typed, so the default stays byte-identical in settings.json.
+    pub hotkey: String,
+    pub model: String,
+    /// `none` or `low`. The default is `low` (Mattia's call): in the live eval
+    /// (`tests/command_eval.rs`, PARLA-68) it chose text vs `open_url` right
+    /// under every prompt tried, where `none` was sensitive to wording.
+    pub reasoning_effort: String,
+}
+
+pub const DEFAULT_COMMAND_HOTKEY: &str = "LCtrl+Shift";
+
+impl Default for CommandSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: DEFAULT_COMMAND_HOTKEY.into(),
+            model: "gpt-6-luna".into(),
+            reasoning_effort: "low".into(),
+        }
+    }
 }
 
 /// The local Parakeet exports Parla can run on the same engine (see models.rs).
@@ -73,6 +104,7 @@ impl Default for Settings {
             local_model: LocalModel::default(),
             dim_other_audio: true,
             dim_audio_level: crate::dim::DEFAULT_LEVEL_PERCENT,
+            command: CommandSettings::default(),
             providers: BTreeMap::new(),
         }
     }
@@ -137,13 +169,35 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     result
 }
 
+/// The chord to arm: `None` while command mode is off, so a command hotkey
+/// that is off can never block saving the rest of the settings.
+pub fn command_chord(settings: &Settings) -> Result<Option<CommandChord>, String> {
+    if !settings.command.enabled {
+        return Ok(None);
+    }
+    crate::hotkey::parse_command_hotkey(&settings.command.hotkey, &settings.hotkey).map(Some)
+}
+
 /// Must be called on a blocking worker: Hotkey::set_shortcut waits for the main
 /// thread. Delay changes take effect through the next flow settings snapshot.
+/// The command chord was checked against `settings.hotkey`, so it changes only
+/// once that dictation hotkey is bound: a failed rebind keeps both old ones.
+/// An invalid command hotkey leaves command mode disarmed, never dictation.
 pub fn apply(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> {
     let hotkey = app
         .try_state::<crate::hotkey::Hotkey>()
         .ok_or("Hotkey listener is unavailable; restart Parla")?;
-    hotkey.set_shortcut(&settings.hotkey)
+    hotkey.set_shortcut(&settings.hotkey)?;
+    match command_chord(settings) {
+        Ok(chord) => {
+            hotkey.set_command_chord(chord);
+            Ok(())
+        }
+        Err(error) => {
+            hotkey.set_command_chord(None);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +215,23 @@ mod vocabulary_tests {
         assert!(s.dim_other_audio, "dimming is on for existing users");
         assert!(s.auto_send, "auto-send is on for existing users");
         assert_eq!(s.dim_audio_level, crate::dim::DEFAULT_LEVEL_PERCENT);
+    }
+    #[test]
+    fn old_settings_load_command_mode_off_with_its_defaults() {
+        let old: Settings = serde_json::from_str(r#"{"hotkey":"Ctrl+Alt+Space"}"#).unwrap();
+        let json = serde_json::to_value(&old).unwrap();
+        assert_eq!(
+            json["command"],
+            serde_json::json!({
+                "enabled": false,
+                "hotkey": "LCtrl+Shift",
+                "model": "gpt-6-luna",
+                "reasoning_effort": "low",
+            })
+        );
+        let partial: Settings = serde_json::from_str(r#"{"command":{"enabled":true}}"#).unwrap();
+        assert!(partial.command.enabled);
+        assert_eq!(partial.command.model, "gpt-6-luna");
     }
     #[test]
     fn local_model_defaults_to_v3_and_round_trips() {

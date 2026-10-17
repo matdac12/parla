@@ -1,9 +1,10 @@
 //! The small always-on-top pill: live level meter while recording, a spinner
-//! while transcribing, and a brief done/error confirmation.
+//! while transcribing, and a brief done/error confirmation, with a label
+//! beside the check when there is something to say ("Opened <host>").
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -16,9 +17,12 @@ const WIDTH: f64 = 144.0;
 const HEIGHT: f64 = 40.0;
 const CAPTION_WIDTH: f64 = 366.0;
 const CAPTION_HEIGHT: f64 = 116.0;
-static CAPTIONS_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Room for a label such as "Opened <host>" beside the check (PARLA-65).
+const LABELLED_WIDTH: f64 = 248.0;
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 const DONE_HOLD: Duration = Duration::from_millis(750);
+/// Long enough to read the label.
+const LABELLED_HOLD: Duration = Duration::from_millis(1500);
 /// A failed dictation keeps its pill (Dismiss and Retry buttons) up for a while.
 const ERROR_HOLD: Duration = Duration::from_secs(10);
 
@@ -74,10 +78,18 @@ fn set_memory_target(window: &tauri::WebviewWindow, low: bool) {
 #[cfg(not(windows))]
 fn set_memory_target(_window: &tauri::WebviewWindow, _low: bool) {}
 
-/// Tells the overlay whether the recording is locked hands-free (true) or held
-/// push-to-talk (false).
-pub fn set_mode(app: &tauri::AppHandle, locked: bool) {
-    let _ = app.emit_to(LABEL, "mode", locked);
+/// What the pill is recording: a held or locked dictation, or a command run
+/// (orange, so it never looks like dictation). Kept until the next session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PillMode {
+    Hold,
+    Locked,
+    Command,
+}
+
+pub fn set_mode(app: &tauri::AppHandle, mode: PillMode) {
+    let _ = app.emit_to(LABEL, "mode", mode);
 }
 
 fn place(app: &tauri::AppHandle) {
@@ -90,27 +102,62 @@ fn place(app: &tauri::AppHandle) {
     let scale = monitor.scale_factor();
     let size = monitor.size();
     let origin = monitor.position();
-    let (width, height) = dimensions(CAPTIONS_ENABLED.load(Ordering::Acquire));
+    let (width, height) = Size::current().dimensions();
     let x = origin.x + ((f64::from(size.width) - width * scale) / 2.0) as i32;
     let y = origin.y + (f64::from(size.height) - (height + 72.0) * scale) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-fn dimensions(captions: bool) -> (f64, f64) {
-    if captions {
-        (CAPTION_WIDTH, CAPTION_HEIGHT)
-    } else {
-        (WIDTH, HEIGHT)
+/// The overlay window's size: the pill alone, under live captions, or with a
+/// result label.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Size {
+    Pill,
+    Captions,
+    Labelled,
+}
+/// The window's size now.
+static SIZE: AtomicU8 = AtomicU8::new(Size::Pill as u8);
+/// The session's size: a label widens the window only until the pill hides,
+/// so the next key-down finds it at the right size.
+static SESSION_SIZE: AtomicU8 = AtomicU8::new(Size::Pill as u8);
+
+impl Size {
+    fn load(cell: &AtomicU8) -> Self {
+        match cell.load(Ordering::Acquire) {
+            size if size == Size::Captions as u8 => Size::Captions,
+            size if size == Size::Labelled as u8 => Size::Labelled,
+            _ => Size::Pill,
+        }
+    }
+
+    fn current() -> Self {
+        Self::load(&SIZE)
+    }
+
+    fn dimensions(self) -> (f64, f64) {
+        match self {
+            Size::Pill => (WIDTH, HEIGHT),
+            Size::Captions => (CAPTION_WIDTH, CAPTION_HEIGHT),
+            Size::Labelled => (LABELLED_WIDTH, HEIGHT),
+        }
+    }
+
+    /// Resizes the window only when the size changes.
+    fn apply(self, app: &tauri::AppHandle) {
+        if SIZE.swap(self as u8, Ordering::AcqRel) != self as u8 {
+            if let Some(window) = app.get_webview_window(LABEL) {
+                let (width, height) = self.dimensions();
+                let _ = window.set_size(LogicalSize::new(width, height));
+            }
+        }
     }
 }
 
 fn configure(app: &tauri::AppHandle, captions: bool, generation: u64) {
-    if CAPTIONS_ENABLED.swap(captions, Ordering::AcqRel) != captions {
-        if let Some(window) = app.get_webview_window(LABEL) {
-            let (width, height) = dimensions(captions);
-            let _ = window.set_size(LogicalSize::new(width, height));
-        }
-    }
+    let size = if captions { Size::Captions } else { Size::Pill };
+    SESSION_SIZE.store(size as u8, Ordering::Release);
+    size.apply(app);
     let _ = app.emit_to(
         LABEL,
         "caption-session",
@@ -152,9 +199,10 @@ pub struct Overlay {
     captions_live: Arc<AtomicBool>,
 }
 
-/// Starts a session. The pill appears after a short delay (so brief or
-/// cancelled holds never flash it) and streams microphone levels.
-pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
+/// Starts a session. The pill appears once the keys have been held for a
+/// short delay (so brief or cancelled holds never flash it) and streams
+/// microphone levels. `held` is how long they were already down.
+pub fn begin(app: &tauri::AppHandle, captions: bool, held: Duration) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let metering = Arc::new(AtomicBool::new(true));
     // Back to normal well before the delayed reveal.
@@ -172,7 +220,7 @@ pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
             let live =
                 || flag.load(Ordering::Acquire) && GENERATION.load(Ordering::Acquire) == generation;
             let step = Duration::from_millis(25);
-            for _ in 0..(SHOW_DELAY.as_millis() / step.as_millis()) {
+            for _ in 0..(SHOW_DELAY.saturating_sub(held).as_millis() / step.as_millis()) {
                 if !live() {
                     return;
                 }
@@ -207,6 +255,8 @@ fn set_interactive(app: &tauri::AppHandle, interactive: bool) {
 pub fn begin_processing(app: &tauri::AppHandle) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     set_interactive(app, false);
+    // A retry is a dictation, even right after an orange command pill.
+    set_mode(app, PillMode::Hold);
     configure(app, false, generation);
     let overlay = Overlay {
         app: app.clone(),
@@ -241,6 +291,8 @@ fn hide(app: &tauri::AppHandle) {
         let _ = window.as_ref().hide();
         set_memory_target(&window, true);
     }
+    // Off the key-down path: undoes a label's widening while hidden.
+    Size::load(&SESSION_SIZE).apply(app);
 }
 
 impl Overlay {
@@ -280,7 +332,18 @@ impl Overlay {
 
     /// Shows a short confirmation (check on success, cross on failure), then
     /// hides the pill.
-    pub fn finish(mut self, ok: bool) {
+    pub fn finish(self, ok: bool) {
+        self.settle(ok, if ok { DONE_HOLD } else { ERROR_HOLD });
+    }
+
+    /// The check with `label` beside it, held a little longer to be read.
+    pub fn finish_labelled(self, label: &str) {
+        Size::Labelled.apply(&self.app);
+        let _ = self.app.emit_to(LABEL, "label", label);
+        self.settle(true, LABELLED_HOLD);
+    }
+
+    fn settle(mut self, ok: bool, hold: Duration) {
         self.clear_captions();
         self.settled = true;
         self.metering.store(false, Ordering::Release);
@@ -294,7 +357,6 @@ impl Overlay {
             .emit_to(LABEL, "phase", if ok { "done" } else { "error" });
         let app = self.app.clone();
         let generation = self.generation;
-        let hold = if ok { DONE_HOLD } else { ERROR_HOLD };
         let _ = std::thread::Builder::new()
             .name("parla-overlay-hide".into())
             .spawn(move || {
@@ -434,7 +496,7 @@ mod native_tests {
                 // SAFETY: read-only user32 queries.
                 let focused = unsafe { GetForegroundWindow() };
                 let failed_pill = || {
-                    let overlay = begin(&handle, false);
+                    let overlay = begin(&handle, false, Duration::ZERO);
                     std::thread::sleep(Duration::from_millis(400));
                     overlay.processing();
                     overlay.finish(false);
