@@ -177,16 +177,16 @@ void listen<CaptionUpdate>("caption", (event) => queueCaption(event.payload));
 // button closes it or the next session starts. Rust says what it shows; the
 // window takes clicks only over the box reported here.
 /** The footer's buttons; Dismiss is always the ✕. */
-type CardAction = "copy" | "paste";
+type CardAction = "copy" | "paste" | "replace";
 interface CardView {
-  tag: "not_pasted";
+  tag: "not_pasted" | "command";
   header: string | null;
   text: string;
   actions: CardAction[];
   primary: CardAction;
 }
-const TAGS: Record<CardView["tag"], string> = { not_pasted: "Not pasted · no text field" };
-const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste" };
+const TAGS: Record<CardView["tag"], string> = { not_pasted: "Not pasted · no text field", command: "Command" };
+const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste", replace: "Replace" };
 const card = document.getElementById("card") as HTMLElement;
 const cardClose = card.querySelector(".card-close") as HTMLButtonElement;
 const cardTag = card.querySelector(".card-tag span") as HTMLSpanElement;
@@ -207,6 +207,7 @@ function reportCardBounds(): void {
 function showCard(generation: number, view: CardView): void {
   cardGeneration = generation;
   card.setAttribute("aria-label", TAGS[view.tag]);
+  card.dataset.tag = view.tag;
   cardTag.textContent = TAGS[view.tag];
   cardHeader.textContent = view.header === null ? "" : `“${view.header}”`;
   cardBody.textContent = view.text;

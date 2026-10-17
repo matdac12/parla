@@ -1,14 +1,15 @@
 //! The command mode eval (PARLA-68): fixed IT/EN instructions through the
 //! real request builder, parser and URL validator, 3x at each reasoning
 //! effort, graded and timed. It informed the default effort (`low`, Mattia's
-//! call); re-run it whenever the system prompt, the request or a tool changes:
+//! call), and grades each text reply's `kind`, edit or answer (PARLA-81);
+//! re-run it whenever the system prompt, the request or a tool changes:
 //! `OPENAI_API_KEY=... cargo test --test command_eval -- --ignored --nocapture`
 //! (about 160 calls, under a cent). The grading itself runs offline in every
 //! `cargo test`.
 
 use parla_lib::{
     command_mode::{
-        responses::{send, Reply, Request, ToolCall},
+        responses::{send, Kind, Reply, Request, ToolCall},
         tools::{self, Tool},
     },
     settings::CommandSettings,
@@ -24,10 +25,11 @@ use Lang::{En, It};
 
 /// What a right reply looks like.
 enum Expect {
-    /// Text to paste: in `lang`, containing every `keeps` word (case-blind;
-    /// `a|b` means either) and none of the `drops` (a translation's source
-    /// words), with at least `bullets` bullet lines.
+    /// Text of the `kind` given: in `lang`, containing every `keeps` word
+    /// (case-blind; `a|b` means either) and none of the `drops` (a
+    /// translation's source words), with at least `bullets` bullet lines.
     Text {
+        kind: Kind,
         lang: Option<Lang>,
         keeps: &'static [&'static str],
         drops: &'static [&'static str],
@@ -43,17 +45,31 @@ enum Expect {
 
 const SEARCH_ENGINES: &[&str] = &["google.com", "google.it", "bing.com", "duckduckgo.com"];
 
+/// An edit: text for the document.
 const fn says(lang: Lang, keeps: &'static [&'static str]) -> Expect {
     Expect::Text {
+        kind: Kind::Edit,
         lang: Some(lang),
         keeps,
         drops: &[],
         bullets: 0,
     }
 }
+/// An answer to the user, in any language.
 const fn answers(keeps: &'static [&'static str]) -> Expect {
     Expect::Text {
+        kind: Kind::Answer,
         lang: None,
+        keeps,
+        drops: &[],
+        bullets: 0,
+    }
+}
+/// An answer about the selection, in the instruction's language `lang`.
+const fn explains(lang: Lang, keeps: &'static [&'static str]) -> Expect {
+    Expect::Text {
+        kind: Kind::Answer,
+        lang: Some(lang),
         keeps,
         drops: &[],
         bullets: 0,
@@ -61,6 +77,7 @@ const fn answers(keeps: &'static [&'static str]) -> Expect {
 }
 const fn lists(lang: Lang, keeps: &'static [&'static str], bullets: usize) -> Expect {
     Expect::Text {
+        kind: Kind::Edit,
         lang: Some(lang),
         keeps,
         drops: &[],
@@ -73,6 +90,7 @@ const fn translates(
     drops: &'static [&'static str],
 ) -> Expect {
     Expect::Text {
+        kind: Kind::Edit,
         lang: Some(lang),
         keeps,
         drops,
@@ -179,6 +197,29 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
         None,
         says(It, &[]),
     ),
+    // A value to insert is an edit.
+    ("scrivi la data di oggi", None, says(It, &["2026"])),
+    // Questions about a selection are answers, in the instruction's language.
+    (
+        "Cosa significa questa clausola?",
+        Some("Art. 13 — Foro competente. Per ogni controversia relativa al presente contratto è competente in via esclusiva il Foro di Milano."),
+        explains(It, &["milano"]),
+    ),
+    (
+        "what does this mean?",
+        Some("The Supplier shall indemnify the Customer against all losses arising from any breach of this Agreement."),
+        explains(En, &[]),
+    ),
+    (
+        "Cosa vuol dire?",
+        Some("The meeting has been postponed until further notice."),
+        explains(It, &["riunione|incontro"]),
+    ),
+    (
+        "È scritto bene?",
+        Some("Gentile cliente, la informiamo che il suo ordine e stato spedito ieri."),
+        explains(It, &[]),
+    ),
     // Open a page.
     (
         "apri la pagina di Wikipedia su Roma",
@@ -219,6 +260,8 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
 struct Verdict {
     /// Text when text was expected, an `open_url` call when a page was.
     kind_ok: bool,
+    /// Texts only: labelled edit or answer as expected (PARLA-81).
+    reply_kind_ok: bool,
     /// Texts only: no preamble, wrapping quotes, markdown, stray spaces or
     /// leaked tags.
     clean: bool,
@@ -329,18 +372,30 @@ fn grade(expect: &Expect, reply: &Reply) -> Verdict {
         },
         (
             Expect::Text {
+                kind,
                 lang,
                 keeps,
                 drops,
                 bullets,
             },
             None,
-        ) => grade_text(*lang, keeps, drops, *bullets, &reply.text),
+        ) => {
+            let mut verdict = grade_text(*kind, *lang, keeps, drops, *bullets, &reply.text);
+            verdict.reply_kind_ok = reply.kind == Some(*kind);
+            if !verdict.reply_kind_ok {
+                verdict
+                    .problems
+                    .push(format!("labelled {:?}, not {kind:?}", reply.kind));
+            }
+            verdict
+        }
         (Expect::Open { hosts, has }, Some(call)) => grade_page(hosts, has, call),
     }
 }
 
+/// An answer is conversational: an opener such as "Certo" is no preamble.
 fn grade_text(
+    kind: Kind,
     lang: Option<Lang>,
     keeps: &[&'static str],
     drops: &[&'static str],
@@ -352,8 +407,9 @@ fn grade_text(
     let first = lines.next().unwrap_or_default().to_lowercase();
     let mut problems = Vec::new();
     // An opener, or a first line that announces what follows ("Testo corretto:").
-    if PREAMBLES.iter().any(|opener| first.starts_with(opener))
-        || (first.ends_with(':') && lines.next().is_some())
+    if kind == Kind::Edit
+        && (PREAMBLES.iter().any(|opener| first.starts_with(opener))
+            || (first.ends_with(':') && lines.next().is_some()))
     {
         problems.push("preamble".to_string());
     }
@@ -400,6 +456,7 @@ fn grade_text(
     }
     Verdict {
         kind_ok: true,
+        reply_kind_ok: false,
         clean: dirt == 0,
         correct: problems.len() == dirt,
         problems,
@@ -429,6 +486,7 @@ fn grade_page(hosts: &[&'static str], has: &[&'static str], call: &ToolCall) -> 
     };
     Verdict {
         kind_ok: true,
+        reply_kind_ok: false,
         clean: false,
         correct: problems.is_empty(),
         problems,
@@ -519,6 +577,9 @@ fn table(samples: &[Sample]) -> String {
         ),
         row("Outcome kind right (text vs `open_url`)", &|samples| {
             share(samples, all, |sample| sample.verdict.kind_ok)
+        }),
+        row("Reply kind right (edit vs answer)", &|samples| {
+            share(samples, is_text, |sample| sample.verdict.reply_kind_ok)
         }),
         row(
             "Pages right (http(s), plausible host and terms)",
@@ -649,6 +710,18 @@ fn the_eval_grades_every_case_at_each_effort() {
             "Outcome kinds wrong at `{effort}`: {:?}",
             wrong_kind(effort)
         );
+        let mislabelled: Vec<String> = samples
+            .iter()
+            .filter(|sample| {
+                sample.effort == effort
+                    && !sample.failed
+                    && is_text(sample)
+                    && sample.verdict.kind_ok
+                    && !sample.verdict.reply_kind_ok
+            })
+            .map(|sample| format!("#{} {:?}", sample.case, CASES[sample.case].0))
+            .collect();
+        println!("Reply kinds wrong at `{effort}`: {mislabelled:?}");
     }
     // The gate for a re-run: the shipped default still picks text vs tool right.
     let default_wrong = wrong_kind(&defaults.reasoning_effort);
@@ -665,14 +738,23 @@ mod grading {
     fn text(text: &str) -> Reply {
         Reply {
             text: text.into(),
+            kind: Some(Kind::Edit),
             call: None,
             tokens_in: Some(1),
             tokens_out: Some(1),
         }
     }
 
+    fn answer(text: &str) -> Reply {
+        Reply {
+            kind: Some(Kind::Answer),
+            ..super::grading::text(text)
+        }
+    }
+
     fn opens(url: &str) -> Reply {
         Reply {
+            kind: None,
             call: Some(ToolCall {
                 name: tools::OPEN_URL.into(),
                 arguments: serde_json::json!({ "url": url }).to_string(),
@@ -709,6 +791,35 @@ mod grading {
             assert!(verdict.kind_ok, "{dirty:?}");
             assert!(!verdict.clean, "{dirty:?}");
         }
+    }
+
+    #[test]
+    fn a_reply_labelled_with_the_wrong_kind_is_counted_but_still_graded() {
+        let edit = grade(&FORMAL, &text("La saluto, a domani."));
+        assert!(edit.reply_kind_ok && edit.correct);
+        let mislabelled = grade(&FORMAL, &answer("La saluto, a domani."));
+        assert!(!mislabelled.reply_kind_ok);
+        assert!(mislabelled.kind_ok && mislabelled.clean && mislabelled.correct);
+        let explained = explains(It, &["milano"]);
+        // Conversational: an answer may open with "Certo".
+        let chatty = grade(
+            &explained,
+            &answer("Certo: vuol dire che le cause si discutono solo a Milano."),
+        );
+        assert!(
+            chatty.reply_kind_ok && chatty.clean && chatty.correct,
+            "{:?}",
+            chatty.problems
+        );
+        // In the instruction's language, not the selection's.
+        assert!(
+            !grade(
+                &explained,
+                &answer("It means only Milan's court hears disputes.")
+            )
+            .correct
+        );
+        assert!(!grade(&explained, &text("Vuol dire che decide il foro di Milano.")).reply_kind_ok);
     }
 
     #[test]
@@ -811,6 +922,7 @@ mod grading {
             failed: false,
             verdict: Verdict {
                 kind_ok,
+                reply_kind_ok: correct,
                 clean: true,
                 correct,
                 problems: Vec::new(),
@@ -839,6 +951,7 @@ mod grading {
             table,
             "| | `none` | `low` |\n|---|---|---|\n\
              | Outcome kind right (text vs `open_url`) | 1/2 | 2/2 |\n\
+             | Reply kind right (edit vs answer) | 1/1 | 0/1 |\n\
              | Pages right (http(s), plausible host and terms) | 0/1 | 1/1 |\n\
              | Text clean (no preamble, quotes or markdown) | 1/1 | 1/1 |\n\
              | Text correct (language, kept words, bullets) | 1/1 | 0/1 |\n\

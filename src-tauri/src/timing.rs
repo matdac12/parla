@@ -59,6 +59,10 @@ pub struct DictationRecord {
     /// The LLM's text reply, kept for Copy (PARLA-66) even if the paste failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
+    /// Whether a `shown` reply was an edit or an answer (PARLA-81). Not
+    /// `kind`, which names the row's origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_kind: Option<crate::command_mode::responses::Kind>,
     /// The selection's length in characters, 0 for none (PARLA-64); its
     /// text is never kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,8 +85,10 @@ pub struct DictationRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommandOutcome {
+    /// A command reply pasted at once, before PARLA-81: older rows only.
     Pasted,
-    /// Opened in the Card, not pasted: a dictation with nowhere to land.
+    /// Opened in the Card, not pasted: a dictation with nowhere to land, or
+    /// a command's text reply (PARLA-81).
     Shown,
     /// A tool opened a page instead of a paste.
     Opened,
@@ -122,6 +128,7 @@ impl DictationRecord {
             tokens_out: None,
             llm_returned: None,
             reply: None,
+            reply_kind: None,
             selection_chars: None,
             app: None,
             tool: None,

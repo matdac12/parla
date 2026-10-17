@@ -272,6 +272,10 @@ body {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.7);
 }
+/* A command reply (PARLA-81): the command pill's orange. */
+.card[data-tag="command"] .card-tag i {
+  background: #ff9f43;
+}
 .card-header {
   flex: 1;
   overflow: hidden;

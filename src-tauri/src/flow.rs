@@ -300,10 +300,9 @@ fn run_session(
     // While the user is still speaking, never for a dictation or a quick
     // Ctrl+Shift shortcut: read the selection (PARLA-64) and open the
     // connection the LLM request will use.
-    let desktop = CommandDesktop::new(&settings);
     let selection = (command && held).then(|| {
         crate::provider::openai::prewarm(&settings);
-        SelectionRead::start(desktop)
+        SelectionRead::start()
     });
     // After the mic started, so it never delays the first syllable.
     let dimmed = held.then(|| crate::dim::dim(&settings));
@@ -365,7 +364,7 @@ fn run_session(
     if cancelled.load(Ordering::Acquire) {
         drop(stream);
         if let Some(selection) = selection {
-            selection.join().give_back(&desktop);
+            selection.join().give_back(&CommandDesktop);
         }
         return;
     }
@@ -384,11 +383,12 @@ fn run_session(
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
         if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
-            match outcome.label() {
-                Some(label) => overlay.finish_labelled(&label),
-                None if ok => overlay.finish(Ending::Done),
+            match (outcome.label(), outcome) {
+                (Some(label), _) => overlay.finish_labelled(&label),
+                (None, command_mode::Outcome::Shown(card)) => overlay.finish(Ending::Card(card)),
+                (None, _) if ok => overlay.finish(Ending::Done),
                 // A command run keeps no clip: Retry would re-run a dictation's.
-                None => overlay.finish(Ending::Failed { retry: false }),
+                (None, _) => overlay.finish(Ending::Failed { retry: false }),
             }
         }
         return;
@@ -655,7 +655,7 @@ fn finish_command(
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     record.kind = timing::COMMAND_KIND.into();
     let ports = command_mode::Ports {
-        desktop: &CommandDesktop::new(settings),
+        desktop: &CommandDesktop,
         llm: &command_mode::responses::OpenAi(settings),
         browser: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
@@ -683,7 +683,7 @@ fn finish_command(
         }
     });
     match &outcome {
-        command_mode::Outcome::Pasted | command_mode::Outcome::Opened { .. } => {
+        command_mode::Outcome::Shown(_) | command_mode::Outcome::Opened { .. } => {
             crate::failure::on_success(app)
         }
         command_mode::Outcome::Failed(command_mode::Failure::Transcription(error)) => {
@@ -705,21 +705,9 @@ impl Drop for DisarmEsc {
     }
 }
 
-/// The command run's desktop port: the inserter's selection read, paste and
-/// clipboard restore.
-#[derive(Clone, Copy)]
-struct CommandDesktop {
-    restore_delay: Duration,
-    compatibility_mode: bool,
-}
-impl CommandDesktop {
-    fn new(settings: &Settings) -> Self {
-        Self {
-            restore_delay: Duration::from_millis(settings.restore_delay_ms),
-            compatibility_mode: settings.paste_compatibility_mode,
-        }
-    }
-}
+/// The command run's desktop port: the inserter's selection read and
+/// clipboard give-back. It has no paste: the Card's buttons paste.
+struct CommandDesktop;
 impl command_mode::Desktop for CommandDesktop {
     fn clipboard_text(&self) -> Result<Option<String>, String> {
         inserter::clipboard_text()
@@ -739,13 +727,6 @@ impl command_mode::Desktop for CommandDesktop {
     fn wait(&self, delay: Duration) {
         std::thread::sleep(delay);
     }
-    fn paste(
-        &self,
-        text: &str,
-        borrowed: Option<&command_mode::Borrowed>,
-    ) -> Result<Instant, String> {
-        inserter::paste_over_borrowed(text, borrowed, self.restore_delay, self.compatibility_mode)
-    }
     fn give_back(&self, borrowed: &command_mode::Borrowed) {
         inserter::give_back(borrowed);
     }
@@ -755,10 +736,10 @@ impl command_mode::Desktop for CommandDesktop {
 /// run joins it (PARLA-64).
 struct SelectionRead(Option<std::thread::JoinHandle<command_mode::Selection>>);
 impl SelectionRead {
-    fn start(desktop: CommandDesktop) -> Self {
+    fn start() -> Self {
         let read = std::thread::Builder::new()
             .name("parla-selection".into())
-            .spawn(move || command_mode::read_selection(&desktop));
+            .spawn(|| command_mode::read_selection(&CommandDesktop));
         Self(
             read.map_err(|error| eprintln!("Cannot read the selection: {error}"))
                 .ok(),
