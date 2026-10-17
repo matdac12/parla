@@ -1,4 +1,4 @@
-/* Shared design tokens and base styles: neutral surfaces, one indigo accent,
+/* Shared design tokens and base styles: neutral surfaces, one Windows-blue accent,
    native system font, automatic dark mode. */
 :root {
   color-scheme: light dark;
@@ -11,8 +11,8 @@
   --text: #16161a;
   --text-2: #5b5b66;
   --text-3: #8a8a96;
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
+  --accent: #0067c0;
+  --accent-hover: #005a9e;
   --on-accent: #ffffff;
   --danger: #d92d3a;
   --danger-bg: #fdecee;
@@ -42,9 +42,9 @@
     --text: #ececf1;
     --text-2: #a4a4b0;
     --text-3: #77777f;
-    --accent: #8b85ff;
-    --accent-hover: #a09bff;
-    --on-accent: #101014;
+    --accent: #4cc2ff;
+    --accent-hover: #7dd3ff;
+    --on-accent: #002338;
     --danger: #ff6b76;
     --danger-bg: #2c1b1e;
     --success: #4cc684;

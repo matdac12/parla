@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
-import "./style.css";
 import "./settings.css";
 
 interface Settings {
@@ -112,6 +111,8 @@ const els = {
   dimAudio: byId<HTMLInputElement>("dim-audio"),
   dimLevel: byId<HTMLInputElement>("dim-level"),
   status: byId<HTMLSpanElement>("status"),
+  savebar: byId<HTMLDivElement>("savebar"),
+  discard: byId<HTMLButtonElement>("discard"),
   save: byId<HTMLButtonElement>("save"),
 };
 
@@ -123,6 +124,41 @@ const state: { settings: Settings | null; providers: ProviderInfo[]; baseline: s
 
 let saving = false;
 let switchingProvider = false;
+/** Re-read each provider field from the settings, after Discard. */
+const fieldSyncs: Array<() => void> = [];
+/** Local models as last listed (also names the active one in the rail). */
+let models: LocalModelStatus[] = [];
+
+/** What the rest of the window shows from the *saved* settings. */
+export interface Applied {
+  hotkey: string;
+  engine: string;
+  ready: boolean;
+  reason: string | null;
+}
+
+let appliedListener: ((applied: Applied) => void) | null = null;
+
+export function onApplied(listener: (applied: Applied) => void): void {
+  appliedListener = listener;
+  notifyApplied();
+}
+
+function notifyApplied(): void {
+  if (!appliedListener || state.baseline === "") return;
+  const saved: Settings = JSON.parse(state.baseline);
+  const provider = state.providers.find((p) => p.id === saved.active_provider);
+  const model = models.find((m) => m.id === saved.local_model);
+  const engine = saved.active_provider === "parakeet" && model
+    ? model.name
+    : provider?.display_name ?? saved.active_provider;
+  appliedListener({
+    hotkey: saved.hotkey,
+    engine,
+    ready: provider?.available ?? false,
+    reason: provider ? provider.reason : "Provider not registered",
+  });
+}
 
 function textEl(tag: string, text: string, className?: string): HTMLElement {
   const element = document.createElement(tag);
@@ -131,10 +167,20 @@ function textEl(tag: string, text: string, className?: string): HTMLElement {
   return element;
 }
 
+let statusTimer: number | undefined;
+
 function setStatus(text: string, kind: "success" | "warning" | "error" | "dirty" | "" = ""): void {
   els.status.textContent = text;
   els.status.className = kind ? `status status-${kind}` : "status";
   els.status.dataset.kind = kind;
+  window.clearTimeout(statusTimer);
+  // "Saved" confirms, it is not a state: let the bar go after a moment.
+  if (kind === "success") {
+    statusTimer = window.setTimeout(() => {
+      setStatus("");
+      updateDirty();
+    }, 2500);
+  }
 }
 
 // The provider applies on click (select_provider), not on Save, so its
@@ -148,13 +194,19 @@ function updateDirty(): void {
   if (!state.settings) return;
   const dirty = JSON.stringify(state.settings) !== state.baseline;
   els.save.disabled = saving || switchingProvider || !dirty;
+  els.discard.disabled = els.save.disabled;
   if (dirty) {
     if (els.status.dataset.kind !== "error" && els.status.dataset.kind !== "warning") {
-      setStatus("Unsaved changes.", "dirty");
+      setStatus("Unsaved changes", "dirty");
     }
   } else if (els.status.dataset.kind === "dirty") {
     setStatus("");
   }
+  // The bar sticks to the bottom only while there is something to save or report.
+  const buttons = dirty || saving;
+  els.save.hidden = !buttons;
+  els.discard.hidden = !buttons;
+  els.savebar.hidden = !buttons && els.status.textContent === "";
 }
 
 function providerSection(settings: Settings, id: string): Record<string, unknown> {
@@ -216,6 +268,7 @@ async function selectProvider(id: string): Promise<void> {
     state.baseline = JSON.stringify(baseline);
     const name = state.providers.find((p) => p.id === id)?.display_name ?? id;
     setProviderStatus(`${name} is now active. Saved.`, "success");
+    notifyApplied();
   } catch (error) {
     state.settings.active_provider = previous;
     setProviderStatus(`Could not switch provider: ${String(error)}`, "error");
@@ -241,7 +294,9 @@ function revealToggle(input: HTMLInputElement): HTMLButtonElement {
   return button;
 }
 
-function buildField(providerId: string, spec: FieldSpec, config: Record<string, unknown>): HTMLElement {
+function buildField(providerId: string, spec: FieldSpec): HTMLElement {
+  // Looked up on each use: Discard replaces the whole settings object.
+  const config = (): Record<string, unknown> => providerSection(state.settings as Settings, providerId);
   const wrapper = document.createElement("div");
   wrapper.className = "field";
 
@@ -255,14 +310,18 @@ function buildField(providerId: string, spec: FieldSpec, config: Record<string, 
   input.autocomplete = "off";
   input.spellcheck = false;
   if (spec.placeholder) input.placeholder = spec.placeholder;
-  const current = config[spec.key];
-  input.value = typeof current === "string" && current.trim() !== "" ? current : (spec.default ?? "");
-  if (spec.default !== undefined && config[spec.key] !== input.value) {
-    config[spec.key] = input.value;
+  const sync = (): void => {
+    const current = config()[spec.key];
+    input.value = typeof current === "string" && current.trim() !== "" ? current : (spec.default ?? "");
+  };
+  sync();
+  fieldSyncs.push(sync);
+  if (spec.default !== undefined && config()[spec.key] !== input.value) {
+    config()[spec.key] = input.value;
   }
   input.addEventListener("input", () => {
     const empty = input.value.trim() === "";
-    config[spec.key] = empty ? (spec.default ?? (spec.nullable ? null : "")) : input.value;
+    config()[spec.key] = empty ? (spec.default ?? (spec.nullable ? null : "")) : input.value;
     updateDirty();
   });
 
@@ -308,7 +367,6 @@ function formatSize(bytes: number): string {
 let refreshParakeetStatus: (() => Promise<void>) | null = null;
 
 async function setupParakeet(ui: ParakeetUi): Promise<void> {
-  let models: LocalModelStatus[] = [];
   /** The model a click in this window is switching to (download included). */
   let switching: string | null = null;
   const percents = new Map<string, number>();
@@ -386,6 +444,7 @@ async function setupParakeet(ui: ParakeetUi): Promise<void> {
         else if (selected) setMessage(`${selected.name} is not downloaded yet.`);
       }
       render();
+      notifyApplied();
     } catch (error) {
       if (token !== statusToken) return;
       setMessage(String(error), true);
@@ -419,6 +478,7 @@ async function setupParakeet(ui: ParakeetUi): Promise<void> {
       state.baseline = JSON.stringify(baseline);
       const name = models.find((m) => m.id === selected)?.name ?? selected;
       setMessage(selected === id ? `${name} selected.` : `${model.name} downloaded; ${name} stays selected.`);
+      notifyApplied();
     } catch (error) {
       setMessage(String(error), true);
     } finally {
@@ -467,7 +527,7 @@ async function setupParakeet(ui: ParakeetUi): Promise<void> {
   await refresh();
 }
 
-function buildParakeet(providerId: string, settings: Settings): HTMLElement {
+function buildParakeet(providerId: string): HTMLElement {
   const wrapper = document.createElement("div");
   wrapper.className = "field";
 
@@ -484,18 +544,13 @@ function buildParakeet(providerId: string, settings: Settings): HTMLElement {
   bar.append(fill);
   wrapper.append(list, bar, status, dir);
 
-  const config = providerSection(settings, providerId);
-  const override = buildField(
-    providerId,
-    {
-      key: "model_dir",
-      label: "Parakeet v3 directory",
-      type: "text",
-      placeholder: "Default location",
-      nullable: true,
-    },
-    config,
-  );
+  const override = buildField(providerId, {
+    key: "model_dir",
+    label: "Parakeet v3 directory",
+    type: "text",
+    placeholder: "Default location",
+    nullable: true,
+  });
   override.classList.add("model-override");
 
   const container = document.createElement("div");
@@ -514,11 +569,10 @@ function renderProviderConfig(): void {
     card.append(textEl("h2", provider.display_name));
 
     if (provider.id === "parakeet") {
-      card.append(buildParakeet(provider.id, settings));
+      card.append(buildParakeet(provider.id));
     } else if (PROVIDER_FIELDS[provider.id]) {
-      const config = providerSection(settings, provider.id);
       for (const spec of PROVIDER_FIELDS[provider.id]) {
-        card.append(buildField(provider.id, spec, config));
+        card.append(buildField(provider.id, spec));
       }
     } else {
       card.append(textEl("p", "This provider has no options in the settings window.", "hint"));
@@ -531,6 +585,7 @@ async function refreshProviders(): Promise<void> {
   try {
     state.providers = await invoke<ProviderInfo[]>("list_providers");
     renderProviderRadios();
+    notifyApplied();
   } catch {
     // Keep the previous list; a transient read failure is not fatal.
   }
@@ -612,8 +667,8 @@ async function save(): Promise<void> {
   const submitted: Settings = JSON.parse(JSON.stringify(settings));
   saving = true;
   renderProviderRadios();
-  els.save.disabled = true;
   setStatus("Saving…");
+  updateDirty();
   try {
     const result = await invoke<SaveResult>("save_settings", { settings: submitted });
     state.baseline = JSON.stringify(submitted);
@@ -631,6 +686,30 @@ async function save(): Promise<void> {
     renderProviderRadios();
     updateDirty();
   }
+}
+
+/** Puts the form back to the saved settings. Provider and model switches are
+ *  saved at once, so they are part of the baseline and stay. */
+function discard(): void {
+  if (!state.settings || saving || switchingProvider) return;
+  stopCapture();
+  state.settings = JSON.parse(state.baseline) as Settings;
+  fillForm(state.settings);
+  for (const sync of fieldSyncs) sync();
+  setStatus("");
+  updateDirty();
+}
+
+function fillForm(settings: Settings): void {
+  els.hotkey.value = settings.hotkey;
+  els.delay.value = String(settings.restore_delay_ms);
+  els.pasteCompatibility.checked = settings.paste_compatibility_mode;
+  els.streaming.checked = settings.streaming_enabled;
+  els.liveCaptions.checked = settings.live_captions;
+  els.dimAudio.checked = settings.dim_other_audio;
+  els.dimLevel.value = String(settings.dim_audio_level);
+  els.dimLevel.disabled = !settings.dim_other_audio;
+  els.vocabulary.value = settings.vocabulary.join("\n");
 }
 
 function wireForm(): void {
@@ -682,6 +761,7 @@ function wireForm(): void {
     event.preventDefault();
     void save();
   });
+  els.discard.addEventListener("click", discard);
 }
 
 async function main(): Promise<void> {
@@ -694,23 +774,19 @@ async function main(): Promise<void> {
     settings.vocabulary ??= [];
     state.settings = settings;
     state.providers = providers;
-    state.baseline = JSON.stringify(settings);
-    els.hotkey.value = settings.hotkey;
-    els.delay.value = String(settings.restore_delay_ms);
-    els.pasteCompatibility.checked = settings.paste_compatibility_mode;
-    els.streaming.checked = settings.streaming_enabled;
-    els.liveCaptions.checked = settings.live_captions;
-    els.dimAudio.checked = settings.dim_other_audio;
-    els.dimLevel.value = String(settings.dim_audio_level);
-    els.dimLevel.disabled = !settings.dim_other_audio;
-    els.vocabulary.value = settings.vocabulary.join("\n");
+    fillForm(settings);
     renderProviderRadios();
     renderProviderConfig();
+    // After the provider fields wrote their defaults, so a fresh install
+    // (no provider sections yet) does not open with unsaved changes.
+    state.baseline = JSON.stringify(settings);
     updateDirty();
+    notifyApplied();
   } catch (error) {
     els.loadError.hidden = false;
     els.loadError.textContent = `Could not load settings: ${String(error)}`;
     els.save.disabled = true;
+    appliedListener?.({ hotkey: "", engine: "settings not loaded", ready: false, reason: String(error) });
   }
 }
 

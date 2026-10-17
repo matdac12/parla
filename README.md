@@ -111,17 +111,29 @@ type-checks and bundles them.
 
 ### The Parla window
 
-**Open Parla** in the tray opens the main window. It shows lifetime totals
-(**Words dictated**, **Dictations**, **Audio time**, **Total cost (est.)** and
-**Projected per year (est.)** against Wispr Flow's $144) and the transcript
-history, newest first:
-each entry has its time, provider, audio length, word count and full text, with a
-**Copy** button. A search box filters the loaded transcripts, new dictations
-appear at the top as they finish, and **Show older** loads more (200 at a time, up
-to 2000). Failed dictations are listed in red without a Copy button; the newest one,
-while its recording is still saved, has a **Retry** button that transcribes the
-saved clip and adds the result to the list (nothing is pasted, since the
-focus is Parla itself).
+**Open Parla** in the tray opens the main window: a sidebar on the left with a
+**Ready · <engine>** status line (the active provider, or the local model's name),
+then **Home**, **History**, **Timings** and five settings pages. **Benchmark ↗**
+at the bottom opens the benchmark window.
+
+- **Home** shows your shortcut (push to talk, hands-free, cancel) as set in
+  Settings, with a **Test mic** button that does what the tray item does. When the
+  newest dictation failed, a banner offers **Retry** (while its recording is
+  still saved) and **Dismiss** (hides it for that failure). Below are lifetime
+  totals (words dictated, dictations, audio time, cost with the yearly projection
+  against Wispr Flow's $144) and the five most recent dictations.
+- **History** lists dictations newest first, grouped by day: time, transcript
+  (two lines; click to expand), provider, audio length and word count, with
+  **Copy** on hover. A search box and an **All / Failed** filter narrow the loaded
+  transcripts, new dictations appear at the top as they finish, and **Show older**
+  loads more (200 at a time, up to 2000). Failed dictations are red; the newest
+  one, while its recording is still saved, has **Retry**, which transcribes the
+  saved clip and adds the result to the list (nothing is pasted, since the focus
+  is Parla itself). **Clear history…** truncates the file after a confirmation.
+- **Timings** shows the same loaded dictations as a latency log: median, fastest
+  and slowest key-up-to-pasted tiles, one stacked bar per dictation (Ready,
+  Transcribe, Paste; see [History](#history)) with its total, and the full table
+  behind **Table view**.
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a
@@ -143,18 +155,19 @@ price are left out of the total and shown as a note. The yearly projection
 older versions keep their words and get audio and cost from `history.jsonl`
 once.
 
-**Settings** opens inside the same window, with a back arrow (or **Esc**) to
-return home. The **Benchmark** and **Latency log** buttons open their own
-windows.
+Settings are split into **Transcription** (provider, keys, models, local
+model), **Dictation & hotkey** (shortcut, live transcription and captions),
+**Other audio** ([dimming](#dimming-other-audio)), **Vocabulary** and
+**Clipboard** (paste compatibility, restore delay). Switching provider or local
+model applies at once. Other edits show a **Save** bar at the bottom with
+**Discard**; it stays until you save or discard, across pages.
 
 The tray menu contains, in order:
 
 - **Open Parla** — shows or focuses the main window.
-- **Settings…** — opens the main window on its settings view (providers, keys,
-  hotkey, restore delay, Parakeet model, local model choice and
-  [dimming other audio](#dimming-other-audio)).
-- **History…** — shows the latency log window (per-stage timings; see
-  [History](#history)).
+- **Settings…** — opens the main window on its **Transcription** settings page.
+- **History…** — shows the separate latency log window (per-stage timings; see
+  [History](#history)). The main window's **Timings** page shows the same data.
 - **Benchmark…** — shows the benchmark window.
 - **Test mic (3 s)** — records three seconds from the default microphone, saves
   it as `clips/test.wav` in the app data directory, and reveals the file in
@@ -457,8 +470,9 @@ append-only and written on a background thread after the paste, so it never
 blocks dictation. A `kind` field (`"dictation"` or `"benchmark"`) separates the
 two kinds of row.
 
-The main window's list is the place to read and copy transcripts. Tray
-**History…** is the latency log: it lists dictations newest first with: wall-clock time, provider,
+The main window's **History** page is the place to read and copy transcripts;
+its **Timings** page charts the stages below. Tray **History…** is the latency
+log window: it lists dictations newest first with: wall-clock time, provider,
 captured audio length, then the latency breakdown — **Ready** (key-up to audio
 ready), **Transcribe** (audio ready to provider returned), **Paste** (provider
 returned to input injection), and **Total** (key-up to pasted). A dash means that

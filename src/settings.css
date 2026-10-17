@@ -1,7 +1,7 @@
-#view-settings { max-width: 38rem; padding: 1.5rem 1.75rem 2.5rem; margin: auto; }
-#view-settings[hidden] { display: none; }
-.page-head { margin-bottom: 1.25rem; }
-.subtitle { color: var(--text-2); margin: 0.75rem 0 1.25rem; }
+/* Settings pages inside the app window. The form fills the page area so the
+   Save bar sits at the bottom even when a page is short. */
+#settings-form { display: flex; flex-direction: column; min-height: 100%; }
+.page-banner { margin: 26px 30px 0; max-width: 580px; }
 
 .card {
   background: var(--surface);
@@ -42,7 +42,7 @@
 
 .field { margin-bottom: 1rem; }
 .field:last-child { margin-bottom: 0; }
-.field label { display: block; font-weight: 550; margin-bottom: 0.35rem; }
+.field > label { display: block; font-weight: 550; margin-bottom: 0.35rem; }
 .field input[type="text"],
 .field input[type="password"],
 .field input[type="number"],
@@ -84,22 +84,24 @@ button.capturing { background: var(--warning); color: #fff; border-color: var(--
 .model-override { margin-top: 1rem; }
 .model-status.error { color: var(--danger); }
 
-.actions {
+.savebar {
+  position: sticky;
+  bottom: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 1rem;
-  margin-top: 0.6rem;
+  gap: 10px;
+  margin-top: auto;
+  padding: 10px 30px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
 }
+.savebar .status { margin-right: auto; }
 .status { font-size: 0.9rem; }
 .status-success { color: var(--success); }
 .status-warning { color: var(--warning); }
 .status-error { color: var(--danger); }
-.status-dirty { color: var(--text-3); }
+.status-dirty { color: var(--text-2); }
 .provider-status { display: block; margin: 0.6rem 0 0; }
 .provider-status:empty { display: none; }
-
-.banner { padding: 0.75rem 1rem; border-radius: var(--radius-sm); }
-.banner-error { background: var(--danger-bg); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger); }
-
-.footer-hint { color: var(--text-3); font-size: 0.8rem; margin-top: 1.5rem; }

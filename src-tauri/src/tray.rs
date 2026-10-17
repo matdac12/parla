@@ -161,7 +161,7 @@ fn ensure_window(
 /// `clips/test.wav` in the app data dir, and logs the path. Everything runs on
 /// a spawned thread: acquiring the recorder can block while the device opens,
 /// and the menu callback must not.
-fn run_test_mic(app: &tauri::AppHandle) {
+pub(crate) fn run_test_mic(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let Some(recorder) = crate::recorder::recorder() else {

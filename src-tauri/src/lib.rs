@@ -106,6 +106,7 @@ pub fn run() {
             commands::bench::bench_runs,
             commands::app::get_stats,
             commands::app::open_window,
+            commands::app::test_mic,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Parla")

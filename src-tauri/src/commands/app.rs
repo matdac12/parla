@@ -21,3 +21,10 @@ pub fn open_window(app: tauri::AppHandle, name: String) -> Result<(), String> {
     crate::tray::show_window(&app, label, what);
     Ok(())
 }
+
+/// Test mic from the app window: the tray item's 3 s recording, saved as
+/// `clips/test.wav` and revealed. It runs on its own thread and returns at once.
+#[tauri::command]
+pub fn test_mic(app: tauri::AppHandle) {
+    crate::tray::run_test_mic(&app);
+}
