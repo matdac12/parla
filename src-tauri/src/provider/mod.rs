@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub trait SttProvider: Send + Sync {
@@ -24,14 +24,25 @@ pub trait SttProvider: Send + Sync {
 /// How soon Esc frees the pill while a blocking request runs.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
 
-/// Waits for the result of a request running on its own thread until
-/// `cancelled` is set, so Esc returns at once and a late result lands in a
-/// dropped channel. None when cancelled or the thread died. A result wakes the
-/// wait at once: the poll only bounds how long Esc takes.
-pub fn unless_cancelled<T>(result: &mpsc::Receiver<T>, cancelled: &AtomicBool) -> Option<T> {
+/// Waits up to `limit` for the answer of work running on its own thread until
+/// `cancelled` is set, so Esc returns at once and a late answer lands in a
+/// dropped channel. None when cancelled, out of time or the thread died. An
+/// answer wakes the wait at once: the poll only bounds how long Esc takes.
+pub fn unless_cancelled<T>(
+    answer: &mpsc::Receiver<T>,
+    cancelled: &AtomicBool,
+    limit: Duration,
+) -> Option<T> {
+    let deadline = Instant::now().checked_add(limit);
     while !cancelled.load(Ordering::Acquire) {
-        match result.recv_timeout(CANCEL_POLL) {
-            Ok(result) => return Some(result),
+        let left = deadline.map_or(CANCEL_POLL, |at| {
+            at.saturating_duration_since(Instant::now())
+        });
+        if left.is_zero() {
+            break;
+        }
+        match answer.recv_timeout(CANCEL_POLL.min(left)) {
+            Ok(value) => return Some(value),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -106,6 +117,28 @@ impl std::error::Error for ProviderError {}
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
+    #[test]
+    fn a_wait_ends_on_the_answer_on_esc_or_at_its_limit() {
+        let (sender, answer) = mpsc::channel();
+        let idle = AtomicBool::new(false);
+        sender.send(7).unwrap();
+        assert_eq!(unless_cancelled(&answer, &idle, Duration::MAX), Some(7));
+        let started = Instant::now();
+        assert_eq!(
+            unless_cancelled(&answer, &idle, Duration::from_millis(30)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Esc wins over an answer already waiting.
+        sender.send(8).unwrap();
+        assert_eq!(
+            unless_cancelled(&answer, &AtomicBool::new(true), Duration::MAX),
+            None
+        );
+        drop(sender);
+        assert_eq!(unless_cancelled(&answer, &idle, Duration::MAX), Some(8));
+        assert_eq!(unless_cancelled(&answer, &idle, Duration::MAX), None);
+    }
     #[test]
     fn logs_never_include_provider_bodies_or_partial_keys() {
         assert_eq!(

@@ -220,6 +220,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             Ok(_) => {
                                 // A command hold arms Esc once it is confirmed.
                                 if command.is_none() {
+                                    crate::hotkey::ESC_SWALLOWED.store(false, Ordering::SeqCst);
                                     crate::hotkey::RECORDING.store(true, Ordering::Release);
                                 }
                                 session = Some((sender, cancelled));
@@ -342,11 +343,7 @@ fn run_session(
     let batch = (held && !command)
         .then(|| active_provider(&settings).ok())
         .flatten()
-        .and_then(|provider| {
-            BatchWorker::start(provider, settings.clone(), cancelled.clone())
-                .map_err(|error| eprintln!("Cannot start the batch worker: {error}"))
-                .ok()
-        });
+        .map(|provider| BatchWorker::start(provider, settings.clone(), cancelled.clone()));
     let (key_up, hold_error) =
         early_release.unwrap_or_else(|| wait_for_release(&released, HOLD_CAP - confirm_after));
     let stream = if cancelled.load(Ordering::Acquire) {
@@ -465,6 +462,7 @@ struct Completion {
     batch: Option<BatchWorker>,
 }
 
+/// None when Esc cancelled the dictation after key-up.
 fn finish_session_with_error(
     app: &tauri::AppHandle,
     audio: Result<crate::recorder::RecoveryAudio, ProviderError>,
@@ -486,7 +484,7 @@ fn finish_session_with_error(
                 audio: Arc::new(clip),
                 worker: completion.batch.take(),
             };
-            let cancelled = clip.worker.as_ref().map(BatchWorker::cancelled);
+            let cancelled = clip.worker.as_ref().map(|worker| &*worker.cancelled);
             let is_cancelled = || cancelled.is_some_and(|c| c.load(Ordering::Acquire));
             let result = if clip.audio.is_empty() {
                 Err(ProviderError::Other("No audio captured".into()))
@@ -498,14 +496,20 @@ fn finish_session_with_error(
                         settings,
                         key_up,
                         &mut record,
-                        completion.stream.take().map(|session| session.finish()),
+                        completion.stream.take().map(|session| match cancelled {
+                            Some(cancelled) => session.finish_unless(cancelled),
+                            None => session.finish(),
+                        }),
                         |text, delay| {
-                            if cancelled.is_some() {
+                            if let Some(cancelled) = cancelled {
                                 // Esc reaches the app again: the paste is not
-                                // cancelled, and an earlier Esc wins.
-                                crate::hotkey::RECORDING.store(false, Ordering::Release);
+                                // cancelled, but an Esc swallowed first wins.
+                                crate::hotkey::RECORDING.store(false, Ordering::SeqCst);
+                                if crate::hotkey::ESC_SWALLOWED.load(Ordering::SeqCst) {
+                                    cancelled.store(true, Ordering::Release);
+                                }
                                 if is_cancelled() {
-                                    return Err("cancelled".into());
+                                    return Err("Cancelled".into());
                                 }
                             }
                             if completion.paste {
@@ -745,20 +749,57 @@ impl BatchWorker {
         provider: Arc<dyn SttProvider>,
         settings: Settings,
         cancelled: Arc<AtomicBool>,
-    ) -> std::io::Result<Self> {
+    ) -> Self {
         let (jobs, receiver) = mpsc::channel::<BatchJob>();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("parla-batch".into())
             .spawn(move || {
                 // No job when the live final was pasted or the run ended early.
                 if let Ok(job) = receiver.recv() {
                     job(provider.as_ref(), &settings);
                 }
-            })?;
-        Ok(Self { jobs, cancelled })
+            });
+        // Without the thread, `transcribe` runs the request inline.
+        if let Err(error) = spawned {
+            eprintln!("Cannot start the batch worker: {error}");
+        }
+        Self { jobs, cancelled }
     }
-    fn cancelled(&self) -> &AtomicBool {
-        &self.cancelled
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+    /// The batch request on the worker; Esc drops it and discards its answer.
+    fn transcribe(
+        &self,
+        audio: &Arc<crate::recorder::RecoveryAudio>,
+        provider: &dyn SttProvider,
+        settings: &Settings,
+    ) -> Result<String, ProviderError> {
+        let cancelled = || ProviderError::Other("Cancelled".into());
+        // Esc aborted the live session: no batch fallback.
+        if self.is_cancelled() {
+            return Err(cancelled());
+        }
+        let (sender, answer) = mpsc::channel();
+        let audio = audio.clone();
+        // The worker's provider is this one, from the same settings snapshot.
+        let job: BatchJob = Box::new(move |provider, settings| {
+            let transcript = provider.transcribe(audio.clip(), settings);
+            // Before the answer, so a finished request never keeps the clip.
+            drop(audio);
+            let _ = sender.send(transcript);
+        });
+        if let Err(mpsc::SendError(job)) = self.jobs.send(job) {
+            // The worker is gone: run the request here, uncancellable.
+            job(provider, settings);
+        }
+        let transcript = crate::provider::unless_cancelled(&answer, &self.cancelled, Duration::MAX);
+        match transcript {
+            // An answer that lands after Esc is discarded.
+            _ if self.is_cancelled() => Err(cancelled()),
+            Some(transcript) => transcript,
+            None => Err(ProviderError::Other("The transcription stopped".into())),
+        }
     }
 }
 
@@ -786,33 +827,9 @@ impl RecoverySource for BatchClip {
         provider: &dyn SttProvider,
         settings: &Settings,
     ) -> Result<String, ProviderError> {
-        let Some(worker) = &self.worker else {
-            return provider.transcribe(self.batch_clip(), settings);
-        };
-        let cancelled = || worker.cancelled.load(Ordering::Acquire);
-        let cancel = || ProviderError::Other("Cancelled".into());
-        // Esc aborted the live session: no batch fallback.
-        if cancelled() {
-            return Err(cancel());
-        }
-        let (sender, result) = mpsc::channel();
-        let audio = self.audio.clone();
-        // The worker's provider is this one, from the same settings snapshot.
-        let job: BatchJob = Box::new(move |provider, settings| {
-            let transcript = provider.transcribe(audio.clip(), settings);
-            // Before the answer, so a finished request never keeps the clip.
-            drop(audio);
-            let _ = sender.send(transcript);
-        });
-        if let Err(mpsc::SendError(job)) = worker.jobs.send(job) {
-            // The worker is gone: run the request here, uncancellable.
-            job(provider, settings);
-        }
-        match crate::provider::unless_cancelled(&result, &worker.cancelled) {
-            // An answer that lands after Esc is discarded.
-            _ if cancelled() => Err(cancel()),
-            Some(transcript) => transcript,
-            None => Err(ProviderError::Other("The transcription stopped".into())),
+        match &self.worker {
+            Some(worker) => worker.transcribe(&self.audio, provider, settings),
+            None => provider.transcribe(self.batch_clip(), settings),
         }
     }
 }
@@ -1151,7 +1168,7 @@ mod pipeline_tests {
         let worker = BatchWorker::start(provider, Settings::default(), cancelled.clone());
         BatchClip {
             audio: Arc::new(crate::clip::Clip::new(vec![1; 160]).into()),
-            worker: Some(worker.unwrap()),
+            worker: Some(worker),
         }
     }
     #[test]

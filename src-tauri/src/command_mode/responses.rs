@@ -302,7 +302,7 @@ impl super::Llm for OpenAi<'_> {
             })
             .map_err(|error| ProviderError::Other(format!("Cannot start the request: {error}")))?;
         // None: cancelled (the orchestrator discards it) or the thread died.
-        crate::provider::unless_cancelled(&receiver, cancelled)
+        crate::provider::unless_cancelled(&receiver, cancelled, Duration::MAX)
             .unwrap_or_else(|| Err(ProviderError::Other("No reply.".into())))
     }
 }

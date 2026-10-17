@@ -160,6 +160,13 @@ impl Session {
             .recv_timeout(self.finish_timeout)
             .unwrap_or(Err(ProviderError::Timeout))
     }
+
+    /// As finish, but Esc returns at once (PARLA-15). A local tail still
+    /// computing runs to the end and is discarded.
+    pub fn finish_unless(self, cancelled: &AtomicBool) -> Result<Streamed, ProviderError> {
+        crate::provider::unless_cancelled(&self.result, cancelled, self.finish_timeout)
+            .unwrap_or(Err(ProviderError::Timeout))
+    }
 }
 
 impl Drop for Session {
