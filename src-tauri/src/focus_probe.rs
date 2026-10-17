@@ -26,11 +26,14 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// Never stop a paste that would have worked: an element that matches no
+    /// rule may still take text (WhatsApp's message box is a bare Pane), so
+    /// only no window or the shell is a confident no.
     pub fn verdict(self) -> Verdict {
         match self {
             Rule::Edit | Rule::Document | Rule::Value | Rule::Text => Verdict::Editable,
-            Rule::NoForeground | Rule::Shell | Rule::NoMatch => Verdict::NotEditable,
-            Rule::Error => Verdict::Unknown,
+            Rule::NoForeground | Rule::Shell => Verdict::NotEditable,
+            Rule::NoMatch | Rule::Error => Verdict::Unknown,
         }
     }
 }
@@ -423,8 +426,8 @@ mod uia {
 const EDIT: i32 = 50004;
 const DOCUMENT: i32 = 50030;
 
-/// Editable when any rule holds. Not editable only on a confident no; a UIA
-/// error is Unknown. An edit box wins over the shell (a desktop rename).
+/// The first rule that holds: an editable one wins, even over the shell (a
+/// desktop rename); then no window, the shell, a UIA error, or no match.
 pub fn decide(facts: &Facts) -> Rule {
     if facts.foreground == Foreground::NoWindow {
         return Rule::NoForeground;
@@ -480,38 +483,38 @@ mod tests {
     }
 
     #[test]
-    fn a_value_pattern_is_editable_unless_it_is_read_only() {
+    fn a_writable_value_pattern_is_editable_and_a_read_only_one_unknown() {
         let value = |read_only| Element {
             value_read_only: Some(read_only),
             ..control(PANE)
         };
         assert_eq!(judged(&app(value(false))), (Verdict::Editable, Rule::Value));
-        assert_eq!(
-            judged(&app(value(true))),
-            (Verdict::NotEditable, Rule::NoMatch)
-        );
+        assert_eq!(judged(&app(value(true))), (Verdict::Unknown, Rule::NoMatch));
     }
 
     #[test]
-    fn a_text_pattern_is_editable_only_when_keyboard_focusable() {
+    fn a_text_pattern_is_editable_when_keyboard_focusable_else_unknown() {
         let text = |keyboard_focusable| Element {
             text_pattern: true,
             keyboard_focusable,
             ..control(PANE)
         };
         assert_eq!(judged(&app(text(true))), (Verdict::Editable, Rule::Text));
-        assert_eq!(
-            judged(&app(text(false))),
-            (Verdict::NotEditable, Rule::NoMatch)
-        );
+        assert_eq!(judged(&app(text(false))), (Verdict::Unknown, Rule::NoMatch));
         // Focusable alone is not text: a button or a list item.
         let focusable = Element {
             keyboard_focusable: true,
             ..control(LIST_ITEM)
         };
+        assert_eq!(judged(&app(focusable)), (Verdict::Unknown, Rule::NoMatch));
+    }
+
+    #[test]
+    fn an_element_that_matches_no_rule_is_unknown_so_it_still_pastes() {
+        // WhatsApp's message box reads as a bare Pane (hand check, 17/10).
         assert_eq!(
-            judged(&app(focusable)),
-            (Verdict::NotEditable, Rule::NoMatch)
+            judged(&app(control(PANE))),
+            (Verdict::Unknown, Rule::NoMatch)
         );
     }
 
