@@ -5,7 +5,7 @@ use crate::{
     command_mode,
     hotkey::{Chord, Hotkey, HotkeyEvent},
     inserter,
-    overlay::PillMode,
+    overlay::{Ending, PillMode},
     provider::{registry, ProviderError, SttProvider},
     settings::{Settings, SharedSettings},
     timing::{self, DictationRecord},
@@ -21,7 +21,8 @@ use tauri::Manager;
 
 /// Holds shorter than this (a stray Ctrl+Alt, AltGr typing) are discarded.
 pub(crate) const MIN_HOLD: Duration = Duration::from_millis(300);
-/// A hold that outlasts this ends as if released, with an error.
+/// A hold that outlasts this ends as if released. The run still pastes; a
+/// failed one notes the cap in its error.
 const HOLD_CAP: Duration = Duration::from_secs(120);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -380,12 +381,14 @@ fn run_session(
         if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
             match outcome.label() {
                 Some(label) => overlay.finish_labelled(&label),
-                None => overlay.finish(ok),
+                None if ok => overlay.finish(Ending::Done),
+                // A command run keeps no clip: Retry would re-run a dictation's.
+                None => overlay.finish(Ending::Failed { retry: false }),
             }
         }
         return;
     }
-    let ok = finish_session_with_error(
+    let ending = finish_session_with_error(
         app,
         audio,
         &settings,
@@ -399,7 +402,7 @@ fn run_session(
         },
     );
     if let Some(overlay) = overlay {
-        overlay.finish(ok);
+        overlay.finish(ending);
     }
 }
 
@@ -462,8 +465,9 @@ fn finish_session_with_error(
     started_at: SystemTime,
     key_up: Instant,
     mut completion: Completion,
-) -> bool {
+) -> Ending {
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
+    let mut clip_saved = false;
     let result = match audio {
         Err(error) => {
             crate::failure::notify_error(app, &settings.active_provider, &error);
@@ -513,33 +517,50 @@ fn finish_session_with_error(
                     clip.into_clip(),
                     &settings.active_provider,
                 );
+                clip_saved = true;
             }
             result
         }
     };
-    let ok = result.is_ok() && completion.hold_error.is_none();
     if result.is_ok() {
         crate::failure::on_success(app);
     }
-    record.error = combined_error(completion.hold_error, result.err());
+    let (ending, error) = dictation_ending(completion.hold_error, result, clip_saved);
+    record.error = error;
     // The one completion sink for successful and failed dictations.
     timing::record(app, record);
-    ok
+    ending
+}
+
+/// The pill's ending and the history row's error. A paste that landed is a
+/// success even when the hold hit the cap; Retry is offered only when this
+/// run saved its clip, or it would re-run an older one (PARLA-51).
+fn dictation_ending(
+    hold_error: Option<String>,
+    result: Result<(), ProviderError>,
+    clip_saved: bool,
+) -> (Ending, Option<String>) {
+    match result {
+        Ok(()) => {
+            if let Some(hold) = hold_error {
+                eprintln!("Dictation pasted after the hold ended early: {hold}");
+            }
+            (Ending::Done, None)
+        }
+        Err(error) => (
+            Ending::Failed { retry: clip_saved },
+            Some(match hold_error {
+                Some(hold) => format!("{hold}; {error}"),
+                None => error.to_string(),
+            }),
+        ),
+    }
 }
 
 fn active_provider(settings: &Settings) -> Result<Arc<dyn SttProvider>, ProviderError> {
     registry::get(&settings.active_provider).ok_or_else(|| {
         ProviderError::MissingConfig(format!("Unknown provider: {}", settings.active_provider))
     })
-}
-
-fn combined_error(hold: Option<String>, error: Option<ProviderError>) -> Option<String> {
-    match (hold, error) {
-        (Some(hold), Some(error)) => Some(format!("{hold}; {error}")),
-        (Some(hold), None) => Some(hold),
-        (None, Some(error)) => Some(error.to_string()),
-        (None, None) => None,
-    }
 }
 
 /// A command run after key-up (PARLA-63): the orchestrator with the real
@@ -818,6 +839,30 @@ mod pipeline_tests {
     use crate::provider::{Availability, SttProvider};
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct FakeProvider(Result<String, ProviderError>);
+
+    #[test]
+    fn a_capped_hold_that_pasted_is_a_success_and_retry_needs_this_runs_clip() {
+        use crate::overlay::Ending;
+        let cap = || Some("hold exceeded 120 s".to_string());
+        // The cap ended the hold but the transcript pasted: a plain success,
+        // with no error row the app window would offer to retry (PARLA-51).
+        assert_eq!(dictation_ending(cap(), Ok(()), false), (Ending::Done, None));
+        assert_eq!(dictation_ending(None, Ok(()), false), (Ending::Done, None));
+        // A failed transcription saved this run's clip: Retry re-runs it.
+        assert_eq!(
+            dictation_ending(cap(), Err(ProviderError::Timeout), true),
+            (
+                Ending::Failed { retry: true },
+                Some(format!("hold exceeded 120 s; {}", ProviderError::Timeout))
+            )
+        );
+        // No clip saved (the microphone failed): Retry would re-run an older one.
+        let mic = ProviderError::Other("microphone unavailable".into());
+        assert_eq!(
+            dictation_ending(None, Err(mic.clone()), false),
+            (Ending::Failed { retry: false }, Some(mic.to_string()))
+        );
+    }
 
     #[tokio::test]
     async fn rejected_controller_hold_and_escape_close_setup_without_upload() {

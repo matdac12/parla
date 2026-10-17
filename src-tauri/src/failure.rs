@@ -284,8 +284,13 @@ pub fn has_failed_clip(app: &tauri::AppHandle) -> bool {
 pub fn retry_with_pill(app: &tauri::AppHandle) -> Result<(), String> {
     let overlay = crate::overlay::begin_processing(app);
     let result = retry_last_failed(app, true);
-    overlay.finish(result.is_ok());
-    let _ = app.emit("failure://changed", has_failed_clip(app));
+    let retry = has_failed_clip(app);
+    overlay.finish(match result {
+        Ok(()) => crate::overlay::Ending::Done,
+        // Offered again only while a clip is left to retry.
+        Err(_) => crate::overlay::Ending::Failed { retry },
+    });
+    let _ = app.emit("failure://changed", retry);
     result
 }
 
