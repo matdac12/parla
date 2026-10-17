@@ -605,7 +605,7 @@ mod tests {
             *h.llm.requests.borrow(),
             [Request {
                 model: "gpt-6-luna".into(),
-                reasoning_effort: "low".into(),
+                reasoning_effort: "none".into(),
                 instruction: "Scrivi un saluto breve".into(),
                 selection: None,
                 app: Some("notepad.exe".into()),

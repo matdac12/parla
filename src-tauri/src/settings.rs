@@ -40,7 +40,9 @@ pub struct CommandSettings {
     /// Kept as typed, so the default stays byte-identical in settings.json.
     pub hotkey: String,
     pub model: String,
-    /// Provisional until the PARLA-68 eval picks `none` or `low`.
+    /// `none` or `low`. The default is `none`: the live eval
+    /// (`tests/command_eval.rs`, PARLA-68) found it chose text vs `open_url`
+    /// as well as `low`, no slower.
     pub reasoning_effort: String,
 }
 
@@ -52,7 +54,7 @@ impl Default for CommandSettings {
             enabled: false,
             hotkey: DEFAULT_COMMAND_HOTKEY.into(),
             model: "gpt-6-luna".into(),
-            reasoning_effort: "low".into(),
+            reasoning_effort: "none".into(),
         }
     }
 }
@@ -224,7 +226,7 @@ mod vocabulary_tests {
                 "enabled": false,
                 "hotkey": "LCtrl+Shift",
                 "model": "gpt-6-luna",
-                "reasoning_effort": "low",
+                "reasoning_effort": "none",
             })
         );
         let partial: Settings = serde_json::from_str(r#"{"command":{"enabled":true}}"#).unwrap();

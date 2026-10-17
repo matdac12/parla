@@ -184,7 +184,8 @@ The **Command mode** card holds the `command` section of `settings.json`
   stays on, with the hint, until you turn it off.
 - **Command hotkey**, default `LCtrl+Shift`; see [Hotkey](#hotkey).
 - **Model**, default `gpt-6-luna`; clearing the field restores it.
-- **Reasoning effort**, `none` or `low`.
+- **Reasoning effort**, `none` (default) or `low`; the
+  [live eval](#the-command-mode-eval) picked the default.
 
 Saving arms or disarms the command chord and rebinds it at once, with no
 restart. Model and effort are read by each command run.
@@ -382,6 +383,37 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   [The Parla window](#the-parla-window)). The History page lists each run with
   an orange tag.
 - With command mode off, the keyboard hook skips the command chord.
+
+#### The command mode eval
+
+`src-tauri/tests/command_eval.rs` is a live eval of the built-in system prompt
+and the tools, text only, never audio. It sends 26 fixed IT/EN instructions
+(rewrite, correct, shorten, translate both ways, bullets, an injection and
+selections that only mention searching, answers with nothing selected, open a
+page, search) through the real request builder, parser and URL validator,
+3 times at effort `none` and 3 at `low`, taking turns. Each reply is graded:
+the outcome kind (text or `open_url`); for a page, an http(s) address Parla
+would open on a plausible host with the expected terms; for a text, no
+preamble, wrapping quotes, markdown, stray spaces or leaked tags, plus a
+cheap correctness check (the language, words a rewrite must keep, the source
+words a translation must drop, the bullet count). It prints every reply, a
+markdown table per effort (shares, reply time median and p90, tokens and
+cost) and the decision rule: ship `none` if it gets every outcome kind right,
+otherwise `low`. It fails if the default effort gets an outcome kind wrong;
+the text checks only report.
+Re-run it after changing the system prompt (`command_mode/responses.rs`) or
+adding a tool, and read the replies too: the checks are heuristics.
+
+```powershell
+cd src-tauri
+$env:OPENAI_API_KEY = "sk-..."
+cargo test --locked --test command_eval -- --ignored --nocapture
+```
+
+About 160 calls, 3 minutes and well under a cent. Without the key it skips.
+To probe a flaky case, `PARLA_EVAL_CASES=10,17` picks cases by index and
+`PARLA_EVAL_RUNS=10` sets the repeats. Time it only on the machine lock turn
+(see `AGENTS.md`). The grading itself is tested offline by `cargo test`.
 
 ## Providers and API keys
 
