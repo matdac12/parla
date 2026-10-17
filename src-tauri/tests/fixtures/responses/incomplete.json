@@ -1,33 +1,97 @@
 {
-  "id": "resp_1b2c3d4e5f60718293a4b5c6d7e8f90a",
+  "id": "resp_0baf8bf50550ca6e016ad3716fc0ac87d1ae1fc0aa2f3002f6",
   "object": "response",
-  "created_at": 1792236060,
+  "created_at": 1792242031,
   "status": "incomplete",
+  "access_programs": null,
+  "background": false,
+  "billing": {
+    "payer": "developer"
+  },
+  "completed_at": null,
   "error": null,
-  "incomplete_details": { "reason": "max_output_tokens" },
+  "frequency_penalty": 0.0,
+  "incomplete_details": {
+    "reason": "max_output_tokens"
+  },
+  "instructions": null,
+  "max_output_tokens": 40,
+  "max_tool_calls": null,
   "model": "gpt-6-luna",
+  "moderation": null,
   "output": [
     {
-      "id": "rs_1b2c3d4e5f60718293a4b5c6d7e8f90a",
-      "type": "reasoning",
-      "summary": []
-    },
-    {
-      "id": "msg_1b2c3d4e5f60718293a4b5c6d7e8f90a",
+      "id": "msg_0baf8bf50550ca6e016ad371703f7487d18e5c2bb076968f52",
       "type": "message",
       "status": "incomplete",
-      "role": "assistant",
       "content": [
-        { "type": "output_text", "annotations": [], "text": "Here is the first half of a reply that was cut" }
-      ]
+        {
+          "type": "output_text",
+          "annotations": [],
+          "logprobs": [],
+          "text": "Venice is a historic city in northeastern Italy, built across a group of islands in a lagoon on the Adriatic Sea. Its network of canals, bridges, and narrow streets gives it"
+        }
+      ],
+      "phase": "final_answer",
+      "role": "assistant"
     }
   ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "previous_response_id": null,
+  "prompt_cache_key": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "all_turns",
+    "effort": "low",
+    "mode": "standard",
+    "summary": null
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
   "store": false,
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [],
+  "top_logprobs": 0,
+  "top_p": 0.98,
+  "truncation": "disabled",
   "usage": {
-    "input_tokens": 95,
-    "input_tokens_details": { "cached_tokens": 0 },
-    "output_tokens": 2000,
-    "output_tokens_details": { "reasoning_tokens": 1500 },
-    "total_tokens": 2095
-  }
+    "input_tokens": 11,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 40,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 51
+  },
+  "user": null,
+  "metadata": {}
 }

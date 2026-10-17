@@ -206,10 +206,21 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
+    // text_reply, incomplete and the error fixtures were recorded from the live
+    // API on 2026-10-17; multi_part_reply is shaped by hand after the docs.
     #[test]
     fn a_text_reply_joins_its_output_text_and_reads_usage() {
         assert_eq!(
             parse(200, &fixture("text_reply")),
+            Ok(Reply {
+                text: "Ciao a tutti! Vi auguro una splendida giornata.".into(),
+                tokens_in: Some(43),
+                tokens_out: Some(17),
+            })
+        );
+        // Reasoning items are skipped and output_text parts joined in order.
+        assert_eq!(
+            parse(200, &fixture("multi_part_reply")),
             Ok(Reply {
                 text: "Ciao a tutti, buona giornata!".into(),
                 tokens_in: Some(92),

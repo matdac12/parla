@@ -1,8 +1,9 @@
 {
   "error": {
-    "message": "Incorrect API key provided: sk-proj-********************************************abcd. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "message": "Incorrect API key provided: sk-inval************ture. You can find your API key at https://platform.openai.com/account/api-keys.",
     "type": "invalid_request_error",
-    "param": null,
-    "code": "invalid_api_key"
-  }
+    "code": "invalid_api_key",
+    "param": null
+  },
+  "status": 401
 }
