@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod bench;
 pub mod clip;
+pub mod command_mode;
 mod commands;
 pub mod dim;
 pub mod failure;

@@ -1,0 +1,33 @@
+{
+  "id": "resp_1b2c3d4e5f60718293a4b5c6d7e8f90a",
+  "object": "response",
+  "created_at": 1792236060,
+  "status": "incomplete",
+  "error": null,
+  "incomplete_details": { "reason": "max_output_tokens" },
+  "model": "gpt-6-luna",
+  "output": [
+    {
+      "id": "rs_1b2c3d4e5f60718293a4b5c6d7e8f90a",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_1b2c3d4e5f60718293a4b5c6d7e8f90a",
+      "type": "message",
+      "status": "incomplete",
+      "role": "assistant",
+      "content": [
+        { "type": "output_text", "annotations": [], "text": "Here is the first half of a reply that was cut" }
+      ]
+    }
+  ],
+  "store": false,
+  "usage": {
+    "input_tokens": 95,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 2000,
+    "output_tokens_details": { "reasoning_tokens": 1500 },
+    "total_tokens": 2095
+  }
+}

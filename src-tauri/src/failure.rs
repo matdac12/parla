@@ -76,10 +76,40 @@ pub fn user_message(provider_display_name: &str, error: &ProviderError) -> Strin
 pub fn notify_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
     let provider = registry::get(provider_id);
     let name = provider.as_ref().map_or("Provider", |p| p.display_name());
-    notify_failure(app, &user_message(name, error));
+    notify_failure(app, "Parla — dictation failed", &user_message(name, error));
 }
 
-fn notify_failure(app: &tauri::AppHandle, message: &str) {
+/// A command run's LLM step or paste failed (PARLA-63). The reason is also its
+/// history row's error.
+pub fn command_message(error: &ProviderError) -> String {
+    match error {
+        ProviderError::MissingConfig(_) => "OpenAI API key missing — open Settings.".into(),
+        ProviderError::Auth(_) => "OpenAI rejected the API key. Check Settings.".into(),
+        ProviderError::Network(_) => "no network connection. Check your connection.".into(),
+        ProviderError::Timeout => format!(
+            "no reply within {} s. Try again.",
+            crate::command_mode::responses::TIMEOUT.as_secs()
+        ),
+        ProviderError::Http { status, body } if body.is_empty() => {
+            format!("OpenAI returned HTTP {status}. Try again.")
+        }
+        ProviderError::Http { status, body } => {
+            format!("OpenAI returned HTTP {status} ({body}). Try again.")
+        }
+        // Parla's own reasons: an empty or cut-off reply, a failed paste.
+        ProviderError::Other(reason) => reason.clone(),
+    }
+}
+
+pub fn notify_command_error(app: &tauri::AppHandle, error: &ProviderError) {
+    notify_failure(
+        app,
+        "Parla — command failed",
+        &format!("Command mode: {}", command_message(error)),
+    );
+}
+
+fn notify_failure(app: &tauri::AppHandle, title: &str, message: &str) {
     // Windows support is guaranteed only for installed apps. The plugin uses the
     // configured identifier for installed builds; development can use PowerShell's
     // AUMID. Standalone exe delivery may silently fail, so ALWAYS set the tray fallback.
@@ -100,7 +130,7 @@ fn notify_failure(app: &tauri::AppHandle, message: &str) {
             }
         }
     }
-    show_toast(app, "Parla — dictation failed", message);
+    show_toast(app, title, message);
 }
 
 /// The app icon with a red dot in its bottom-right corner, ringed by a
@@ -276,6 +306,7 @@ pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), Stri
             Err(_) => {
                 notify_failure(
                     app,
+                    "Parla — dictation failed",
                     "Could not read the saved failed clip. Record a new dictation.",
                 );
                 return Err("Could not read the saved failed clip".into());
@@ -355,6 +386,30 @@ mod tests {
             changed.count() < (w * h / 4) as usize,
             "badge is not minimal"
         );
+    }
+
+    #[test]
+    fn command_messages_name_the_llm_step_without_remote_details() {
+        for (error, expected) in [
+            (ProviderError::Timeout, "no reply within 20 s. Try again."),
+            (
+                ProviderError::Http {
+                    status: 404,
+                    body: "model_not_found".into(),
+                },
+                "OpenAI returned HTTP 404 (model_not_found). Try again.",
+            ),
+            (
+                ProviderError::Network("dns sk-secret".into()),
+                "no network connection. Check your connection.",
+            ),
+            (
+                ProviderError::MissingConfig("OpenAI API key".into()),
+                "OpenAI API key missing — open Settings.",
+            ),
+        ] {
+            assert_eq!(command_message(&error), expected);
+        }
     }
 
     #[test]

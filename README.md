@@ -291,12 +291,13 @@ Command mode is a separate mode, with its own hotkey, where what you say is an
 **instruction** rather than text to paste. It is the only place Parla will
 call an LLM; dictation always pastes the raw transcript (see
 `docs/adr/0001-command-mode-is-the-only-llm-path.md`). It is being built in
-steps (PARLA-61). **So far it records the instruction and nothing more:**
-there is no LLM call, no paste and no selection read yet.
+steps (PARLA-61). **So far it answers an instruction with text pasted at the
+cursor;** it doesn't read a selection or open pages yet.
 
-It is off by default and has no Settings card yet. To try it, quit Parla, set
-`"enabled": true` in the `command` section of `settings.json`, and start Parla
-again:
+It is off by default and has no Settings card yet. It needs an OpenAI key: the
+same `providers.openai.api_key` dictation uses, with `OPENAI_API_KEY`
+overriding it. To try it, quit Parla, set `"enabled": true` in the `command`
+section of `settings.json`, and start Parla again:
 
 ```json
 "command": { "enabled": true, "hotkey": "LCtrl+Shift", "model": "gpt-6-luna", "reasoning_effort": "low" }
@@ -305,12 +306,27 @@ again:
 - **Hold** left **Ctrl** plus either **Shift**, say the instruction, release.
   Right Ctrl doesn't count, and any Alt (AltGr included) or Win breaks the
   chord. It is hold only: no hands-free lock, and Space does nothing special.
-- The pill is **orange** while recording and transcribing, then shows the
-  check. The instruction is transcribed by the active provider, the same
-  engine dictation uses, and written to history as a `kind: "command"` row
-  with its stage timings. An empty or silent instruction ends quietly with no
-  row. A failure shows the red cross and the usual notification, with no
-  Retry.
+- The pill is **orange** while recording, transcribing and waiting for the
+  reply. The instruction is transcribed by the active provider, the same
+  engine dictation uses, and sent to `model` (`gpt-6-luna`) through the OpenAI
+  **Responses API**: one request with Parla's built-in system prompt,
+  `store: false` (OpenAI keeps nothing), the configured `reasoning_effort`, a
+  cap of about 2,000 output tokens and a 20 s timeout.
+- The text reply is **pasted once at the cursor**, the same way a dictation is
+  pasted, so one Ctrl+Z removes it. Your clipboard is restored afterwards. The
+  pill then shows the check.
+- An empty or silent instruction ends quietly: no LLM call and no row.
+- A network error, a timeout, an API error, a reply cut off by the token cap
+  or an empty reply shows the red cross and a "Command mode: …" notification,
+  and nothing is pasted. There is no Retry.
+- **Esc** cancels while you hold, and also after you release, while the
+  instruction is transcribed and the reply is awaited: the pill goes away at
+  once and a late reply is discarded, so nothing is pasted.
+- Each run is a `kind: "command"` row in history: the instruction (`text`),
+  `outcome` (`pasted`, `failed` or `cancelled`), `llm_model`, `tokens_in` and
+  `tokens_out`, the `reply`, and stage times from key-up (`provider_returned`
+  for the transcript, `llm_returned` for the reply, `pasted`). A cancel while
+  you are still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
   as usual), and the hold stops after 120 s. Recording starts at key-down, but
@@ -318,9 +334,10 @@ again:
   300 ms, and only from then does **Esc** cancel (and get swallowed).
 - While a command run or a dictation is in flight, both hotkeys are ignored.
 - Command runs never count toward words, dictations or audio; the
-  instruction's transcription is billed in Total cost like a dictation.
-- `hotkey`, `model` and `reasoning_effort` are stored but not used yet (the
-  chord can't be rebound until the Settings card lands). With command mode
+  instruction's transcription is billed in Total cost like a dictation. The
+  LLM tokens are recorded but not yet added to Total cost.
+- `hotkey` is stored but not used yet (the chord can't be rebound until the
+  Settings card lands). With command mode
   off, the keyboard hook ignores Ctrl+Shift entirely.
 
 ## Providers and API keys

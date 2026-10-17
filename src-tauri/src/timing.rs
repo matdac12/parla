@@ -42,6 +42,31 @@ pub struct DictationRecord {
     pub stream_setup_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_caption_ms: Option<u64>,
+    /// Command runs only (PARLA-63). `text` is the instruction and `model` its
+    /// speech model; these describe the LLM step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<CommandOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
+    /// Key-up to the LLM reply, like the other stage offsets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_returned: Option<u64>,
+    /// The LLM's text reply, kept for Copy (PARLA-66) even if the paste failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+}
+
+/// How a command run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandOutcome {
+    Pasted,
+    Failed,
+    Cancelled,
 }
 impl DictationRecord {
     pub fn new(started_at: SystemTime, provider_id: &str) -> Self {
@@ -70,6 +95,12 @@ impl DictationRecord {
             stream_model: None,
             stream_setup_ms: None,
             first_caption_ms: None,
+            outcome: None,
+            llm_model: None,
+            tokens_in: None,
+            tokens_out: None,
+            llm_returned: None,
+            reply: None,
         }
     }
 }
