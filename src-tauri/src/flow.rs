@@ -2,7 +2,7 @@
 //! holds while one session worker owns recording, transcription and paste.
 pub use crate::failure::on_failure;
 use crate::{
-    command_mode,
+    command_mode, focus_probe,
     hotkey::{Chord, Hotkey, HotkeyEvent},
     inserter,
     overlay::{Ending, PillMode},
@@ -272,6 +272,9 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
+    // After the mic started, so it never delays the first syllable. A
+    // cancelled hold drops it unread.
+    let focus = (recording.is_ok() && settings.safety_net).then(focus_probe::start);
     // A dictation is confirmed at key-down, a command hold at MIN_HOLD. Until
     // then a quick Ctrl+Shift shortcut costs no pill, dimming, live session or
     // warm-up, and its Esc reaches the app (Ctrl+Shift+Esc). The recorder
@@ -376,6 +379,7 @@ fn run_session(
             date: command_mode::today(),
             cancelled: &cancelled,
             hold_error,
+            focus: focus.as_ref(),
         };
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
@@ -401,6 +405,7 @@ fn run_session(
             auto_send: settings.auto_send,
             stream,
             batch,
+            focus,
         },
     );
     // Cancelled after key-up: the pill hides unfinished, as for Esc while
@@ -452,6 +457,7 @@ pub fn finish_session(
             auto_send: false,
             stream: None,
             batch: None,
+            focus: None,
         },
     );
 }
@@ -463,6 +469,8 @@ struct Completion {
     stream: Option<crate::streaming::Session>,
     /// A hotkey dictation's: Esc may cancel it until the paste.
     batch: Option<BatchWorker>,
+    /// The editable probe from key-down, with the Safety Net on.
+    focus: Option<focus_probe::Pending>,
 }
 
 /// None when Esc cancelled the dictation after key-up.
@@ -504,7 +512,10 @@ fn finish_session_with_error(
                             Some(cancelled) => session.finish_unless(cancelled),
                             None => session.finish(),
                         }),
-                        |text, delay| {
+                        completion.focus.as_ref(),
+                        // The Safety Net acts on the verdict from PARLA-80;
+                        // until then every dictation pastes as before.
+                        |text, delay, _verdict| {
                             if let Some(cancelled) = cancelled {
                                 // Esc reaches the app again: the paste is not
                                 // cancelled, but an Esc swallowed first wins.
@@ -889,6 +900,11 @@ fn streaming_model(provider_id: &str, settings: &Settings) -> Option<String> {
     }
 }
 
+/// `paste` gets the editable probe's verdict as the paste point saw it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pipeline's inputs, kept flat for its fakes"
+)]
 fn transcribe_and_paste(
     provider: &dyn SttProvider,
     clip: &impl RecoverySource,
@@ -896,7 +912,8 @@ fn transcribe_and_paste(
     key_up: Instant,
     record: &mut DictationRecord,
     streamed: Option<Result<crate::streaming::Streamed, ProviderError>>,
-    paste: impl FnOnce(&str, Duration) -> Result<Instant, String>,
+    focus: Option<&focus_probe::Pending>,
+    paste: impl FnOnce(&str, Duration, focus_probe::Verdict) -> Result<Instant, String>,
 ) -> Result<(), ProviderError> {
     transcribe(provider, clip, settings, key_up, record, streamed)?;
     if record.text.trim().is_empty() {
@@ -904,11 +921,17 @@ fn transcribe_and_paste(
             "Provider returned an empty transcript".into(),
         ));
     }
+    // Never waits: a probe that has not answered is Unknown, as editable.
+    let seen = focus.map(focus_probe::Pending::read);
     let pasted = paste(
         &record.text,
         Duration::from_millis(settings.restore_delay_ms),
-    )
-    .map_err(|error| ProviderError::Other(format!("Paste failed: {error}")))?;
+        seen.map_or(focus_probe::Verdict::Unknown, focus_probe::Seen::verdict),
+    );
+    if let Some(seen) = seen {
+        seen.log("dictation");
+    }
+    let pasted = pasted.map_err(|error| ProviderError::Other(format!("Paste failed: {error}")))?;
     record.pasted = Some(timing::offset_ms(key_up, pasted));
     Ok(())
 }
@@ -1097,7 +1120,8 @@ mod pipeline_tests {
                 setup_ms: Some(20),
                 first_caption_ms: Some(400),
             })),
-            |_, _| Ok(Instant::now()),
+            None,
+            |_, _, _| Ok(Instant::now()),
         )
         .unwrap();
         assert!(probe.0.get().is_none());
@@ -1109,7 +1133,8 @@ mod pipeline_tests {
             Instant::now(),
             &mut record,
             Some(Err(ProviderError::Timeout)),
-            |text, _| {
+            None,
+            |text, _, _| {
                 assert_eq!(text, "Recovered");
                 Ok(Instant::now())
             },
@@ -1134,7 +1159,8 @@ mod pipeline_tests {
                 setup_ms: None,
                 first_caption_ms: None,
             })),
-            |text, _| {
+            None,
+            |text, _, _| {
                 pastes.push(text.to_owned());
                 Ok(Instant::now())
             },
@@ -1156,7 +1182,8 @@ mod pipeline_tests {
             Instant::now(),
             &mut record,
             Some(Err(ProviderError::Timeout)),
-            |text, _| {
+            None,
+            |text, _, _| {
                 pastes.push(text.to_owned());
                 Ok(Instant::now())
             },
@@ -1237,7 +1264,8 @@ mod pipeline_tests {
             Instant::now(),
             &mut record,
             None,
-            |_, _| panic!("a cancelled dictation must not paste"),
+            None,
+            |_, _, _| panic!("a cancelled dictation must not paste"),
         );
         // The request is still blocked: Esc returned without its answer.
         assert!(result.is_err());
@@ -1263,7 +1291,8 @@ mod pipeline_tests {
             &mut record,
             // A live session Esc aborted: no batch fallback.
             Some(Err(ProviderError::Other("Live dictation cancelled".into()))),
-            |_, _| panic!("a cancelled dictation must not paste"),
+            None,
+            |_, _, _| panic!("a cancelled dictation must not paste"),
         );
         assert!(result.is_err());
         drop(clip);
@@ -1283,7 +1312,8 @@ mod pipeline_tests {
             Instant::now(),
             &mut record,
             None,
-            |text, _| {
+            None,
+            |text, _, _| {
                 pastes.push(text.to_owned());
                 Ok(Instant::now())
             },
@@ -1323,7 +1353,8 @@ mod pipeline_tests {
             Instant::now(),
             &mut record,
             None,
-            |_, _| panic!("must not paste"),
+            None,
+            |_, _, _| panic!("must not paste"),
         );
         assert_eq!(
             result,
@@ -1606,7 +1637,8 @@ mod pipeline_tests {
                 key_up,
                 &mut record,
                 None,
-                |text, delay| {
+                None,
+                |text, delay, _| {
                     assert_eq!(text, "Hello");
                     assert_eq!(delay, Duration::from_millis(250));
                     pasted.fetch_add(1, Ordering::Relaxed);
@@ -1635,10 +1667,51 @@ mod pipeline_tests {
             key_up,
             &mut record,
             None,
-            |_, _| Ok(injected),
+            None,
+            |_, _, _| Ok(injected),
         )
         .unwrap();
         assert_eq!(record.pasted, Some(5));
+    }
+
+    #[test]
+    fn the_paste_reads_a_slow_probe_without_waiting_and_sees_unknown() {
+        use crate::focus_probe::{Facts, Foreground, Verdict, Worker};
+        let (answer, gate) = mpsc::channel::<()>();
+        let worker = Worker::new(move || {
+            move || {
+                // Still running when the paste is due.
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+                Facts {
+                    foreground: Foreground::Shell,
+                    focused: Err("slow".into()),
+                    app: None,
+                }
+            }
+        });
+        let focus = worker.start();
+        let key_up = Instant::now();
+        let mut record = DictationRecord::new(SystemTime::now(), "fake");
+        let mut seen = Vec::new();
+        transcribe_and_paste(
+            &FakeProvider(Ok("Ciao".into())),
+            &crate::clip::Clip::new(vec![1; 160]),
+            &Settings::default(),
+            key_up,
+            &mut record,
+            None,
+            Some(&focus),
+            |text, _, verdict| {
+                seen.push((text.to_owned(), verdict));
+                Ok(Instant::now())
+            },
+        )
+        .unwrap();
+        assert!(key_up.elapsed() < Duration::from_millis(500));
+        // No answer yet: Unknown, which pastes as today.
+        assert_eq!(seen, [("Ciao".to_owned(), Verdict::Unknown)]);
+        assert!(record.pasted.is_some());
+        answer.send(()).unwrap();
     }
 
     #[test]
@@ -1651,7 +1724,8 @@ mod pipeline_tests {
             Instant::now(),
             &mut record,
             None,
-            |_, _| Err("clipboard unavailable".into())
+            None,
+            |_, _, _| Err("clipboard unavailable".into())
         )
         .is_err());
         assert_eq!(record.text, "Hello");

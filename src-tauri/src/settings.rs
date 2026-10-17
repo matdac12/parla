@@ -17,6 +17,9 @@ pub struct Settings {
     pub paste_compatibility_mode: bool,
     /// Press Enter after pasting a dictation that ends in "send"/"invia" (PARLA-58).
     pub auto_send: bool,
+    /// Probe at key-down whether the focus accepts text (PARLA-79); off, no
+    /// probe runs. Settings only, not the flyout.
+    pub safety_net: bool,
     pub streaming_enabled: bool,
     pub live_captions: bool,
     pub vocabulary: Vec<String>,
@@ -98,6 +101,7 @@ impl Default for Settings {
             restore_delay_ms: crate::inserter::DEFAULT_RESTORE_DELAY_MS,
             paste_compatibility_mode: false,
             auto_send: true,
+            safety_net: true,
             streaming_enabled: true,
             live_captions: true,
             vocabulary: Vec::new(),
@@ -214,6 +218,7 @@ mod vocabulary_tests {
         assert_eq!(s.providers["future"]["api_key"], "test");
         assert!(s.dim_other_audio, "dimming is on for existing users");
         assert!(s.auto_send, "auto-send is on for existing users");
+        assert!(s.safety_net, "the Safety Net is on for existing users");
         assert_eq!(s.dim_audio_level, crate::dim::DEFAULT_LEVEL_PERCENT);
     }
     #[test]

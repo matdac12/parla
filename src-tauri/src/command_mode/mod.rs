@@ -75,6 +75,9 @@ pub struct Run<'a> {
     pub cancelled: &'a AtomicBool,
     /// The hold hit the cap: the instruction is recorded but not sent.
     pub hold_error: Option<String>,
+    /// The editable probe from key-down, with the Safety Net on. Only
+    /// logged for now (PARLA-79).
+    pub focus: Option<&'a crate::focus_probe::Pending>,
 }
 
 /// How long the focused app gets to answer Ctrl+Insert.
@@ -316,8 +319,13 @@ fn reply_and_act(
         Some(selected) => reply.text + &selected[selected.trim_end().len()..],
         None => reply.text,
     };
+    // Never waits on the probe; logged once the paste is out.
+    let focus = run.focus.map(crate::focus_probe::Pending::read);
     // Over the selection, which is still selected, or at the cursor.
     let pasted = ports.desktop.paste(&text, selection.borrowed.as_ref());
+    if let Some(focus) = focus {
+        focus.log("command");
+    }
     record.reply = Some(text);
     match pasted {
         Ok(at) => {
@@ -565,6 +573,7 @@ mod tests {
                 date: "2026-10-17".into(),
                 cancelled: &self.cancelled,
                 hold_error,
+                focus: None,
             };
             // Read at the confirmed hold, before the instruction is in.
             let selection = read_selection(&self.desktop);
