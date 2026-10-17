@@ -48,13 +48,17 @@ let busy = false;
 
 const MODIFIERS = new Set(["ctrl", "control", "alt", "option", "shift", "super", "meta", "cmd", "command", "cmdorctrl", "commandorcontrol"]);
 
-/** Same rule as the Home page (hotkey.rs): with two or more modifiers,
- *  holding them is push-to-talk; otherwise the shortcut toggles. */
+/** Same rule and key names as the Home page (hotkey.rs): with two or more
+ *  modifiers, holding them is push-to-talk; otherwise the shortcut toggles. */
 function showHotkey(shortcut: string): void {
   const keys = shortcut.split("+").map((key) => key.trim()).filter(Boolean);
   const modifiers = keys.filter((key) => MODIFIERS.has(key.toLowerCase()));
   const hold = modifiers.length >= 2;
-  hotkey.replaceChildren(hold ? "Hold " : "Tap ", el("kbd", undefined, (hold ? modifiers : keys).join("+")));
+  const shown = (hold ? modifiers : keys).flatMap((key, index) => {
+    const kbd = el("kbd", undefined, key.replace(/^Key(?=[A-Z]$)/, "").replace(/^Digit(?=\d$)/, ""));
+    return index === 0 ? [kbd] : [el("span", "plus", "+"), kbd];
+  });
+  hotkey.replaceChildren(hold ? "Hold " : "Tap ", ...shown);
 }
 
 function renderControls(): void {
@@ -67,7 +71,7 @@ function renderControls(): void {
   const ready = active?.available ?? false;
   statusText.textContent = `${ready ? "Ready" : "Not ready"} · ${engine}`;
   status.classList.toggle("not-ready", !ready);
-  status.title = ready ? "" : (active?.reason ?? "");
+  status.title = ready ? "" : (active ? (active.reason ?? "") : "Provider not registered");
   for (const button of providerButtons) {
     const provider = providers.find((p) => p.id === button.dataset.provider);
     button.setAttribute("aria-checked", String(button.dataset.provider === settings.active_provider));
@@ -142,9 +146,14 @@ function copyButton(text: string): HTMLButtonElement {
   const button = el("button", "small", "Copy");
   button.type = "button";
   button.setAttribute("aria-label", "Copy transcript");
+  let timer: number | undefined;
   button.addEventListener("click", () => {
     navigator.clipboard.writeText(text).then(
-      () => { button.textContent = "Copied"; },
+      () => {
+        button.textContent = "Copied";
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => { button.textContent = "Copy"; }, 1400);
+      },
       () => { button.textContent = "Failed"; },
     );
   });

@@ -9,8 +9,8 @@ use std::{
 use tauri::{
     menu::{IsMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, WebviewUrl, WebviewWindowBuilder,
-    WindowEvent,
+    Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Rect, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 /// The right-click menu, top to bottom, as `(id, label)`. The first item is
@@ -54,13 +54,13 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Up,
                 rect,
                 ..
             } = event
             {
-                toggle_flyout(tray.app_handle(), rect);
+                on_tray_click(tray.app_handle(), button, rect);
             }
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -106,23 +106,28 @@ fn queue_window(app: &tauri::AppHandle, label: &str, view: &str) {
     let label = label.to_owned();
     let view = view.to_owned();
     // Serialize creation on the event loop: simultaneous tray/IPC requests
-    // cannot create duplicate labels. Never block a synchronous IPC handler.
-    if let Err(error) =
-        app.run_on_main_thread(move || match ensure_window(&handle, &label, &view) {
-            Ok(window) => {
-                if let Err(error) = window
-                    .unminimize()
-                    .and_then(|()| window.show())
-                    .and_then(|()| window.set_focus())
-                {
-                    eprintln!("failed to show {label}: {error}");
+    // cannot create duplicate labels. Post from a worker: on the main thread
+    // (a tray callback, a sync command) `run_on_main_thread` runs the task
+    // inline, and a window built inside an IPC handler never shows.
+    tauri::async_runtime::spawn(async move {
+        let app = handle.clone();
+        if let Err(error) =
+            app.run_on_main_thread(move || match ensure_window(&handle, &label, &view) {
+                Ok(window) => {
+                    if let Err(error) = window
+                        .unminimize()
+                        .and_then(|()| window.show())
+                        .and_then(|()| window.set_focus())
+                    {
+                        eprintln!("failed to show {label}: {error}");
+                    }
                 }
-            }
-            Err(error) => eprintln!("failed to open {label}: {error}"),
-        })
-    {
-        eprintln!("failed to schedule window: {error}");
-    }
+                Err(error) => eprintln!("failed to open {label}: {error}"),
+            })
+        {
+            eprintln!("failed to schedule window: {error}");
+        }
+    });
 }
 
 /// Call on the main thread. The initial route travels in the URL so a newly
@@ -181,27 +186,24 @@ fn ensure_window(
     }
     Ok(window)
 }
-const FLYOUT: &str = "flyout";
+pub(crate) const FLYOUT: &str = "flyout";
 /// The flyout's logical width; its height comes from the page (`show_flyout`).
 const FLYOUT_WIDTH: f64 = 360.0;
 /// Logical gap to the work-area edge, as Windows leaves around its own flyouts.
 const FLYOUT_MARGIN: f64 = 12.0;
-/// Clicking the tray icon while the flyout is open blurs it, which closes it,
-/// just before the click itself arrives. A click this soon after a blur close
-/// is that same click: it must not reopen the flyout.
-const REOPEN_GUARD: Duration = Duration::from_millis(400);
 
-/// The icon the open flyout is anchored to, and when a blur last closed one.
+/// The icon the flyout opened from, when that click happened, and whether the
+/// next click on the icon is the one that just closed the flyout.
 struct FlyoutState {
-    icon: Option<Rect>,
+    icon: Option<Bounds>,
     clicked_at: Option<Instant>,
-    closed_at: Option<Instant>,
+    swallow_click: bool,
 }
 
 static FLYOUT_STATE: Mutex<FlyoutState> = Mutex::new(FlyoutState {
     icon: None,
     clicked_at: None,
-    closed_at: None,
+    swallow_click: false,
 });
 
 fn flyout_state() -> std::sync::MutexGuard<'static, FlyoutState> {
@@ -210,21 +212,31 @@ fn flyout_state() -> std::sync::MutexGuard<'static, FlyoutState> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Left-click: opens the flyout, or closes it when it is already open. Runs on
-/// the event loop, like every tray callback, so creation is serialized.
-fn toggle_flyout(app: &tauri::AppHandle, icon: Rect) {
-    let now = Instant::now();
+/// A button released on the tray icon. A left-click opens the flyout, or
+/// closes it when it is open. Runs on the event loop, like every tray
+/// callback, so creation is serialized.
+fn on_tray_click(app: &tauri::AppHandle, button: MouseButton, icon: Rect) {
+    // Pressing the icon while the flyout is open blurs it, which closes it
+    // before this release arrives: that click is spent, whichever button.
+    if std::mem::take(&mut flyout_state().swallow_click) || button != MouseButton::Left {
+        return;
+    }
     if let Some(window) = app.get_webview_window(FLYOUT) {
         let _ = window.destroy();
         return;
     }
+    // The tray reports the icon in physical pixels already.
+    let position = icon.position.to_physical::<i32>(1.0);
+    let size = icon.size.to_physical::<i32>(1.0);
     {
         let mut state = flyout_state();
-        if !should_reopen(state.closed_at.take(), now) {
-            return;
-        }
-        state.icon = Some(icon);
-        state.clicked_at = Some(now);
+        state.icon = Some(Bounds {
+            left: position.x,
+            top: position.y,
+            right: position.x + size.width,
+            bottom: position.y + size.height,
+        });
+        state.clicked_at = Some(Instant::now());
     }
     // Hidden until the page has rendered and reported its height, so it never
     // flashes empty or at the wrong size.
@@ -238,26 +250,31 @@ fn toggle_flyout(app: &tauri::AppHandle, icon: Rect) {
         .focused(false)
         .visible(false)
         .build();
-    match built {
-        Ok(window) => {
-            let target = window.clone();
-            window.on_window_event(move |event| {
-                // Focus changes before `show_flyout` belong to the hidden
-                // window being created, not to the user clicking away.
-                if matches!(event, WindowEvent::Focused(false))
-                    && target.is_visible().unwrap_or(false)
-                {
-                    flyout_state().closed_at = Some(Instant::now());
-                    let _ = target.destroy();
-                }
-            });
+    let window = match built {
+        Ok(window) => window,
+        Err(error) => return eprintln!("failed to open the flyout: {error}"),
+    };
+    // A borderless window that keeps its shadow is sized by tao from the
+    // frame it measures, which on a window never shown still counts the
+    // caption (+43 px at 150 %) until a resize refreshes it. Resize now, while
+    // the page loads, so `show_flyout` lands on the right size.
+    let _ = window.set_size(LogicalSize::new(FLYOUT_WIDTH, 400.0));
+    let target = window.clone();
+    window.on_window_event(move |event| {
+        // Focus changes before `show_flyout` belong to the hidden window
+        // being created, not to the user clicking away.
+        if matches!(event, WindowEvent::Focused(false)) && target.is_visible().unwrap_or(false) {
+            let cursor = target.app_handle().cursor_position();
+            {
+                let mut state = flyout_state();
+                state.swallow_click = match (state.icon, cursor) {
+                    (Some(icon), Ok(at)) => icon.contains(at.x as i32, at.y as i32),
+                    _ => false,
+                };
+            }
+            let _ = target.destroy();
         }
-        Err(error) => eprintln!("failed to open the flyout: {error}"),
-    }
-}
-
-fn should_reopen(closed_at: Option<Instant>, now: Instant) -> bool {
-    closed_at.is_none_or(|at| now.saturating_duration_since(at) >= REOPEN_GUARD)
+    });
 }
 
 /// Called by the page once it has rendered: sizes the flyout to `height`
@@ -265,29 +282,18 @@ fn should_reopen(closed_at: Option<Instant>, now: Instant) -> bool {
 /// click anywhere else blurs and destroys it.
 pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::Result<()> {
     let (icon, clicked_at) = {
-        let state = flyout_state();
-        (state.icon, state.clicked_at)
+        let mut state = flyout_state();
+        (state.icon, state.clicked_at.take())
     };
-    // The tray reports the icon in physical pixels already.
-    let icon = icon.map(|rect| {
-        let position = rect.position.to_physical::<i32>(1.0);
-        let size = rect.size.to_physical::<i32>(1.0);
-        Bounds {
-            left: position.x,
-            top: position.y,
-            right: position.x + size.width,
-            bottom: position.y + size.height,
-        }
-    });
-    let monitor = match icon {
-        Some(icon) => window.monitor_from_point(
-            f64::from(icon.left + icon.right) / 2.0,
-            f64::from(icon.top + icon.bottom) / 2.0,
-        )?,
-        None => None,
-    };
-    let Some(monitor) = monitor.or(window.primary_monitor()?) else {
-        return Err(tauri::Error::WindowNotFound);
+    let icon = icon.ok_or(tauri::Error::WindowNotFound)?;
+    let monitor = match window.monitor_from_point(
+        f64::from(icon.left + icon.right) / 2.0,
+        f64::from(icon.top + icon.bottom) / 2.0,
+    )? {
+        Some(monitor) => monitor,
+        None => window
+            .primary_monitor()?
+            .ok_or(tauri::Error::WindowNotFound)?,
     };
     let scale = monitor.scale_factor();
     let area = monitor.work_area();
@@ -298,34 +304,21 @@ pub(crate) fn show_flyout(window: &tauri::WebviewWindow, height: f64) -> tauri::
         bottom: area.position.y + area.size.height as i32,
     };
     let height = height.clamp(1.0, f64::from(work.bottom - work.top) / scale);
-    let size = (
+    let (width, height) = (
         (FLYOUT_WIDTH * scale).round() as i32,
         (height * scale).round() as i32,
     );
-    // Without an icon rect, fall back to the bottom-right corner.
-    let corner = Bounds {
-        left: work.right,
-        top: work.bottom,
-        right: work.right,
-        bottom: work.bottom,
-    };
     let (x, y) = flyout_origin(
         work,
-        icon.unwrap_or(corner),
-        size,
+        icon,
+        (width, height),
         (FLYOUT_MARGIN * scale).round() as i32,
     );
-    // tao pads a borderless window that keeps its shadow by the frame it
-    // measures. On a window never shown yet that measure is off (+43 px at
-    // 150 %); once applied it is right, so a second call lands exactly.
-    let want = PhysicalSize::new(size.0 as u32, size.1 as u32);
-    window.set_size(want)?;
-    if window.inner_size()? != want {
-        window.set_size(want)?;
-    }
+    window.set_size(PhysicalSize::new(width, height))?;
     window.set_position(PhysicalPosition::new(x, y))?;
     window.show()?;
     window.set_focus()?;
+    // The page calls this again when its content changes; time the first.
     if let Some(at) = clicked_at {
         eprintln!(
             "flyout: shown {} ms after the click",
@@ -342,6 +335,12 @@ struct Bounds {
     top: i32,
     right: i32,
     bottom: i32,
+}
+
+impl Bounds {
+    fn contains(self, x: i32, y: i32) -> bool {
+        (self.left..self.right).contains(&x) && (self.top..self.bottom).contains(&y)
+    }
 }
 
 /// Top-left corner for a `size` flyout next to the tray `icon`, kept `margin`
@@ -509,11 +508,18 @@ mod flyout_tests {
     }
 
     #[test]
-    fn the_click_that_blurred_the_flyout_does_not_reopen_it() {
-        let now = Instant::now();
-        assert!(should_reopen(None, now));
-        assert!(!should_reopen(Some(now), now + Duration::from_millis(150)));
-        assert!(should_reopen(Some(now), now + REOPEN_GUARD));
+    fn bounds_contain_their_top_left_edges_but_not_bottom_right() {
+        let icon = Bounds {
+            left: 10,
+            top: 20,
+            right: 30,
+            bottom: 40,
+        };
+        assert!(icon.contains(10, 20));
+        assert!(icon.contains(29, 39));
+        assert!(!icon.contains(30, 25));
+        assert!(!icon.contains(15, 40));
+        assert!(!icon.contains(9, 25));
     }
 }
 

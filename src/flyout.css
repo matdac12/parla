@@ -14,11 +14,12 @@
 .who b { display: block; font-size: 14px; }
 .who small { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
-.not-ready .dot { background: var(--danger); }
+.not-ready .dot { background: var(--warning); }
+.plus { margin: 0 3px; }
 .keys { margin-left: auto; color: var(--text-3); font-size: 12px; white-space: nowrap; }
 kbd {
   display: inline-block;
-  padding: 3px 6px 2px;
+  padding: 4px 6px 3px;
   border: 1px solid var(--border-strong);
   border-bottom-width: 2px;
   border-radius: 5px;

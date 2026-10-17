@@ -11,11 +11,9 @@ pub fn get_stats(app: tauri::AppHandle) -> Summary {
 }
 
 /// Shows the benchmark window, or the main window on one of its pages: History
-/// and Timings are pages there, not windows of their own. Async on purpose: a
-/// sync command runs on the main thread, where `run_on_main_thread` runs the
-/// window creation inline, inside the IPC handler, and the window never shows.
+/// and Timings are pages there, not windows of their own.
 #[tauri::command]
-pub async fn open_window(app: tauri::AppHandle, name: String) -> Result<(), String> {
+pub fn open_window(app: tauri::AppHandle, name: String) -> Result<(), String> {
     match name.as_str() {
         "bench" => crate::tray::open_bench(&app),
         "home" | "history" | "timings" | "settings" => crate::tray::open_app(&app, &name),
@@ -27,7 +25,7 @@ pub async fn open_window(app: tauri::AppHandle, name: String) -> Result<(), Stri
 /// The tray flyout has rendered: size it to the page and show it.
 #[tauri::command]
 pub fn flyout_ready(window: tauri::WebviewWindow, height: f64) -> Result<(), String> {
-    if window.label() != "flyout" {
+    if window.label() != crate::tray::FLYOUT {
         return Err("Only the flyout can show itself".into());
     }
     crate::tray::show_flyout(&window, height).map_err(|error| {
