@@ -396,9 +396,7 @@ struct PendingRestore {
     due: Instant,
 }
 
-/// Pastes and returns without waiting for the restore, which is left in
-/// `pending`. Keeping the dictation busy through the restore delay dropped a
-/// dictation started right after a paste (PARLA-48).
+/// Dictation's `paste_over`, for the tests.
 #[cfg(test)]
 fn paste_deferring_restore(
     desktop: &mut impl Desktop,
@@ -419,7 +417,10 @@ fn paste_deferring_restore(
     )
 }
 
-/// `paste_deferring_restore` for a clipboard command mode may have borrowed.
+/// Pastes and returns without waiting for the restore, which is left in
+/// `pending`. Keeping the dictation busy through the restore delay dropped a
+/// dictation started right after a paste (PARLA-48). `borrowed` is command
+/// mode's (PARLA-64); dictation passes None.
 #[cfg(any(windows, test))]
 fn paste_over(
     desktop: &mut impl Desktop,
@@ -496,17 +497,18 @@ fn give_back_to(desktop: &mut impl Desktop, borrowed: &Borrowed) {
     }
 }
 
-/// Writes `saved` while the clipboard still holds `pasted` (None: no text).
+/// Writes `saved` while the clipboard still holds `ours`, Parla's paste or
+/// command mode's copy (None: no text).
 #[cfg(any(windows, test))]
 fn restore_clipboard(
     desktop: &mut impl Desktop,
-    pasted: Option<&str>,
+    ours: Option<&str>,
     saved: &str,
 ) -> Result<(), String> {
     for attempt in 0..5 {
         // Re-read on EVERY attempt: a user copy may arrive after a failed write.
         let result = match desktop.read_text() {
-            Ok(current) if current.as_deref().filter(|text| !text.is_empty()) != pasted => {
+            Ok(current) if current.as_deref().filter(|text| !text.is_empty()) != ours => {
                 return Ok(())
             }
             Ok(_) => desktop.write_text(saved),

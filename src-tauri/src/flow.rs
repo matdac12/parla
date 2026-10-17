@@ -298,9 +298,10 @@ fn run_session(
     // While the user is still speaking, never for a dictation or a quick
     // Ctrl+Shift shortcut: read the selection (PARLA-64) and open the
     // connection the LLM request will use.
+    let desktop = CommandDesktop::new(&settings);
     let selection = (command && held).then(|| {
         crate::provider::openai::prewarm(&settings);
-        SelectionRead::start(CommandDesktop::new(&settings))
+        SelectionRead::start(desktop)
     });
     // After the mic started, so it never delays the first syllable.
     let dimmed = held.then(|| crate::dim::dim(&settings));
@@ -359,7 +360,7 @@ fn run_session(
     if cancelled.load(Ordering::Acquire) {
         drop(stream);
         if let Some(selection) = selection {
-            selection.join().give_back(&CommandDesktop::new(&settings));
+            selection.join().give_back(&desktop);
         }
         return;
     }

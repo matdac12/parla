@@ -317,8 +317,9 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - **Selection:** once the hold passes 300 ms, while you are still speaking,
   Parla saves your clipboard text, sends **Ctrl+Insert** (never Ctrl+C, so a
   terminal is never interrupted) and watches the clipboard for about 150 ms.
-  New, non-empty text is the selection. Nothing new, or VS Code's copy of the
-  whole line when nothing is selected, means no selection. The focused app's
+  New, non-empty text is the selection; a slower copy is still picked up when
+  you release. Nothing new, or VS Code's copy of the whole line when nothing
+  is selected, means no selection. The focused app's
   executable name is noted too, and the connection to OpenAI is opened ahead
   of the request.
 - The pill is **orange** while recording, transcribing and waiting for the
@@ -348,9 +349,10 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
   `outcome` (`pasted`, `failed` or `cancelled`), `llm_model`, `tokens_in` and
   `tokens_out`, the `reply`, `selection_chars` (the selection's length, 0 for
-  none; its text is never kept), `app` (the focused executable), and stage times from key-up (`provider_returned` for the
-  transcript, `llm_returned` for the reply, `pasted`). A cancel while you are
-  still holding leaves no row.
+  none; its text is never kept), `app` (the focused executable), and stage
+  times from key-up (`provider_returned` for the transcript, `llm_returned`
+  for the reply, `pasted`). A cancel while you are still holding leaves no
+  row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
   as usual), and the hold stops after 120 s. Recording starts at key-down, but

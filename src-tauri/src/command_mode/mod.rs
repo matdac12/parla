@@ -81,15 +81,40 @@ pub struct Selection {
     pub text: Option<String>,
     pub app: Option<String>,
     borrowed: Option<Borrowed>,
+    /// No copy within the wait: the saved text and the sequence before the
+    /// copy, for a second look once the instruction is in.
+    unanswered: Option<(Option<String>, u32)>,
 }
 
 impl Selection {
+    /// A slow app's copy that landed after the wait, while the user was still
+    /// speaking: the selection after all, and the clipboard is borrowed.
+    fn late_copy(&mut self, desktop: &dyn Desktop) {
+        if let Some((saved, before)) = self.unanswered.take() {
+            if desktop.clipboard_sequence() != before {
+                self.take_copy(desktop, saved);
+            }
+        }
+    }
+
     /// A run that pastes nothing gives the user's clipboard back: a cancel,
     /// a failure or a silent instruction.
-    pub fn give_back(self, desktop: &dyn Desktop) {
+    pub fn give_back(mut self, desktop: &dyn Desktop) {
+        self.late_copy(desktop);
         if let Some(borrowed) = &self.borrowed {
             desktop.give_back(borrowed);
         }
+    }
+
+    fn take_copy(&mut self, desktop: &dyn Desktop, saved: Option<String>) {
+        let copied = desktop.clipboard_text().unwrap_or_else(|error| {
+            eprintln!("Parla selection unreadable: {error}");
+            None
+        });
+        self.text = copied
+            .clone()
+            .filter(|text| !text.is_empty() && !desktop.copied_empty_selection());
+        self.borrowed = Some(Borrowed { saved, copied });
     }
 }
 
@@ -118,17 +143,11 @@ pub fn read_selection(desktop: &dyn Desktop) -> Selection {
         desktop.wait(COPY_POLL);
         desktop.clipboard_sequence() != before
     });
-    if !copied {
-        return selection;
+    if copied {
+        selection.take_copy(desktop, saved);
+    } else {
+        selection.unanswered = Some((saved, before));
     }
-    let copied = desktop.clipboard_text().unwrap_or_else(|error| {
-        eprintln!("Parla selection unreadable: {error}");
-        None
-    });
-    selection.text = copied
-        .clone()
-        .filter(|text| !text.is_empty() && !desktop.copied_empty_selection());
-    selection.borrowed = Some(Borrowed { saved, copied });
     selection
 }
 
@@ -188,7 +207,8 @@ pub fn run(
 ) -> Outcome {
     let cancelled = || run.cancelled.load(Ordering::Acquire);
     let transcribed = transcribe(&mut record);
-    let selection = selection();
+    let mut selection = selection();
+    selection.late_copy(ports.desktop);
     // Whether there was a selection and its length, never its text.
     record.selection_chars = Some(
         selection
@@ -211,11 +231,14 @@ pub fn run(
     if outcome != Outcome::Pasted {
         selection.give_back(ports.desktop);
     }
+    if outcome == Outcome::Silent {
+        return outcome;
+    }
     if let Outcome::Failed(Failure::Command(error)) = &outcome {
         record.error = Some(crate::failure::command_message(error));
     }
     record.outcome = Some(match outcome {
-        Outcome::Silent => return outcome,
+        Outcome::Silent => unreachable!("a silent run returned above"),
         Outcome::Pasted => CommandOutcome::Pasted,
         Outcome::Cancelled => CommandOutcome::Cancelled,
         Outcome::Failed(_) => CommandOutcome::Failed,
@@ -436,6 +459,8 @@ mod tests {
         history: FakeHistory,
         cancelled: AtomicBool,
         settings: CommandSettings,
+        /// Polls that pass between the selection read and key-up.
+        speaking: usize,
     }
     impl Harness {
         fn new(reply: Result<Reply, ProviderError>) -> Self {
@@ -445,6 +470,7 @@ mod tests {
                 history: FakeHistory::default(),
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
+                speaking: 0,
             }
         }
         fn run_with(
@@ -466,6 +492,9 @@ mod tests {
             };
             // Read at the confirmed hold, before the instruction is in.
             let selection = read_selection(&self.desktop);
+            for _ in 0..self.speaking {
+                self.desktop.wait(COPY_POLL);
+            }
             let mut record = DictationRecord::new(SystemTime::now(), "parakeet");
             record.kind = timing::COMMAND_KIND.into();
             run(
@@ -715,10 +744,28 @@ mod tests {
             h.llm.requests.borrow()[0].selection.as_deref(),
             Some("ciao")
         );
-        let mut h = Harness::selecting(text("Hi"), "ciao");
-        h.desktop.copy_lag = polls + 1;
-        h.run("Traduci");
-        assert_eq!(h.llm.requests.borrow()[0].selection, None);
+    }
+
+    #[test]
+    fn a_copy_that_lands_after_the_wait_is_picked_up_when_the_run_joins() {
+        let polls = (COPY_WAIT.as_millis() / COPY_POLL.as_millis()) as usize;
+        let mut h = Harness::selecting(text("Hello"), "ciao");
+        h.desktop.copy_lag = polls + 3;
+        // The user keeps speaking past the wait; the slow app's copy lands.
+        h.speaking = 3;
+        assert_eq!(h.run("Traduci"), Outcome::Pasted);
+        assert_eq!(
+            h.llm.requests.borrow()[0].selection.as_deref(),
+            Some("ciao")
+        );
+        assert_eq!(h.writes(), ["Hello", "user copy"]);
+        // A cancel gives the user's clipboard back over the late copy too.
+        let mut h = Harness::selecting(text("Hello"), "ciao");
+        h.desktop.copy_lag = polls + 3;
+        h.speaking = 3;
+        h.llm.late = true;
+        assert_eq!(h.run("Traduci"), Outcome::Cancelled);
+        assert_eq!(h.writes(), ["user copy"]);
     }
 
     #[test]
