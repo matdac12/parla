@@ -82,6 +82,13 @@ body {
 .pill[data-phase="error"] .retry {
   display: grid;
 }
+/* A failure that kept no clip of its own: Dismiss only (PARLA-51). */
+.pill[data-phase="error"][data-no-retry] {
+  width: 40px;
+}
+.pill[data-phase="error"][data-no-retry] .retry {
+  display: none;
+}
 .pill:not([data-phase="recording"]) .mode,
 .pill:not([data-phase="recording"]) .bars,
 .pill[data-phase="recording"] .spinner,

@@ -213,6 +213,7 @@ fn parse_response(status: u16, body: &str) -> Result<String, ProviderError> {
         401 | 403 => Err(ProviderError::Auth(format!(
             "OpenAI authentication rejected (HTTP {status})"
         ))),
+        408 => Err(ProviderError::Timeout),
         _ => Err(ProviderError::Http {
             status,
             body: String::new(),
@@ -313,6 +314,11 @@ mod tests {
                 })
             );
         }
+        // A 408 is the server timing out the upload, as in xai.rs.
+        assert_eq!(
+            parse_response(408, "private body"),
+            Err(ProviderError::Timeout)
+        );
         assert_eq!(
             classify_transport(true, "timed out".into()),
             ProviderError::Timeout

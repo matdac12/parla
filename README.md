@@ -243,8 +243,9 @@ hold mode: tap to start, tap to stop.
 
 While transcribing, new presses are ignored; nothing is queued. If no stop
 arrives within 120 seconds of capture starting, Parla stops and transcribes the
-clip anyway. Before pasting, Parla saves any nonempty text clipboard; after the
-paste and a delay it restores that text (best effort). The transcript is raw: no
+clip anyway; if that pastes, it counts as a normal success. Before pasting,
+Parla saves any nonempty text clipboard; after the paste and a delay it
+restores that text (best effort). The transcript is raw: no
 filler removal or rewriting.
 Pasting uses a 15 ms clipboard settle delay and a 25 ms modifier hold.
 Enable **Paste compatibility mode** in Settings to use the original 100 ms
@@ -722,7 +723,8 @@ A transcription failure (missing configuration, network, authentication,
 timeout, empty audio, or an empty transcript) pastes nothing: Parla shows a
 red cross in the pill, a short notification, and sets a red tray icon and error
 tooltip. Recorder startup
-failures notify too, but there is no clip to retry. Clipboard and injection
+failures notify too, but there is no clip to retry, so their pill has no
+reload button. Clipboard and injection
 failures also report an error; an injection failure can occur after input has
 already reached the destination.
 

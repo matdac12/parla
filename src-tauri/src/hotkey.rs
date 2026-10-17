@@ -17,6 +17,10 @@ pub const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Space";
 /// True while the microphone is capturing a dictation. Escape cancels (and is
 /// swallowed, so the focused app does not also see it) only during this window.
 pub static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set by the hook as it swallows an Escape, before the flow hears of it: a
+/// dictation that disarms Esc to paste reads it, so an Esc swallowed just
+/// before still cancels (PARLA-15). Cleared when a dictation arms Esc.
+pub static ESC_SWALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Process-lifetime registration, kept in Tauri managed state. The receiver is
 /// the core flow's seam; callbacks only enqueue events and never do desktop IO.
@@ -1353,8 +1357,11 @@ mod windows_hook {
             WM_KEYUP | WM_SYSKEYUP => Some(false),
             _ => None,
         };
-        if vk == u32::from(VK_ESCAPE) && RECORDING.load(std::sync::atomic::Ordering::Acquire) {
+        // SeqCst pairs with the paste's disarm: either this sees it, or the
+        // paste sees ESC_SWALLOWED.
+        if vk == u32::from(VK_ESCAPE) && RECORDING.load(std::sync::atomic::Ordering::SeqCst) {
             if pressed == Some(true) {
+                ESC_SWALLOWED.store(true, std::sync::atomic::Ordering::SeqCst);
                 CONTEXT.with(|context| {
                     if let Some(context) = context.borrow().as_ref() {
                         let _ = context.events.send(HotkeyEvent::Cancel);

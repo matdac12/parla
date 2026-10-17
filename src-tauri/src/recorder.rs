@@ -92,6 +92,12 @@ impl From<Clip> for RecoveryAudio {
 /// How long a public call waits for the worker before giving up.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long `Recorder::new` waits for the first device open. Longer than
+/// [`WORKER_TIMEOUT`]: a cold Bluetooth headset at login can be slow. A hung
+/// driver then fails the startup warm-up instead of blocking it, and with it
+/// every later `recorder()` call, forever (PARLA-69).
+const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long the worker blocks waiting for a command before draining the ring
 /// again while recording. Commands wake this wait immediately, so draining less
 /// often does not add a polling delay to start/stop. The live meter updates
@@ -268,18 +274,28 @@ impl Recorder {
             .spawn(move || audio_thread(worker_shared, command_rx, ready_tx, idle_pause))
             .context("spawning the audio thread")?;
 
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Recorder {
+        match await_open(ready_rx, OPEN_TIMEOUT) {
+            Ok(()) => Ok(Recorder {
                 shared,
                 commands: command_tx,
                 worker: Some(worker),
             }),
-            Ok(Err(message)) => {
+            Err(OpenError::Failed(message)) => {
                 let _ = command_tx.send(Command::Shutdown);
                 let _ = worker.join();
                 Err(anyhow!(message))
             }
-            Err(_) => Err(anyhow!("audio thread exited during startup")),
+            Err(OpenError::Hung) => {
+                // Not joined: the worker is stuck in the driver. If the open
+                // ever returns, its ready reply fails and it exits, closing the
+                // stream; a failed open finds this Shutdown instead.
+                let _ = command_tx.send(Command::Shutdown);
+                Err(anyhow!(
+                    "the microphone did not open within {} s",
+                    OPEN_TIMEOUT.as_secs()
+                ))
+            }
+            Err(OpenError::Exited) => Err(anyhow!("audio thread exited during startup")),
         }
     }
 
@@ -437,6 +453,24 @@ impl Drop for AudioThreadApartment {
         // SAFETY: each successful initialization (including S_FALSE) owns one
         // matching uninitialize. The !Send guard stays on its original thread.
         unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OpenError {
+    Failed(String),
+    /// No reply within the limit: the driver is hung.
+    Hung,
+    Exited,
+}
+
+/// The worker's reply to its first device open, waiting at most `limit`. Takes
+/// `ready` so that, on return, a late reply finds nobody listening.
+fn await_open(ready: Receiver<Result<(), String>>, limit: Duration) -> Result<(), OpenError> {
+    match ready.recv_timeout(limit) {
+        Ok(result) => result.map_err(OpenError::Failed),
+        Err(RecvTimeoutError::Timeout) => Err(OpenError::Hung),
+        Err(RecvTimeoutError::Disconnected) => Err(OpenError::Exited),
     }
 }
 
@@ -1191,6 +1225,37 @@ impl MonoResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hung_first_open_gives_up_at_the_limit_and_a_late_reply_is_harmless() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        // A driver that answers long after the limit.
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1_500));
+            ready_tx.send(Ok(())).is_err()
+        });
+        let begun = Instant::now();
+        assert_eq!(
+            await_open(ready_rx, Duration::from_millis(50)),
+            Err(OpenError::Hung)
+        );
+        // Loose bound: a loaded CI runner can stall a thread for a while.
+        assert!(begun.elapsed() < Duration::from_secs(1));
+        // The worker sees nobody waiting and closes the stream it opened.
+        assert!(late.join().unwrap());
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        ready_tx
+            .send(Err("no default input device".into()))
+            .unwrap();
+        assert_eq!(
+            await_open(ready_rx, Duration::from_millis(50)),
+            Err(OpenError::Failed("no default input device".into()))
+        );
+        let (ready_tx, ready_rx) = mpsc::channel();
+        ready_tx.send(Ok(())).unwrap();
+        assert_eq!(await_open(ready_rx, Duration::from_millis(50)), Ok(()));
+    }
 
     #[test]
     fn subscribing_includes_preroll_and_keeps_the_full_recovery_clip() {
