@@ -166,7 +166,8 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let mut session: Option<(mpsc::Sender<Instant>, Arc<AtomicBool>)> = None;
             for event in receiver {
                 let before = controller.phase;
-                let action = controller.on_event(event, busy.is_busy(), Instant::now());
+                let now = Instant::now();
+                let action = controller.on_event(event, busy.is_busy(), now);
                 if controller.phase != before || action == Action::Start {
                     if let Some(mode) = controller.phase.pill_mode() {
                         crate::overlay::set_mode(&app, mode);
@@ -180,7 +181,10 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let started_at = SystemTime::now();
-                        let command = controller.phase.pill_mode() == Some(PillMode::Command);
+                        // The controller's own key-down time, so the session
+                        // confirms a command hold on the same clock.
+                        let command = matches!(controller.phase, Phase::Hold(Chord::Command, _))
+                            .then_some(now);
                         let settings = app
                             .state::<SharedSettings>()
                             .read()
@@ -190,8 +194,13 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                         let cancelled = Arc::new(AtomicBool::new(false));
                         let flag = cancelled.clone();
                         let session_app = app.clone();
+                        let name = if command.is_some() {
+                            "parla-command"
+                        } else {
+                            "parla-dictation"
+                        };
                         match std::thread::Builder::new()
-                            .name("parla-dictation".into())
+                            .name(name.into())
                             .spawn(move || {
                                 let _guard = guard;
                                 run_session(
@@ -205,7 +214,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             }) {
                             Ok(_) => {
                                 // A command hold arms Esc once it is confirmed.
-                                if !command {
+                                if command.is_none() {
                                     crate::hotkey::RECORDING.store(true, Ordering::Release);
                                 }
                                 session = Some((sender, cancelled));
@@ -238,8 +247,9 @@ fn run_session(
     started_at: SystemTime,
     released: mpsc::Receiver<Instant>,
     cancelled: Arc<AtomicBool>,
-    command: bool,
+    command_pressed_at: Option<Instant>,
 ) {
+    let command = command_pressed_at.is_some();
     let recording = crate::recorder::recorder()
         .ok_or_else(|| ProviderError::Other("No microphone available".into()))
         .and_then(|recorder| {
@@ -253,15 +263,19 @@ fn run_session(
     // warm-up, and its Esc reaches the app (Ctrl+Shift+Esc). The recorder
     // already runs, and the live feed replays the clip from key-down.
     let confirm_after = if command { MIN_HOLD } else { Duration::ZERO };
-    let early_release = match command.then(|| released.recv_timeout(confirm_after)) {
-        None | Some(Err(mpsc::RecvTimeoutError::Timeout)) => None,
-        Some(Ok(key_up)) => Some((key_up, None)),
-        Some(Err(mpsc::RecvTimeoutError::Disconnected)) => Some((
-            Instant::now(),
-            Some("Hotkey release channel disconnected".into()),
-        )),
-    };
-    let held = recording.is_ok() && early_release.is_none();
+    let early_release = command_pressed_at.and_then(|pressed_at| {
+        match released.recv_timeout(MIN_HOLD.saturating_sub(pressed_at.elapsed())) {
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Ok(key_up) => Some((key_up, None)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some((
+                Instant::now(),
+                Some("Hotkey release channel disconnected".into()),
+            )),
+        }
+    });
+    // The controller decides what a release means: one it kept (just past
+    // MIN_HOLD, or this thread started late) ends a confirmed hold.
+    let held = recording.is_ok() && (early_release.is_none() || !cancelled.load(Ordering::Acquire));
     if command && held {
         // From here Esc cancels and is swallowed, as in dictation.
         crate::hotkey::RECORDING.store(true, Ordering::Release);

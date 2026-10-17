@@ -56,7 +56,7 @@ const LOCK = `<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"
 const MODE_TITLES: Record<Mode, string> = {
   hold: "Holding",
   locked: "Locked: press Ctrl+Alt to stop, Esc to cancel",
-  command: "Command: release to send, Esc to cancel",
+  command: "Command: release when done, Esc to cancel",
 };
 function setMode(next: Mode): void {
   pill.dataset.mode = next;
