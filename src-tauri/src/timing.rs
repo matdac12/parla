@@ -62,7 +62,7 @@ pub struct DictationRecord {
     /// Whether a `shown` reply was an edit or an answer (PARLA-81). Not
     /// `kind`, which names the row's origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_kind: Option<crate::command_mode::responses::Kind>,
+    pub reply_kind: Option<crate::command_mode::Kind>,
     /// The selection's length in characters, 0 for none (PARLA-64); its
     /// text is never kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]

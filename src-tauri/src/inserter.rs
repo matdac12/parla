@@ -56,19 +56,6 @@ pub fn paste_text_with_options(
     paste_transaction(text, None, restore_delay, compatibility_mode, send)
 }
 
-/// Command mode's paste (PARLA-64): over the selection Ctrl+Insert copied, if
-/// any. The restore owes `borrowed`'s saved text while the clipboard still
-/// holds the copy, so the user's clipboard comes back once, after the paste.
-#[cfg(windows)]
-pub fn paste_over_borrowed(
-    text: &str,
-    borrowed: Option<&Borrowed>,
-    restore_delay: Duration,
-    compatibility_mode: bool,
-) -> Result<Instant, String> {
-    paste_transaction(text, borrowed, restore_delay, compatibility_mode, false)
-}
-
 #[cfg(windows)]
 fn paste_transaction(
     text: &str,
@@ -291,16 +278,6 @@ fn schedule_restore(due: Instant) {
 /// contents; this fallback lets the rest of the app and tests run headlessly.
 #[cfg(not(windows))]
 pub fn paste_text_timed(_text: &str, _restore_delay: Duration) -> Result<Instant, String> {
-    Err("Text insertion is only supported on Windows".into())
-}
-
-#[cfg(not(windows))]
-pub fn paste_over_borrowed(
-    _text: &str,
-    _borrowed: Option<&Borrowed>,
-    _restore_delay: Duration,
-    _compatibility_mode: bool,
-) -> Result<Instant, String> {
     Err("Text insertion is only supported on Windows".into())
 }
 

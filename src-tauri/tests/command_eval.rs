@@ -9,8 +9,9 @@
 
 use parla_lib::{
     command_mode::{
-        responses::{send, Kind, Reply, Request, ToolCall},
+        responses::{send, Reply, Request, ToolCall},
         tools::{self, Tool},
+        Kind,
     },
     settings::CommandSettings,
 };

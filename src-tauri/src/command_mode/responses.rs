@@ -1,7 +1,7 @@
 //! The OpenAI Responses API client for command mode (never Chat Completions).
 //! Pure request building and response parsing, plus one thin blocking call.
 
-use super::tools;
+use super::{tools, Kind};
 use crate::{
     provider::{openai, ProviderError},
     settings::Settings,
@@ -114,17 +114,6 @@ pub struct Reply {
     pub call: Option<ToolCall>,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
-}
-
-/// A text reply's kind (ADR-0003): it picks the Card's main button, never
-/// whether Parla pastes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    /// Text meant to go into the document: Replace or Paste.
-    Edit,
-    /// Text addressed to the user: Copy.
-    Answer,
 }
 
 /// A `function_call` output item, unchecked: the allowlist validates it.

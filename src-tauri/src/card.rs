@@ -51,31 +51,10 @@ impl Card {
             primary: Action::Copy,
         }
     }
-}
 
-impl Card {
-    /// A command's text reply (PARLA-81, ADR-0003): never pasted unasked.
-    /// With nothing editable in focus only Copy is offered; otherwise
-    /// Replace over the selection, or Paste at the cursor. An edit leads with
-    /// that, an answer with Copy.
-    pub fn command_reply(
-        instruction: String,
-        text: String,
-        kind: crate::command_mode::responses::Kind,
-        selected: bool,
-        verdict: crate::focus_probe::Verdict,
-    ) -> Self {
-        use crate::{command_mode::responses::Kind, focus_probe::Verdict};
-        let insert = if selected {
-            Action::Replace
-        } else {
-            Action::Paste
-        };
-        let actions = match (verdict, kind) {
-            (Verdict::NotEditable, _) => vec![Action::Copy],
-            (_, Kind::Edit) => vec![insert, Action::Copy],
-            (_, Kind::Answer) => vec![Action::Copy, insert],
-        };
+    /// A command's text reply (PARLA-81): the instruction in the header, and
+    /// `actions` with the first one filled.
+    pub fn command(instruction: String, text: String, actions: Vec<Action>) -> Self {
         Self {
             tag: Tag::Command,
             header: Some(instruction),
@@ -104,6 +83,11 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
     let result = match action {
         Action::Copy => crate::inserter::copy_text(&card.text).map(|()| "copied"),
         Action::Paste | Action::Replace => {
+            let done = if action == Action::Replace {
+                "replaced"
+            } else {
+                "pasted"
+            };
             let settings = app
                 .state::<crate::settings::SharedSettings>()
                 .read()
@@ -115,10 +99,7 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
                 settings.paste_compatibility_mode,
                 false,
             )
-            .map(|_| match action {
-                Action::Replace => "replaced",
-                _ => "pasted",
-            })
+            .map(|_| done)
         }
         Action::Dismiss => Ok("dismissed"),
     };
@@ -131,7 +112,6 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{command_mode::responses::Kind, focus_probe::Verdict};
 
     #[test]
     fn a_caught_dictation_offers_copy_first_then_paste() {
@@ -151,12 +131,10 @@ mod tests {
 
     #[test]
     fn a_command_reply_is_tagged_and_headed_by_its_instruction() {
-        let card = Card::command_reply(
+        let card = Card::command(
             "Rendilo più personale".into(),
             "Ciao Giulia, grazie davvero!".into(),
-            Kind::Edit,
-            true,
-            Verdict::Unknown,
+            vec![Action::Replace, Action::Copy],
         );
         assert_eq!(
             serde_json::to_value(&card).unwrap(),
@@ -168,30 +146,5 @@ mod tests {
                 "primary": "replace",
             })
         );
-    }
-
-    #[test]
-    fn a_command_cards_buttons_follow_its_kind_the_selection_and_the_probe() {
-        use Action::{Copy, Paste, Replace};
-        use Kind::{Answer, Edit};
-        use Verdict::{Editable, NotEditable, Unknown};
-        let cases = [
-            // An edit's main button puts it in the document.
-            (Edit, true, Unknown, vec![Replace, Copy], Replace),
-            (Edit, true, Editable, vec![Replace, Copy], Replace),
-            (Edit, false, Unknown, vec![Paste, Copy], Paste),
-            // An answer's is Copy; Replace or Paste stays on offer.
-            (Answer, true, Unknown, vec![Copy, Replace], Copy),
-            (Answer, false, Editable, vec![Copy, Paste], Copy),
-            // Nothing editable: Copy only, whatever the kind.
-            (Edit, true, NotEditable, vec![Copy], Copy),
-            (Answer, false, NotEditable, vec![Copy], Copy),
-        ];
-        for (kind, selected, verdict, actions, primary) in cases {
-            let card = Card::command_reply("x".into(), "y".into(), kind, selected, verdict);
-            let case = format!("{kind:?}, selected {selected}, {verdict:?}");
-            assert_eq!(card.actions, actions, "{case}");
-            assert_eq!(card.primary, primary, "{case}");
-        }
     }
 }

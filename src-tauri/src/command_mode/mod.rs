@@ -13,12 +13,13 @@ pub mod tools;
 
 pub use crate::inserter::Borrowed;
 use crate::{
-    card::Card,
+    card::{Action, Card},
+    focus_probe::Verdict,
     provider::ProviderError,
     settings::CommandSettings,
     timing::{self, CommandOutcome, DictationRecord},
 };
-use responses::{Kind, Reply, Request};
+use responses::{Reply, Request};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -175,6 +176,33 @@ pub fn today() -> String {
     String::new()
 }
 
+/// A text reply's kind (ADR-0003): it picks the Card's main button, never
+/// whether Parla pastes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// Text meant to go into the document: Replace or Paste.
+    Edit,
+    /// Text addressed to the user: Copy.
+    Answer,
+}
+
+/// The Card's buttons for a reply, the main one first. With nothing editable
+/// in focus only Copy; otherwise Replace over the selection, or Paste at the
+/// cursor. An edit leads with that, an answer with Copy.
+fn buttons(kind: Kind, selected: bool, verdict: Verdict) -> Vec<Action> {
+    let insert = if selected {
+        Action::Replace
+    } else {
+        Action::Paste
+    };
+    match (verdict, kind) {
+        (Verdict::NotEditable, _) => vec![Action::Copy],
+        (_, Kind::Edit) => vec![insert, Action::Copy],
+        (_, Kind::Answer) => vec![Action::Copy, insert],
+    }
+}
+
 /// What the pill and the notification show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -188,25 +216,6 @@ pub enum Outcome {
     },
     Cancelled,
     Failed(Failure),
-}
-
-impl Outcome {
-    /// The pill's check or cross; None drops the pill without one.
-    pub fn pill(&self) -> Option<bool> {
-        match self {
-            Outcome::Silent | Outcome::Cancelled => None,
-            Outcome::Shown(_) | Outcome::Opened { .. } => Some(true),
-            Outcome::Failed(_) => Some(false),
-        }
-    }
-
-    /// What the pill says beside its check.
-    pub fn label(&self) -> Option<String> {
-        match self {
-            Outcome::Opened { host } => Some(format!("Opened {host}")),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,15 +330,10 @@ fn reply_and_act(
         (Some(selected), Kind::Edit) => reply.text + &selected[selected.trim_end().len()..],
         _ => reply.text,
     };
-    let card = crate::focus_probe::around_paste(run.focus, "command", |verdict| {
-        Card::command_reply(
-            record.text.trim().to_owned(),
-            text.clone(),
-            kind,
-            selection.text.is_some(),
-            verdict,
-        )
+    let actions = crate::focus_probe::around_paste(run.focus, "command", |verdict| {
+        buttons(kind, selection.text.is_some(), verdict)
     });
+    let card = Card::command(record.text.trim().to_owned(), text.clone(), actions);
     record.reply = Some(text);
     record.reply_kind = Some(kind);
     Outcome::Shown(card)
@@ -365,32 +369,37 @@ fn run_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::{Action, Tag};
-    use responses::Kind;
+    use crate::card::Tag;
+    use crate::focus_probe::test_support::{answered, probe_on};
     use std::{
         cell::{Cell, RefCell},
+        sync::mpsc,
         time::SystemTime,
     };
 
-    /// A probe that answers at once that `foreground` has the focus.
-    fn probe_on(
-        foreground: &'static str,
-    ) -> crate::focus_probe::Worker<
-        impl FnOnce() -> Option<std::sync::mpsc::Sender<std::sync::Arc<crate::focus_probe::Slot>>>,
-    > {
-        crate::focus_probe::worker(move || {
-            move || crate::focus_probe::Facts {
-                foreground: Some(foreground.into()),
-                app: None,
-                focus: crate::focus_probe::Focus::Nothing,
-            }
-        })
-    }
-    fn answered(pending: &crate::focus_probe::Pending) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while pending.answer().is_none() {
-            assert!(Instant::now() < deadline, "the probe never answered");
-            std::thread::sleep(Duration::from_millis(1));
+    #[test]
+    fn the_buttons_follow_the_kind_the_selection_and_the_probe() {
+        use Action::{Copy, Paste, Replace};
+        use Kind::{Answer, Edit};
+        use Verdict::{Editable, NotEditable, Unknown};
+        let cases = [
+            // An edit's main button puts it in the document.
+            (Edit, true, Unknown, vec![Replace, Copy]),
+            (Edit, true, Editable, vec![Replace, Copy]),
+            (Edit, false, Unknown, vec![Paste, Copy]),
+            // An answer's is Copy; Replace or Paste stays on offer.
+            (Answer, true, Unknown, vec![Copy, Replace]),
+            (Answer, false, Editable, vec![Copy, Paste]),
+            // Nothing editable: Copy only, whatever the kind.
+            (Edit, true, NotEditable, vec![Copy]),
+            (Answer, false, NotEditable, vec![Copy]),
+        ];
+        for (kind, selected, verdict, want) in cases {
+            assert_eq!(
+                buttons(kind, selected, verdict),
+                want,
+                "{kind:?}, selected {selected}, {verdict:?}"
+            );
         }
     }
 
@@ -625,19 +634,9 @@ mod tests {
 
     #[test]
     fn a_reply_opens_the_card_without_waiting_for_a_slow_probe() {
-        use crate::focus_probe::{Facts, Focus};
-        let (answer, gate) = std::sync::mpsc::channel::<()>();
-        let worker = crate::focus_probe::worker(move || {
-            move || {
-                // Still running when the reply is pasted.
-                let _ = gate.recv_timeout(Duration::from_secs(5));
-                Facts {
-                    foreground: Some("Progman".into()),
-                    app: None,
-                    focus: Focus::Nothing,
-                }
-            }
-        });
+        // The desktop, but still probing when the reply is in.
+        let (open, gate) = mpsc::channel();
+        let worker = probe_on("Progman", gate);
         let mut h = Harness::new(text("Buongiorno"));
         h.focus = Some(worker.start());
         let started = Instant::now();
@@ -645,7 +644,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
         // Not answered yet: Unknown, which counts as editable.
         assert_eq!(card.actions, [Action::Paste, Action::Copy]);
-        answer.send(()).unwrap();
+        open.send(()).unwrap();
     }
 
     #[test]
@@ -726,8 +725,10 @@ mod tests {
     fn with_nothing_editable_in_focus_the_card_offers_copy_only() {
         for reply in [text("Buongiorno a tutti."), answer("È una clausola.")] {
             let mut h = Harness::selecting(reply, "ciao a tutti");
-            let worker = probe_on("Progman");
+            let (open, gate) = mpsc::channel();
+            let worker = probe_on("Progman", gate);
             let focus = worker.start();
+            open.send(()).unwrap();
             answered(&focus);
             h.focus = Some(focus);
             let card = card(h.run("Rendilo più formale"));
@@ -1075,9 +1076,6 @@ mod tests {
                 host: "it.wikipedia.org".into()
             }
         );
-        // The pill: the check, with the host beside it.
-        assert_eq!(outcome.pill(), Some(true));
-        assert_eq!(outcome.label().as_deref(), Some("Opened it.wikipedia.org"));
         assert_eq!(h.opened(), ["https://it.wikipedia.org/wiki/Roma"]);
         // The copy borrowed the clipboard; the user's text comes back once.
         assert_eq!(h.writes(), ["user copy"]);

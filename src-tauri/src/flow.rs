@@ -381,14 +381,16 @@ fn run_session(
             focus: focus.as_ref(),
         };
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
-        // Dropping the pill unfinished hides it: a silent or cancelled run.
-        if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
-            match (outcome.label(), outcome) {
-                (Some(label), _) => overlay.finish_labelled(&label),
-                (None, command_mode::Outcome::Shown(card)) => overlay.finish(Ending::Card(card)),
-                (None, _) if ok => overlay.finish(Ending::Done),
+        if let Some(overlay) = overlay {
+            match outcome {
+                command_mode::Outcome::Shown(card) => overlay.finish(Ending::Card(card)),
+                command_mode::Outcome::Opened { host } => {
+                    overlay.finish_labelled(&format!("Opened {host}"))
+                }
                 // A command run keeps no clip: Retry would re-run a dictation's.
-                (None, _) => overlay.finish(Ending::Failed { retry: false }),
+                command_mode::Outcome::Failed(_) => overlay.finish(Ending::Failed { retry: false }),
+                // Dropping the pill unfinished hides it.
+                command_mode::Outcome::Silent | command_mode::Outcome::Cancelled => {}
             }
         }
         return;
@@ -1674,29 +1676,7 @@ mod pipeline_tests {
         assert_eq!(record.pasted, Some(5));
     }
 
-    /// A probe whose thread answers with `foreground` once `gate` opens.
-    fn probe_on(
-        foreground: &'static str,
-        gate: mpsc::Receiver<()>,
-    ) -> focus_probe::Worker<impl FnOnce() -> Option<mpsc::Sender<Arc<focus_probe::Slot>>>> {
-        focus_probe::worker(move || {
-            move || {
-                let _ = gate.recv();
-                focus_probe::Facts {
-                    foreground: Some(foreground.into()),
-                    app: None,
-                    focus: focus_probe::Focus::Nothing,
-                }
-            }
-        })
-    }
-    fn answered(pending: &focus_probe::Pending) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while pending.answer().is_none() {
-            assert!(Instant::now() < deadline, "the probe never answered");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
+    use focus_probe::test_support::{answered, probe_on};
 
     #[test]
     fn a_dictation_with_nowhere_to_land_opens_in_the_card_and_is_never_pasted() {
