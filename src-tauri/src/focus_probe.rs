@@ -38,7 +38,7 @@ impl Rule {
 /// The foreground window, as far as the verdict cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Foreground {
-    None,
+    NoWindow,
     /// The desktop or a taskbar.
     Shell,
     App,
@@ -114,7 +114,7 @@ pub fn around_paste<R>(focus: Option<&Pending>, run: &str, paste: impl FnOnce(Ve
         return paste(Verdict::Unknown);
     };
     let seen = pending.answer();
-    let pasted = paste(seen.map_or(Verdict::Unknown, |reading| reading.rule.verdict()));
+    let pasted = paste(seen.map_or(Verdict::Unknown, Reading::verdict));
     let line = match (seen, pending.answer()) {
         (Some(reading), _) => reading.describe(),
         (None, Some(late)) => format!(
@@ -131,6 +131,10 @@ pub fn around_paste<R>(focus: Option<&Pending>, run: &str, paste: impl FnOnce(Ve
 }
 
 impl Reading {
+    pub fn verdict(&self) -> Verdict {
+        self.rule.verdict()
+    }
+
     fn describe(&self) -> String {
         let (control, error) = match &self.facts.focused {
             Ok(element) => (control_name(element.control_type), String::new()),
@@ -138,7 +142,7 @@ impl Reading {
         };
         format!(
             "{:?} by {:?}, app {}, control {control}, probe {} ms, answered {} ms after key-down{error}",
-            self.rule.verdict(),
+            self.verdict(),
             self.rule,
             self.facts.app.as_deref().unwrap_or("-"),
             self.probe.as_millis(),
@@ -331,7 +335,7 @@ mod uia {
         fn facts(&mut self) -> Facts {
             let foreground = foreground();
             let focused = match (&self.0, foreground) {
-                (_, Foreground::None) => Err("no foreground window".into()),
+                (_, Foreground::NoWindow) => Err("no foreground window".into()),
                 (Err(error), _) => Err(error.clone()),
                 // SAFETY: the client was made on this thread.
                 (Ok((automation, cache)), _) => {
@@ -353,11 +357,16 @@ mod uia {
         unsafe {
             let element = automation.GetFocusedElementBuildCache(cache)?;
             // An unsupported pattern comes back null, an error here: absent.
+            // A present one whose flag fails is a UIA error, not a no.
             let value_read_only = element
                 .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                .and_then(|value| value.CachedIsReadOnly())
                 .ok()
-                .map(|read_only| read_only.as_bool());
+                .map(|value| {
+                    value
+                        .CachedIsReadOnly()
+                        .map(|read_only| read_only.as_bool())
+                })
+                .transpose()?;
             Ok(Element {
                 control_type: element.CachedControlType()?.0,
                 value_read_only,
@@ -373,7 +382,7 @@ mod uia {
         // SAFETY: plain Win32 calls; the buffer outlives GetClassNameW.
         let window = unsafe { GetForegroundWindow() };
         if window.is_invalid() {
-            return Foreground::None;
+            return Foreground::NoWindow;
         }
         let mut class = [0u16; 64];
         let length = unsafe { GetClassNameW(window, &mut class) };
@@ -417,7 +426,7 @@ const DOCUMENT: i32 = 50030;
 /// Editable when any rule holds. Not editable only on a confident no; a UIA
 /// error is Unknown. An edit box wins over the shell (a desktop rename).
 pub fn decide(facts: &Facts) -> Rule {
-    if facts.foreground == Foreground::None {
+    if facts.foreground == Foreground::NoWindow {
         return Rule::NoForeground;
     }
     if let Ok(element) = &facts.focused {
@@ -531,7 +540,7 @@ mod tests {
     #[test]
     fn no_foreground_window_is_not_editable() {
         let facts = Facts {
-            foreground: Foreground::None,
+            foreground: Foreground::NoWindow,
             focused: Err("no element".into()),
             app: None,
         };
@@ -696,7 +705,7 @@ mod tests {
             let began = Instant::now();
             for _ in 0..reads {
                 let seen = std::hint::black_box(pending).answer();
-                std::hint::black_box(seen.map_or(Verdict::Unknown, |r| r.rule.verdict()));
+                std::hint::black_box(seen.map_or(Verdict::Unknown, Reading::verdict));
             }
             println!(
                 "paste-point read, {name}: {:?} each",

@@ -540,6 +540,7 @@ mod tests {
         settings: CommandSettings,
         /// Polls that pass between the selection read and key-up.
         speaking: usize,
+        focus: Option<crate::focus_probe::Pending>,
     }
     impl Harness {
         fn new(reply: Result<Reply, ProviderError>) -> Self {
@@ -551,6 +552,7 @@ mod tests {
                 cancelled: AtomicBool::new(false),
                 settings: CommandSettings::default(),
                 speaking: 0,
+                focus: None,
             }
         }
         fn run_with(
@@ -570,7 +572,7 @@ mod tests {
                 date: "2026-10-17".into(),
                 cancelled: &self.cancelled,
                 hold_error,
-                focus: None,
+                focus: self.focus.as_ref(),
             };
             // Read at the confirmed hold, before the instruction is in.
             let selection = read_selection(&self.desktop);
@@ -603,6 +605,30 @@ mod tests {
         fn pasted(&self) -> Vec<String> {
             self.desktop.pasted.borrow().clone()
         }
+    }
+
+    #[test]
+    fn a_reply_pastes_without_waiting_for_a_slow_probe() {
+        use crate::focus_probe::{Facts, Foreground};
+        let (answer, gate) = std::sync::mpsc::channel::<()>();
+        let worker = crate::focus_probe::worker(move || {
+            move || {
+                // Still running when the reply is pasted.
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+                Facts {
+                    foreground: Foreground::Shell,
+                    focused: Err("slow".into()),
+                    app: None,
+                }
+            }
+        });
+        let mut h = Harness::new(text("Buongiorno"));
+        h.focus = Some(worker.start());
+        let started = Instant::now();
+        assert_eq!(h.run("Scrivi un saluto"), Outcome::Pasted);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(h.pasted(), ["Buongiorno"]);
+        answer.send(()).unwrap();
     }
 
     #[test]
