@@ -160,9 +160,10 @@ pub struct Overlay {
     captions_live: Arc<AtomicBool>,
 }
 
-/// Starts a session. The pill appears after a short delay (so brief or
-/// cancelled holds never flash it) and streams microphone levels.
-pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
+/// Starts a session. The pill appears once the keys have been held for a
+/// short delay (so brief or cancelled holds never flash it) and streams
+/// microphone levels. `held` is how long they were already down.
+pub fn begin(app: &tauri::AppHandle, captions: bool, held: Duration) -> Overlay {
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let metering = Arc::new(AtomicBool::new(true));
     // Back to normal well before the delayed reveal.
@@ -180,7 +181,7 @@ pub fn begin(app: &tauri::AppHandle, captions: bool) -> Overlay {
             let live =
                 || flag.load(Ordering::Acquire) && GENERATION.load(Ordering::Acquire) == generation;
             let step = Duration::from_millis(25);
-            for _ in 0..(SHOW_DELAY.as_millis() / step.as_millis()) {
+            for _ in 0..(SHOW_DELAY.saturating_sub(held).as_millis() / step.as_millis()) {
                 if !live() {
                     return;
                 }
@@ -444,7 +445,7 @@ mod native_tests {
                 // SAFETY: read-only user32 queries.
                 let focused = unsafe { GetForegroundWindow() };
                 let failed_pill = || {
-                    let overlay = begin(&handle, false);
+                    let overlay = begin(&handle, false, Duration::ZERO);
                     std::thread::sleep(Duration::from_millis(400));
                     overlay.processing();
                     overlay.finish(false);

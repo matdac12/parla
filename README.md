@@ -299,9 +299,9 @@ again:
   Retry.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
-  as usual), and the hold stops after 120 s. Other audio is dimmed only once
-  the hold passes 300 ms, and only from then does **Esc** cancel (and get
-  swallowed).
+  as usual), and the hold stops after 120 s. Recording starts at key-down, but
+  the pill appears and other audio is dimmed only once the hold passes
+  300 ms, and only from then does **Esc** cancel (and get swallowed).
 - While a command run or a dictation is in flight, both hotkeys are ignored.
 - Command runs never count toward words, dictations or audio; the
   instruction's transcription is billed in Total cost like a dictation.

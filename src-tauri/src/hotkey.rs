@@ -183,17 +183,17 @@ impl Registration {
     /// makes it some other Ctrl+Shift shortcut, so the hold is cancelled.
     fn command_chord_event(&mut self, key: Code, pressed: bool) -> Option<HotkeyEvent> {
         const CHORD: Chord = Chord::Command;
-        let satisfied = Self::command_satisfied(|code| self.keys.contains(&code));
         if !self.command_active {
-            // A dictation chord on the same keys (a Ctrl+Shift rebind) wins.
-            let start = satisfied
-                && self.command_armed
-                && pressed
+            // `chord_event` only gets here while armed. A dictation chord on
+            // the same keys (a Ctrl+Shift rebind) wins. Cheap checks first.
+            let start = pressed
                 && MODIFIER_KEYS.contains(&key)
-                && !self.chord_active;
+                && !self.chord_active
+                && Self::command_satisfied(|code| self.keys.contains(&code));
             self.command_active = start;
             return start.then_some(HotkeyEvent::ChordPressed(CHORD));
         }
+        let satisfied = Self::command_satisfied(|code| self.keys.contains(&code));
         if pressed && (!satisfied || !MODIFIER_KEYS.contains(&key)) {
             self.command_active = false;
             return Some(HotkeyEvent::ChordCancelled(CHORD));

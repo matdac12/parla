@@ -34,12 +34,23 @@ enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Idle,
-    /// Recording while the Ctrl+Alt chord is held (push to talk).
-    Hold(Instant),
+    /// Recording while a chord is held: push to talk for dictation, or a
+    /// command run's instruction.
+    Hold(Chord, Instant),
     /// Hands-free: started or converted by the main key, ended by the next press.
     Latched,
-    /// Recording an instruction while the command chord is held. Hold only.
-    Command(Instant),
+}
+
+impl Phase {
+    /// None when idle: a finished command run stays orange while transcribing.
+    fn pill_mode(self) -> Option<PillMode> {
+        match self {
+            Phase::Idle => None,
+            Phase::Hold(Chord::Dictation, _) => Some(PillMode::Hold),
+            Phase::Hold(Chord::Command, _) => Some(PillMode::Command),
+            Phase::Latched => Some(PillMode::Locked),
+        }
+    }
 }
 
 /// Decides what a hotkey event does. Ctrl+Alt held records until released;
@@ -56,19 +67,15 @@ impl Controller {
             self.phase = Phase::Idle;
         }
         match (event, self.phase) {
-            (HotkeyEvent::ChordPressed(Chord::Dictation), Phase::Idle) if !busy => {
-                self.phase = Phase::Hold(now);
-                Action::Start
-            }
-            (HotkeyEvent::ChordPressed(Chord::Command), Phase::Idle) if !busy => {
-                self.phase = Phase::Command(now);
+            (HotkeyEvent::ChordPressed(chord), Phase::Idle) if !busy => {
+                self.phase = Phase::Hold(chord, now);
                 Action::Start
             }
             (HotkeyEvent::Pressed, Phase::Idle) if !busy => {
                 self.phase = Phase::Latched;
                 Action::Start
             }
-            (HotkeyEvent::Pressed, Phase::Hold(_)) => {
+            (HotkeyEvent::Pressed, Phase::Hold(Chord::Dictation, _)) => {
                 self.phase = Phase::Latched;
                 Action::None
             }
@@ -79,8 +86,9 @@ impl Controller {
                 self.phase = Phase::Idle;
                 Action::Stop
             }
-            (HotkeyEvent::ChordReleased(Chord::Dictation), Phase::Hold(since))
-            | (HotkeyEvent::ChordReleased(Chord::Command), Phase::Command(since)) => {
+            (HotkeyEvent::ChordReleased(released), Phase::Hold(chord, since))
+                if released == chord =>
+            {
                 self.phase = Phase::Idle;
                 if now.duration_since(since) < MIN_HOLD {
                     Action::Cancel
@@ -88,12 +96,13 @@ impl Controller {
                     Action::Stop
                 }
             }
-            (HotkeyEvent::ChordCancelled(Chord::Dictation), Phase::Hold(_))
-            | (HotkeyEvent::ChordCancelled(Chord::Command), Phase::Command(_)) => {
+            (HotkeyEvent::ChordCancelled(cancelled), Phase::Hold(chord, _))
+                if cancelled == chord =>
+            {
                 self.phase = Phase::Idle;
                 Action::Cancel
             }
-            (HotkeyEvent::Cancel, Phase::Hold(_) | Phase::Latched | Phase::Command(_)) => {
+            (HotkeyEvent::Cancel, Phase::Hold(..) | Phase::Latched) => {
                 self.phase = Phase::Idle;
                 Action::Cancel
             }
@@ -159,15 +168,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let before = controller.phase;
                 let action = controller.on_event(event, busy.is_busy(), Instant::now());
                 if controller.phase != before || action == Action::Start {
-                    // Back to Idle keeps the mode: a command run stays orange
-                    // while its instruction is transcribed.
-                    let mode = match controller.phase {
-                        Phase::Idle => None,
-                        Phase::Hold(_) => Some(PillMode::Hold),
-                        Phase::Latched => Some(PillMode::Locked),
-                        Phase::Command(_) => Some(PillMode::Command),
-                    };
-                    if let Some(mode) = mode {
+                    if let Some(mode) = controller.phase.pill_mode() {
                         crate::overlay::set_mode(&app, mode);
                     }
                 }
@@ -179,7 +180,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let started_at = SystemTime::now();
-                        let command = matches!(controller.phase, Phase::Command(_));
+                        let command = controller.phase.pill_mode() == Some(PillMode::Command);
                         let settings = app
                             .state::<SharedSettings>()
                             .read()
@@ -247,38 +248,33 @@ fn run_session(
                 .map_err(|e| ProviderError::Other(format!("Recording failed: {e}")))?;
             Ok(recorder)
         });
-    // After the mic started, so it never delays the first syllable. A command
-    // hold dims once confirmed, so quick Ctrl+Shift shortcuts never duck music.
-    let mut dimmed = (recording.is_ok() && !command).then(|| crate::dim::dim(&settings));
+    // A dictation is confirmed at key-down, a command hold at MIN_HOLD. Until
+    // then a quick Ctrl+Shift shortcut costs no pill, dimming, live session or
+    // warm-up, and its Esc reaches the app (Ctrl+Shift+Esc). The recorder
+    // already runs, and the live feed replays the clip from key-down.
+    let confirm_after = if command { MIN_HOLD } else { Duration::ZERO };
+    let early_release = match command.then(|| released.recv_timeout(confirm_after)) {
+        None | Some(Err(mpsc::RecvTimeoutError::Timeout)) => None,
+        Some(Ok(key_up)) => Some((key_up, None)),
+        Some(Err(mpsc::RecvTimeoutError::Disconnected)) => Some((
+            Instant::now(),
+            Some("Hotkey release channel disconnected".into()),
+        )),
+    };
+    let held = recording.is_ok() && early_release.is_none();
+    if command && held {
+        // From here Esc cancels and is swallowed, as in dictation.
+        crate::hotkey::RECORDING.store(true, Ordering::Release);
+    }
+    // After the mic started, so it never delays the first syllable.
+    let dimmed = held.then(|| crate::dim::dim(&settings));
     let captions = settings.live_captions
         && settings.streaming_enabled
         && matches!(
             settings.active_provider.as_str(),
             "openai" | "xai" | crate::models::ID
         );
-    let overlay = recording
-        .is_ok()
-        .then(|| crate::overlay::begin(app, captions));
-    // A command hold is confirmed at MIN_HOLD. Until then a quick Ctrl+Shift
-    // shortcut costs no dimming, live session or warm-up, and its Esc reaches
-    // the app (Ctrl+Shift+Esc). The live feed replays the clip from key-down.
-    let early_release = if command {
-        match released.recv_timeout(MIN_HOLD) {
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Ok(key_up) => Some((key_up, None)),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Some(wait_for_release(&released, Duration::ZERO))
-            }
-        }
-    } else {
-        None
-    };
-    if command && early_release.is_none() {
-        // From here Esc cancels and is swallowed, as in dictation.
-        crate::hotkey::RECORDING.store(true, Ordering::Release);
-        dimmed = recording.is_ok().then(|| crate::dim::dim(&settings));
-    }
-    let held = early_release.is_none();
+    let overlay = held.then(|| crate::overlay::begin(app, captions, confirm_after));
     let stream = recording
         .as_ref()
         .ok()
@@ -304,18 +300,12 @@ fn run_session(
                 }
             }
         });
-    if held
-        && stream.is_none()
-        && recording.is_ok()
-        && settings.active_provider == crate::models::ID
-    {
+    if held && stream.is_none() && settings.active_provider == crate::models::ID {
         // Batch-only local dictation still gets the key-down warm-up.
         crate::provider::parakeet::wake_in_background(&settings);
     }
-    let (key_up, hold_error) = early_release.unwrap_or_else(|| {
-        let elapsed = if command { MIN_HOLD } else { Duration::ZERO };
-        wait_for_release(&released, HOLD_CAP - elapsed)
-    });
+    let (key_up, hold_error) =
+        early_release.unwrap_or_else(|| wait_for_release(&released, HOLD_CAP - confirm_after));
     let stream = if cancelled.load(Ordering::Acquire) {
         drop(stream);
         None
@@ -433,43 +423,36 @@ fn finish_session_with_error(
             let result = if clip.is_empty() {
                 Err(ProviderError::Other("No audio captured".into()))
             } else {
-                registry::get(&settings.active_provider)
-                    .ok_or_else(|| {
-                        ProviderError::MissingConfig(format!(
-                            "Unknown provider: {}",
-                            settings.active_provider
-                        ))
-                    })
-                    .and_then(|provider| {
-                        transcribe_and_paste(
-                            provider.as_ref(),
-                            &clip,
-                            settings,
-                            key_up,
-                            &mut record,
-                            completion.stream.take().map(|session| session.finish()),
-                            |text, delay| {
-                                if completion.paste {
-                                    // History keeps the raw text; only the paste drops the trigger.
-                                    let stripped = completion
-                                        .auto_send
-                                        .then(|| inserter::strip_send_trigger(text))
-                                        .flatten();
-                                    inserter::paste_text_with_options(
-                                        stripped.unwrap_or(text),
-                                        delay,
-                                        settings.paste_compatibility_mode,
-                                        stripped.is_some(),
-                                    )
-                                    .map_err(|e| e.to_string())
-                                } else {
-                                    // Retried from the app window: the history entry
-                                    // is the delivery, there is nothing to paste into.
-                                    Ok(Instant::now())
-                                }
-                            },
-                        )
-                    })
+                active_provider(settings).and_then(|provider| {
+                    transcribe_and_paste(
+                        provider.as_ref(),
+                        &clip,
+                        settings,
+                        key_up,
+                        &mut record,
+                        completion.stream.take().map(|session| session.finish()),
+                        |text, delay| {
+                            if completion.paste {
+                                // History keeps the raw text; only the paste drops the trigger.
+                                let stripped = completion
+                                    .auto_send
+                                    .then(|| inserter::strip_send_trigger(text))
+                                    .flatten();
+                                inserter::paste_text_with_options(
+                                    stripped.unwrap_or(text),
+                                    delay,
+                                    settings.paste_compatibility_mode,
+                                    stripped.is_some(),
+                                )
+                                .map_err(|e| e.to_string())
+                            } else {
+                                // Retried from the app window: the history entry
+                                // is the delivery, there is nothing to paste into.
+                                Ok(Instant::now())
+                            }
+                        },
+                    )
+                })
             };
             if let Err(error) = &result {
                 on_failure(
@@ -490,6 +473,12 @@ fn finish_session_with_error(
     // The one completion sink for successful and failed dictations.
     timing::record(app, record);
     ok
+}
+
+fn active_provider(settings: &Settings) -> Result<Arc<dyn SttProvider>, ProviderError> {
+    registry::get(&settings.active_provider).ok_or_else(|| {
+        ProviderError::MissingConfig(format!("Unknown provider: {}", settings.active_provider))
+    })
 }
 
 fn combined_error(hold: Option<String>, error: Option<ProviderError>) -> Option<String> {
@@ -523,8 +512,8 @@ fn finish_command(
         Ok(clip) => {
             record.audio_ready = Some(timing::elapsed_ms(key_up));
             record.audio_ms = clip.duration().as_millis() as u64;
-            match registry::get(&settings.active_provider) {
-                Some(provider) => transcribe_instruction(
+            match active_provider(settings) {
+                Ok(provider) => transcribe_instruction(
                     provider.as_ref(),
                     &clip,
                     settings,
@@ -532,10 +521,7 @@ fn finish_command(
                     &mut record,
                     stream.map(|session| session.finish()),
                 )?,
-                None => Err(ProviderError::MissingConfig(format!(
-                    "Unknown provider: {}",
-                    settings.active_provider
-                ))),
+                Err(error) => Err(error),
             }
         }
     };
@@ -1009,7 +995,7 @@ mod pipeline_tests {
         let late = t0 + Duration::from_secs(2);
         let mut c = Controller { phase: Phase::Idle };
         assert_eq!(c.on_event(PRESSED, false, t0), Action::Start);
-        assert_eq!(c.phase, Phase::Command(t0));
+        assert_eq!(c.phase, Phase::Hold(Chord::Command, t0));
         assert_eq!(c.on_event(RELEASED, true, late), Action::Stop);
         for interrupt in [
             (RELEASED, t0 + Duration::from_millis(299)),
@@ -1023,7 +1009,7 @@ mod pipeline_tests {
         // No latch: the dictation main key does not convert a command hold.
         assert_eq!(c.on_event(PRESSED, false, t0), Action::Start);
         assert_eq!(c.on_event(HotkeyEvent::Pressed, true, t0), Action::None);
-        assert_eq!(c.phase, Phase::Command(t0));
+        assert_eq!(c.phase, Phase::Hold(Chord::Command, t0));
         assert_eq!(c.on_event(RELEASED, true, late), Action::Stop);
     }
     #[test]
@@ -1041,13 +1027,13 @@ mod pipeline_tests {
             c.on_event(HotkeyEvent::ChordReleased(Chord::Dictation), true, late),
             Action::None
         );
-        assert_eq!(c.phase, Phase::Command(t0));
+        assert_eq!(c.phase, Phase::Hold(Chord::Command, t0));
         // Released and still transcribing: the session guard is busy.
         c.on_event(HotkeyEvent::ChordReleased(Chord::Command), true, late);
         assert_eq!(c.on_event(dictation, true, late), Action::None);
         assert_eq!(c.on_event(command, true, late), Action::None);
         // A dictation hold or lock is neither stopped nor taken over.
-        for phase in [Phase::Hold(t0), Phase::Latched] {
+        for phase in [Phase::Hold(Chord::Dictation, t0), Phase::Latched] {
             let mut c = Controller { phase };
             assert_eq!(c.on_event(command, true, late), Action::None);
             assert_eq!(
@@ -1107,7 +1093,7 @@ mod pipeline_tests {
         let (sender, receiver) = mpsc::channel();
         let key_up = Instant::now();
         sender.send(key_up).unwrap();
-        let (observed, error) = wait_for_release(&receiver, Duration::from_secs(120));
+        let (observed, error) = wait_for_release(&receiver, HOLD_CAP);
         assert_eq!(observed, key_up);
         assert!(error.is_none());
     }

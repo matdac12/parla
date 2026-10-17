@@ -141,10 +141,8 @@ fn counted_words(record: &DictationRecord) -> Option<u64> {
 /// that fell back to batch is billed for both, with the whole clip each. A
 /// command run's instruction is billed like a dictation, but never counted.
 fn billed_usage(record: &DictationRecord) -> Vec<(String, &'static str)> {
-    if !matches!(
-        record.kind.as_str(),
-        "dictation" | "benchmark" | crate::timing::COMMAND_KIND
-    ) || record.text.trim().is_empty()
+    if !matches!(record.kind.as_str(), "dictation" | "benchmark" | "command")
+        || record.text.trim().is_empty()
     {
         return Vec::new();
     }
