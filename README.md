@@ -294,18 +294,14 @@ call an LLM; dictation always pastes the raw transcript (see
 steps (PARLA-61). **So far it answers an instruction with text pasted at the
 cursor;** it doesn't read a selection or open pages yet.
 
-It is off by default and has no Settings card yet. It needs an OpenAI key: the
-same `providers.openai.api_key` dictation uses, with `OPENAI_API_KEY`
-overriding it. To try it, quit Parla, set `"enabled": true` in the `command`
-section of `settings.json`, and start Parla again:
+It is off by default: turn it on in the Settings **Command mode** card (see
+[The Parla window](#the-parla-window)). It needs an OpenAI key: the same
+`providers.openai.api_key` dictation uses, with `OPENAI_API_KEY` overriding
+it.
 
-```json
-"command": { "enabled": true, "hotkey": "LCtrl+Shift", "model": "gpt-6-luna", "reasoning_effort": "low" }
-```
-
-- **Hold** left **Ctrl** plus either **Shift**, say the instruction, release.
-  Right Ctrl doesn't count, and any Alt (AltGr included) or Win breaks the
-  chord. It is hold only: no hands-free lock, and Space does nothing special.
+- **Hold** the command hotkey (default left **Ctrl** plus either **Shift**;
+  see [Hotkey](#hotkey)), say the instruction, release. It is hold only: no
+  hands-free lock, and Space does nothing special.
 - The pill is **orange** while recording, transcribing and waiting for the
   reply. The instruction is transcribed by the active provider, the same
   engine dictation uses, and sent to `model` (`gpt-6-luna`) through the OpenAI
@@ -339,9 +335,7 @@ section of `settings.json`, and start Parla again:
 - Command runs never count toward words, dictations or audio; the
   instruction's transcription is billed in Total cost like a dictation. The
   LLM tokens are recorded but not yet added to Total cost.
-- `hotkey` is stored but not used yet (the chord can't be rebound until the
-  Settings card lands). With command mode
-  off, the keyboard hook ignores Ctrl+Shift entirely.
+- With command mode off, the keyboard hook skips the command chord.
 
 ## Providers and API keys
 
