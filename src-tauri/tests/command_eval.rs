@@ -1,7 +1,7 @@
 //! The command mode eval (PARLA-68): fixed IT/EN instructions through the
 //! real request builder, parser and URL validator, 3x at each reasoning
-//! effort, graded and timed. It picked the default effort; re-run it whenever
-//! the system prompt or a tool changes:
+//! effort, graded and timed. It informed the default effort (`low`, Mattia's
+//! call); re-run it whenever the system prompt, the request or a tool changes:
 //! `OPENAI_API_KEY=... cargo test --test command_eval -- --ignored --nocapture`
 //! (about 160 calls, under a cent). The grading itself runs offline in every
 //! `cargo test`.
@@ -644,11 +644,11 @@ fn the_eval_grades_every_case_at_each_effort() {
             .map(|sample| format!("#{} {:?}", sample.case, CASES[sample.case].0))
             .collect()
     };
-    let none_wrong = wrong_kind("none");
-    if none_wrong.is_empty() {
-        println!("Decision rule: `none` got every outcome kind right, so ship `none`.");
-    } else {
-        println!("Decision rule: `none` got {none_wrong:?} wrong, so ship `low`.");
+    for effort in EFFORTS {
+        println!(
+            "Outcome kinds wrong at `{effort}`: {:?}",
+            wrong_kind(effort)
+        );
     }
     // The gate for a re-run: the shipped default still picks text vs tool right.
     let default_wrong = wrong_kind(&defaults.reasoning_effort);

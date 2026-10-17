@@ -310,11 +310,15 @@ fn reply_and_act(
             "the reply was empty.".into(),
         )));
     }
+    // The reply's end comes trimmed; a selection's own trailing line break
+    // (a triple-clicked paragraph) stays, or the next line would join it.
+    let text = match &selection.text {
+        Some(selected) => reply.text + &selected[selected.trim_end().len()..],
+        None => reply.text,
+    };
     // Over the selection, which is still selected, or at the cursor.
-    let pasted = ports
-        .desktop
-        .paste(&reply.text, selection.borrowed.as_ref());
-    record.reply = Some(reply.text);
+    let pasted = ports.desktop.paste(&text, selection.borrowed.as_ref());
+    record.reply = Some(text);
     match pasted {
         Ok(at) => {
             record.pasted = Some(timing::offset_ms(run.key_up, at));
@@ -605,7 +609,7 @@ mod tests {
             *h.llm.requests.borrow(),
             [Request {
                 model: "gpt-6-luna".into(),
-                reasoning_effort: "none".into(),
+                reasoning_effort: "low".into(),
                 instruction: "Scrivi un saluto breve".into(),
                 selection: None,
                 app: Some("notepad.exe".into()),
@@ -789,6 +793,18 @@ mod tests {
         assert!(
             !json.contains("ciao a tutti"),
             "the selection is never kept"
+        );
+    }
+
+    #[test]
+    fn a_selected_paragraph_keeps_its_trailing_line_break() {
+        // The parser trims the reply's end; the selection's own end comes back.
+        let h = Harness::selecting(text("Buongiorno a tutti."), "ciao a tutti\r\n");
+        assert_eq!(h.run("Rendilo più formale"), Outcome::Pasted);
+        assert_eq!(h.pasted(), ["Buongiorno a tutti.\r\n"]);
+        assert_eq!(
+            h.rows()[0].reply.as_deref(),
+            Some("Buongiorno a tutti.\r\n")
         );
     }
 

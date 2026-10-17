@@ -46,6 +46,12 @@ pub struct Request {
 /// stores requests by default; the effort is explicit because it defaults to
 /// `medium`. The allowlisted tools are offered, at most one call per reply:
 /// Parla runs it and sends nothing back (a single round trip).
+///
+/// The text comes as `{"text": ...}` (a strict JSON schema). As free text, a
+/// reply ending on a line break (`"Buongiorno,\n"`) was ended by the model's
+/// own end of turn, and 15–30 % of the time it ran on with junk instead
+/// (`</final`, `</|assistant|>`, `<br>`, stray words; PARLA-68). The closing
+/// `"}` now ends it.
 pub fn body(request: &Request) -> serde_json::Value {
     json!({
         "model": request.model,
@@ -54,6 +60,23 @@ pub fn body(request: &Request) -> serde_json::Value {
         "store": false,
         "reasoning": {"effort": request.reasoning_effort},
         "max_output_tokens": MAX_OUTPUT_TOKENS,
+        // Unnamed and undescribed, it drew `open_url` calls over selections
+        // that only mention a page (the eval's #11).
+        "text": {"format": {
+            "type": "json_schema",
+            "name": "pasted_text",
+            "description": "The text to paste when no tool is called.",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "properties": {"text": {
+                    "type": "string",
+                    "description": "The resulting text, ready to paste.",
+                }},
+                "required": ["text"],
+                "additionalProperties": false,
+            },
+        }},
         "tools": tools::declarations(),
         "tool_choice": "auto",
         "parallel_tool_calls": false,
@@ -122,6 +145,11 @@ struct Content {
     #[serde(default)]
     text: String,
 }
+/// The `text.format` schema `body` asks for.
+#[derive(Deserialize)]
+struct Formatted {
+    text: String,
+}
 #[derive(Deserialize)]
 struct Usage {
     input_tokens: Option<u64>,
@@ -138,15 +166,17 @@ struct ApiErrorBody {
     kind: Option<String>,
 }
 
-/// The reply's `output_text`, joined in order, and its first `function_call`
-/// (parallel calls are off). Reasoning items are skipped. An empty text is
-/// the orchestrator's to reject. Error bodies are never kept, only their
-/// `code`: the message may echo a masked key or the request.
+/// The reply's first `function_call` (parallel calls are off), or else its
+/// `output_text`, joined in order (one JSON document, possibly split).
+/// Reasoning items are skipped. The text's end is trimmed; a leaked chat
+/// token fails the reply; an empty text is the orchestrator's to reject. Error bodies are
+/// never kept, only their `code`: the message may echo a masked key or the
+/// request.
 pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
+    let unreadable = || ProviderError::Other("the reply could not be read.".into());
     match status {
         200..=299 => {
-            let response: Response = serde_json::from_str(body)
-                .map_err(|_| ProviderError::Other("the reply could not be read.".into()))?;
+            let response: Response = serde_json::from_str(body).map_err(|_| unreadable())?;
             if response.status.as_deref() != Some("completed") {
                 let reason = response
                     .incomplete_details
@@ -157,7 +187,15 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
                     "the reply was cut off ({reason})."
                 )));
             }
-            let text = response
+            let refused = response
+                .output
+                .iter()
+                .flat_map(|item| &item.content)
+                .any(|content| content.kind == "refusal");
+            if refused {
+                return Err(ProviderError::Other("the model refused.".into()));
+            }
+            let json: String = response
                 .output
                 .iter()
                 .filter(|item| item.kind == "message")
@@ -173,6 +211,22 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
                     name: item.name.unwrap_or_default(),
                     arguments: item.arguments.unwrap_or_default(),
                 });
+            // A call wins, and any text beside it is dropped unread: once it
+            // was the call's URL run on into junk (PARLA-68).
+            let text = if call.is_some() || json.is_empty() {
+                String::new()
+            } else {
+                let mut text = serde_json::from_str::<Formatted>(&json)
+                    .map_err(|_| unreadable())?
+                    .text;
+                if leaks_chat_token(&text) {
+                    return Err(ProviderError::Other(
+                        "the reply leaked a chat token.".into(),
+                    ));
+                }
+                text.truncate(text.trim_end().len());
+                text
+            };
             let usage = response.usage;
             Ok(Reply {
                 text,
@@ -192,6 +246,25 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
                 .unwrap_or_default(),
         }),
     }
+}
+
+/// A chat-template token spelled out in the text, as derailed replies did
+/// (PARLA-68): `<|name|>`, `</|assistant|>`, `</assistant>`, `</final`. No
+/// HTML element has these names, so `<br>` or `</b>` pass.
+fn leaks_chat_token(text: &str) -> bool {
+    text.match_indices('<').any(|(at, _)| {
+        let tag = &text[at + 1..];
+        let piped = tag.strip_prefix('/').unwrap_or(tag).strip_prefix('|');
+        // `</final` alone: one leak was cut off right there.
+        ["/assistant", "/final"].iter().any(|role| {
+            tag.strip_prefix(role)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('>'))
+        }) || piped
+            .and_then(|rest| rest.split_once("|>"))
+            .is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    })
 }
 
 const ENDPOINT: &str = "https://api.openai.com/v1/responses";
@@ -257,17 +330,19 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
-    // text_reply, incomplete and the error fixtures were recorded from the live
-    // API on 2026-10-17; multi_part_reply is shaped by hand after the docs.
+    // text_reply and derailed_text_reply were recorded from the live API on
+    // 2026-10-17 for PARLA-68's case #17, as were incomplete and the error
+    // fixtures; multi_part_reply is shaped by hand after the docs.
     #[test]
-    fn a_text_reply_joins_its_output_text_and_reads_usage() {
+    fn a_text_reply_reads_its_json_text_trimmed_at_the_end_and_its_usage() {
         assert_eq!(
             parse(200, &fixture("text_reply")),
             Ok(Reply {
-                text: "Ciao a tutti! Vi auguro una splendida giornata.".into(),
+                // `{"text":"Gentile Cliente,\n"}`: the trailing line break goes.
+                text: "Gentile Cliente,".into(),
                 call: None,
-                tokens_in: Some(43),
-                tokens_out: Some(17),
+                tokens_in: Some(358),
+                tokens_out: Some(16),
             })
         );
         // Reasoning items are skipped and output_text parts joined in order.
@@ -280,6 +355,88 @@ mod tests {
                 tokens_out: Some(18),
             })
         );
+    }
+
+    #[test]
+    fn a_derailed_reply_is_never_pasted() {
+        // Free text, as before PARLA-68's fix: "Buongiorno,\n</|assistant|>\n".
+        let derailed = fixture("derailed_text_reply");
+        assert_eq!(
+            parse(200, &derailed),
+            Err(ProviderError::Other("the reply could not be read.".into()))
+        );
+        // The same leak inside the JSON text fails the reply too.
+        let leaked = derailed.replace(
+            r#""text": "Buongiorno,\n</|assistant|>\n""#,
+            r#""text": "{\"text\":\"Buongiorno,\\n</|assistant|>\\n\"}""#,
+        );
+        assert_ne!(leaked, derailed);
+        assert_eq!(
+            parse(200, &leaked),
+            Err(ProviderError::Other(
+                "the reply leaked a chat token.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_call_wins_over_junk_text_beside_it() {
+        // Recorded on 2026-10-17 (PARLA-68): "cerca ristoranti a Milano" at
+        // effort low, a message of the URL run on into junk and a chat
+        // header, then the call. Not JSON, but the call is what runs.
+        assert_eq!(
+            parse(200, &fixture("call_with_junk_text")),
+            Ok(Reply {
+                text: String::new(),
+                call: Some(ToolCall {
+                    name: "open_url".into(),
+                    arguments: r#"{"url":"https://www.google.com/search?q=ristoranti+a+Milano"}"#
+                        .into(),
+                }),
+                tokens_in: Some(374),
+                tokens_out: Some(110),
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_fails_instead_of_reading_as_empty() {
+        // Under structured outputs a refusal is its own content part.
+        let refusal = fixture("text_reply").replace(
+            r#""type": "output_text","#,
+            r#""type": "refusal", "refusal": "I can't help with that.","#,
+        );
+        assert_eq!(
+            parse(200, &refusal),
+            Err(ProviderError::Other("the model refused.".into()))
+        );
+    }
+
+    #[test]
+    fn chat_tokens_are_caught_but_html_and_code_pass() {
+        // Every leak the live eval saw (PARLA-68).
+        for leaked in [
+            "Buongiorno,\n</assistant>",
+            "Buongiorno,\n</final",
+            "Buongiorno,\n</final>\n",
+            "Buongiorno,\n</|assistant|>\n",
+            "Buongiorno,\n</|fim_suffix|>",
+            "Ciao<|im_end|>",
+        ] {
+            assert!(leaks_chat_token(leaked), "{leaked:?}");
+        }
+        for clean in [
+            "Buongiorno,<br>a presto",
+            "<p>Final <b>offer</b></p>",
+            "a <| b",
+            "x |> f",
+            "1 < 2 e 3 > 2",
+            "<|>",
+            "<finalPrice>10</finalPrice>",
+            "Grazie, a presto.",
+        ] {
+            assert!(!leaks_chat_token(clean), "{clean:?}");
+        }
     }
 
     #[test]
@@ -358,6 +515,13 @@ mod tests {
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"], json!({"effort": "low"}));
         assert_eq!(body["max_output_tokens"], 2000);
+        // The text comes as strict JSON, so the model cannot run on past it.
+        let format = &body["text"]["format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["name"], "pasted_text");
+        assert_eq!(format["strict"], true);
+        assert_eq!(format["schema"]["required"], json!(["text"]));
+        assert_eq!(format["schema"]["properties"]["text"]["type"], "string");
         let prompt = body["instructions"].as_str().unwrap();
         assert!(prompt.starts_with("You are Parla's command mode."));
         assert!(prompt.contains("no preamble, quotes or markdown"));
