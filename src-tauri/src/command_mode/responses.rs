@@ -370,26 +370,9 @@ mod tests {
     }
 
     #[test]
-    fn the_request_offers_open_url_strictly_one_call_at_most() {
+    fn the_request_offers_the_allowlist_strictly_one_call_at_most() {
         let body = body(&request());
-        assert_eq!(
-            body["tools"],
-            json!([{
-                "type": "function",
-                "name": "open_url",
-                "description": "Open a web page in the user's default browser. For a search, open a search engine's results page.",
-                "strict": true,
-                "parameters": {
-                    "type": "object",
-                    "properties": {"url": {
-                        "type": "string",
-                        "description": "The absolute http or https URL to open."
-                    }},
-                    "required": ["url"],
-                    "additionalProperties": false,
-                },
-            }])
-        );
+        assert_eq!(body["tools"], tools::declarations());
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], false);
         let prompt = body["instructions"].as_str().unwrap();

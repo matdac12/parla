@@ -80,9 +80,6 @@ fn a_selection_is_rewritten_and_its_text_is_data_not_instructions() {
 #[test]
 #[ignore = "live: calls the OpenAI Responses API"]
 fn open_and_search_call_open_url_and_rewrites_reply_with_text() {
-    if key().is_none() {
-        return;
-    }
     let cases: [(&str, Option<&str>, bool); 6] = [
         ("apri la pagina di Wikipedia su Roma", None, true),
         ("cerca ristoranti a Milano", None, true),
@@ -102,7 +99,9 @@ fn open_and_search_call_open_url_and_rewrites_reply_with_text() {
     let mut wrong = Vec::new();
     for effort in ["none", "low"] {
         for (instruction, selection, opens) in cases {
-            let reply = ask_at(effort, instruction, selection).expect("key checked");
+            let Some(reply) = ask_at(effort, instruction, selection) else {
+                return;
+            };
             let call = reply.call.as_ref();
             let chose_well = match call {
                 Some(call) => {

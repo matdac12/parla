@@ -197,6 +197,14 @@ impl Outcome {
             Outcome::Failed(_) => Some(false),
         }
     }
+
+    /// What the pill says beside its check.
+    pub fn label(&self) -> Option<String> {
+        match self {
+            Outcome::Opened { host } => Some(format!("Opened {host}")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -938,12 +946,16 @@ mod tests {
             tool("open_url", "https://it.wikipedia.org/wiki/Roma"),
             "ciao",
         );
+        let outcome = h.run("Apri la pagina di Wikipedia su Roma");
         assert_eq!(
-            h.run("Apri la pagina di Wikipedia su Roma"),
+            outcome,
             Outcome::Opened {
                 host: "it.wikipedia.org".into()
             }
         );
+        // The pill: the check, with the host beside it.
+        assert_eq!(outcome.pill(), Some(true));
+        assert_eq!(outcome.label().as_deref(), Some("Opened it.wikipedia.org"));
         assert_eq!(h.opened(), ["https://it.wikipedia.org/wiki/Roma"]);
         assert!(h.pasted().is_empty());
         // The copy borrowed the clipboard; the user's text comes back once.

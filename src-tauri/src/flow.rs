@@ -377,14 +377,11 @@ fn run_session(
         };
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         // Dropping the pill unfinished hides it: a silent or cancelled run.
-        match (overlay, &outcome) {
-            (Some(overlay), command_mode::Outcome::Opened { host }) => overlay.finish_opened(host),
-            (Some(overlay), outcome) => {
-                if let Some(ok) = outcome.pill() {
-                    overlay.finish(ok);
-                }
+        if let (Some(overlay), Some(ok)) = (overlay, outcome.pill()) {
+            match outcome.label() {
+                Some(label) => overlay.finish_labelled(&label),
+                None => overlay.finish(ok),
             }
-            (None, _) => {}
         }
         return;
     }

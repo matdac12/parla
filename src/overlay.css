@@ -170,8 +170,8 @@ body {
 .pill[data-mode="command"] .retry {
   display: none;
 }
-/* "Opened <host>" beside the check once a command opened a page (PARLA-65). */
-.opened {
+/* A label beside the check, e.g. "Opened <host>" (PARLA-65). */
+.label {
   display: none;
   max-width: 180px;
   overflow: hidden;
@@ -180,12 +180,12 @@ body {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.pill[data-opened][data-phase="done"] {
+.pill[data-labelled][data-phase="done"] {
   width: auto;
   gap: 7px;
   padding: 0 14px 0 12px;
 }
-.pill[data-opened][data-phase="done"] .opened {
+.pill[data-labelled][data-phase="done"] .label {
   display: block;
 }
 .bars {

@@ -99,9 +99,9 @@ fn web_page(arguments: &str) -> Result<Url, String> {
         .map_err(|_| "the reply's open_url call could not be read.".to_string())?;
     let url = Url::parse(arguments.url.trim())
         .map_err(|_| "the reply's address is not a valid web address.".to_string())?;
+    // http and https addresses always have a host, or they do not parse.
     match url.scheme() {
-        "http" | "https" if url.host_str().is_some_and(|host| !host.is_empty()) => Ok(url),
-        "http" | "https" => Err("the reply's address is not a valid web address.".into()),
+        "http" | "https" => Ok(url),
         scheme => Err(format!(
             "refused to open a {scheme}: address; only web pages open."
         )),
@@ -141,6 +141,28 @@ mod tests {
 
     fn opens(url: &str) -> Result<String, String> {
         validate(&call(OPEN_URL, url)).map(|Action::OpenUrl(url)| url.to_string())
+    }
+
+    #[test]
+    fn open_url_is_declared_strict_with_one_required_url() {
+        assert_eq!(
+            declarations(),
+            json!([{
+                "type": "function",
+                "name": "open_url",
+                "description": "Open a web page in the user's default browser. For a search, open a search engine's results page.",
+                "strict": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"url": {
+                        "type": "string",
+                        "description": "The absolute http or https URL to open."
+                    }},
+                    "required": ["url"],
+                    "additionalProperties": false,
+                },
+            }])
+        );
     }
 
     #[test]

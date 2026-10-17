@@ -1,10 +1,10 @@
 //! The small always-on-top pill: live level meter while recording, a spinner
-//! while transcribing, and a brief done/error confirmation ("Opened <host>"
-//! beside the check after command mode opened a page).
+//! while transcribing, and a brief done/error confirmation, with a label
+//! beside the check when there is something to say ("Opened <host>").
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -17,15 +17,12 @@ const WIDTH: f64 = 144.0;
 const HEIGHT: f64 = 40.0;
 const CAPTION_WIDTH: f64 = 366.0;
 const CAPTION_HEIGHT: f64 = 116.0;
-/// Room for "Opened <host>" beside the check (PARLA-65).
-const OPENED_WIDTH: f64 = 248.0;
-static CAPTIONS_ENABLED: AtomicBool = AtomicBool::new(false);
-/// Widened for "Opened <host>" until the next session.
-static OPENED: AtomicBool = AtomicBool::new(false);
+/// Room for a label such as "Opened <host>" beside the check (PARLA-65).
+const LABELLED_WIDTH: f64 = 248.0;
 const SHOW_DELAY: Duration = Duration::from_millis(250);
 const DONE_HOLD: Duration = Duration::from_millis(750);
-/// Long enough to read which site opened.
-const OPENED_HOLD: Duration = Duration::from_millis(1500);
+/// Long enough to read the label.
+const LABELLED_HOLD: Duration = Duration::from_millis(1500);
 /// A failed dictation keeps its pill (Dismiss and Retry buttons) up for a while.
 const ERROR_HOLD: Duration = Duration::from_secs(10);
 
@@ -105,35 +102,52 @@ fn place(app: &tauri::AppHandle) {
     let scale = monitor.scale_factor();
     let size = monitor.size();
     let origin = monitor.position();
-    let (width, height) = dimensions(
-        CAPTIONS_ENABLED.load(Ordering::Acquire),
-        OPENED.load(Ordering::Acquire),
-    );
+    let (width, height) = Size::current().dimensions();
     let x = origin.x + ((f64::from(size.width) - width * scale) / 2.0) as i32;
     let y = origin.y + (f64::from(size.height) - (height + 72.0) * scale) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-fn dimensions(captions: bool, opened: bool) -> (f64, f64) {
-    match (captions, opened) {
-        (true, _) => (CAPTION_WIDTH, CAPTION_HEIGHT),
-        (false, true) => (OPENED_WIDTH, HEIGHT),
-        (false, false) => (WIDTH, HEIGHT),
-    }
+/// The overlay window's size: the pill alone, under live captions, or with a
+/// result label. Kept until a session or a label asks for another.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Size {
+    Pill,
+    Captions,
+    Labelled,
 }
+static SIZE: AtomicU8 = AtomicU8::new(Size::Pill as u8);
 
-fn resize(app: &tauri::AppHandle, captions: bool, opened: bool) {
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let (width, height) = dimensions(captions, opened);
-        let _ = window.set_size(LogicalSize::new(width, height));
+impl Size {
+    fn current() -> Self {
+        match SIZE.load(Ordering::Acquire) {
+            1 => Size::Captions,
+            2 => Size::Labelled,
+            _ => Size::Pill,
+        }
+    }
+
+    fn dimensions(self) -> (f64, f64) {
+        match self {
+            Size::Pill => (WIDTH, HEIGHT),
+            Size::Captions => (CAPTION_WIDTH, CAPTION_HEIGHT),
+            Size::Labelled => (LABELLED_WIDTH, HEIGHT),
+        }
+    }
+
+    /// Resizes the window only when the size changes.
+    fn apply(self, app: &tauri::AppHandle) {
+        if SIZE.swap(self as u8, Ordering::AcqRel) != self as u8 {
+            if let Some(window) = app.get_webview_window(LABEL) {
+                let (width, height) = self.dimensions();
+                let _ = window.set_size(LogicalSize::new(width, height));
+            }
+        }
     }
 }
 
 fn configure(app: &tauri::AppHandle, captions: bool, generation: u64) {
-    let widened = OPENED.swap(false, Ordering::AcqRel);
-    if CAPTIONS_ENABLED.swap(captions, Ordering::AcqRel) != captions || widened {
-        resize(app, captions, false);
-    }
+    if captions { Size::Captions } else { Size::Pill }.apply(app);
     let _ = app.emit_to(
         LABEL,
         "caption-session",
@@ -310,12 +324,11 @@ impl Overlay {
         self.settle(ok, if ok { DONE_HOLD } else { ERROR_HOLD });
     }
 
-    /// The check with "Opened <host>" beside it: command mode opened a page.
-    pub fn finish_opened(self, host: &str) {
-        OPENED.store(true, Ordering::Release);
-        resize(&self.app, CAPTIONS_ENABLED.load(Ordering::Acquire), true);
-        let _ = self.app.emit_to(LABEL, "opened", host);
-        self.settle(true, OPENED_HOLD);
+    /// The check with `label` beside it, held a little longer to be read.
+    pub fn finish_labelled(self, label: &str) {
+        Size::Labelled.apply(&self.app);
+        let _ = self.app.emit_to(LABEL, "label", label);
+        self.settle(true, LABELLED_HOLD);
     }
 
     fn settle(mut self, ok: bool, hold: Duration) {

@@ -100,11 +100,12 @@ retry.addEventListener("click", () => {
   void invoke("retry_last_failed").catch(() => undefined);
 });
 
-// After command mode opened a page: "Opened <host>" beside the check.
-const opened = document.createElement("span");
-opened.className = "opened";
+// Beside the check when there is something to say, e.g. "Opened <host>"
+// after command mode opened a page.
+const label = document.createElement("span");
+label.className = "label";
 
-pill.append(mode, container, spinner, result, opened, retry);
+pill.append(mode, container, spinner, result, label, retry);
 
 const bars: HTMLDivElement[] = [];
 for (let i = 0; i < BARS; i++) {
@@ -132,7 +133,6 @@ function setPhase(nextPhase: string): void {
     result.innerHTML = "";
   } else if (phase === "done") {
     result.innerHTML = CHECK;
-    opened.title = opened.textContent ?? "";
   } else if (phase === "error") {
     result.innerHTML = CROSS;
   }
@@ -144,8 +144,8 @@ function setPhase(nextPhase: string): void {
   else result.removeAttribute("aria-label");
   // The label arrives just before "done" and lasts until the next phase.
   if (phase !== "done") {
-    opened.textContent = "";
-    delete pill.dataset.opened;
+    label.textContent = "";
+    delete pill.dataset.labelled;
   }
   pill.dataset.phase = phase;
   if (!["recording", "processing"].includes(phase)) clearCaptions();
@@ -158,9 +158,9 @@ void listen<number>("level", (event) => {
   render();
 });
 void listen<Mode>("mode", (event) => setMode(event.payload));
-void listen<string>("opened", (event) => {
-  opened.textContent = `Opened ${event.payload}`;
-  pill.dataset.opened = "";
+void listen<string>("label", (event) => {
+  label.textContent = event.payload;
+  pill.dataset.labelled = "";
 });
 void listen<string>("phase", (event) => setPhase(event.payload));
 void listen<{ generation: number; enabled: boolean }>("caption-session", (event) => {
