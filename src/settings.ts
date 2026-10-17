@@ -9,6 +9,7 @@ interface Settings {
   hotkey: string;
   restore_delay_ms: number;
   paste_compatibility_mode: boolean;
+  auto_send: boolean;
   streaming_enabled: boolean;
   live_captions: boolean;
   vocabulary: string[];
@@ -106,6 +107,7 @@ const els = {
   captureHint: byId<HTMLParagraphElement>("capture-hint"),
   delay: byId<HTMLInputElement>("delay"),
   pasteCompatibility: byId<HTMLInputElement>("paste-compatibility"),
+  autoSend: byId<HTMLInputElement>("auto-send"),
   streaming: byId<HTMLInputElement>("streaming-enabled"),
   vocabulary: byId<HTMLTextAreaElement>("vocabulary"),
   liveCaptions: byId<HTMLInputElement>("live-captions"),
@@ -656,6 +658,11 @@ function wireForm(): void {
     state.settings.paste_compatibility_mode = els.pasteCompatibility.checked;
     updateDirty();
   });
+  els.autoSend.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.auto_send = els.autoSend.checked;
+    updateDirty();
+  });
   els.streaming.addEventListener("change", () => {
     if (!state.settings) return;
     state.settings.streaming_enabled = els.streaming.checked;
@@ -698,6 +705,7 @@ async function main(): Promise<void> {
     els.hotkey.value = settings.hotkey;
     els.delay.value = String(settings.restore_delay_ms);
     els.pasteCompatibility.checked = settings.paste_compatibility_mode;
+    els.autoSend.checked = settings.auto_send;
     els.streaming.checked = settings.streaming_enabled;
     els.liveCaptions.checked = settings.live_captions;
     els.dimAudio.checked = settings.dim_other_audio;

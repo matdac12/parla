@@ -194,6 +194,12 @@ Pasting uses a 15 ms clipboard settle delay and a 25 ms modifier hold.
 Enable **Paste compatibility mode** in Settings to use the original 100 ms
 delays for apps that need them. The separate clipboard restore delay is unchanged.
 
+**Auto-send** (Settings, on by default, `auto_send`): when a dictation's last
+word is "send" or "invia" (any case, trailing punctuation ignored, whole word
+only, so "resend" doesn't count), Parla pastes the text without that word and
+then presses Enter. A dictation that is only "Send." is pasted as text. History
+keeps the raw transcript; a tray Retry pastes but never sends.
+
 ### Recording pill
 
 A small dark pill appears at the bottom centre of the primary monitor about
@@ -252,6 +258,7 @@ defaults. Example:
   "hotkey": "Ctrl+Alt+Space",
   "restore_delay_ms": 250,
   "paste_compatibility_mode": false,
+  "auto_send": true,
   "local_model": "parakeet-v3",
   "dim_other_audio": true,
   "dim_audio_level": 30,
