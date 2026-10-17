@@ -23,6 +23,17 @@ jobs:
           workspaces: src-tauri
           # Branch runs restore main's cache but skip the 2.5-6 min upload.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # ort-sys downloads ONNX Runtime here and watches DLL links into target/.
+      # rust-cache neither caches this dir nor keeps the links, so without these
+      # two steps every run reruns ort-sys and rebuilds ort -> transcribe-rs.
+      # Saved on any branch, only on a miss: ~70 MB, once per Cargo.lock.
+      - uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+      - name: Relink ort's DLLs pruned by rust-cache
+        shell: pwsh
+        run: ./.github/scripts/relink-ort-dylibs.ps1
       - run: npm ci
       - run: cargo test --locked
         working-directory: src-tauri
