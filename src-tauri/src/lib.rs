@@ -117,6 +117,11 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 dim::shutdown();
+                if let Some(history) = app.try_state::<history::History>() {
+                    if let Err(error) = history.drain(std::time::Duration::from_secs(1)) {
+                        eprintln!("History shutdown drain failed: {error}");
+                    }
+                }
                 if let Some(stats) = app.try_state::<stats::StatsStore>() {
                     if let Err(error) = stats.flush() {
                         eprintln!("Stats shutdown flush failed: {error}");

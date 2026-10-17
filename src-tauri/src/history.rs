@@ -16,6 +16,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
 };
 use tauri::Manager;
 
@@ -58,6 +59,10 @@ enum Message {
     },
     Clear {
         respond: Sender<Result<(), String>>,
+    },
+    /// Answered once every message queued before it has been handled.
+    Drain {
+        respond: Sender<()>,
     },
 }
 
@@ -119,6 +124,18 @@ impl History {
             .recv()
             .unwrap_or_else(|_| Err("History writer did not respond".into()))
     }
+
+    /// Waits, at most `limit`, until every append queued so far is written.
+    /// Quit calls it so the last dictation's row is not lost (PARLA-69).
+    pub fn drain(&self, limit: Duration) -> Result<(), String> {
+        let (respond, response) = mpsc::channel();
+        if self.sender.send(Message::Drain { respond }).is_err() {
+            return Err("History writer is unavailable".into());
+        }
+        response
+            .recv_timeout(limit)
+            .map_err(|_| "History writer did not drain in time".into())
+    }
 }
 
 fn writer_loop(path: PathBuf, receiver: Receiver<Message>) {
@@ -135,6 +152,9 @@ fn writer_loop(path: PathBuf, receiver: Receiver<Message>) {
             }
             Message::Clear { respond } => {
                 let _ = respond.send(writer.clear().map_err(|error| error.to_string()));
+            }
+            Message::Drain { respond } => {
+                let _ = respond.send(());
             }
         }
     }
@@ -373,6 +393,19 @@ mod tests {
         for record in records {
             writer.append(record);
         }
+    }
+
+    #[test]
+    fn drain_returns_once_every_queued_append_is_on_disk() {
+        let path = temp_path("drain");
+        let history = History::start(path.clone()).unwrap();
+        for i in 0..50 {
+            history.append(record(i, "queued at quit"));
+        }
+        history.drain(Duration::from_secs(5)).unwrap();
+        // Read the file directly: the writer thread is not asked again.
+        let lines = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(lines.lines().count(), 50);
     }
 
     #[test]
