@@ -128,18 +128,19 @@ at the bottom opens the benchmark window.
   (two lines; click to expand), provider, audio length and word count, with
   **Copy** on hover. [Command runs](#command-mode-experimental) sit among them
   with an orange **Command** tag: the instruction, then the outcome (**Reply
-  pasted**, **Opened <host>**, **Failed: …** or **Cancelled**), the LLM model and
-  the instruction's audio length; **Copy** copies the reply, and a failed run
-  has none. A search box (transcripts and instructions) and an **All / Failed**
-  filter narrow the loaded rows, new ones appear at the top as they finish, and **Show older**
-  loads more (200 at a time, up to 2000). Failed dictations are red; the newest
-  one, while its recording is still saved, has **Retry**, which transcribes the
-  saved clip and adds the result to the list (nothing is pasted, since the focus
-  is Parla itself). **Clear history…** truncates the file after a confirmation.
-- **Timings** shows the same loaded dictations (not command runs) as a latency log: median, fastest
-  and slowest key-up-to-pasted tiles, one stacked bar per dictation (Ready,
-  Transcribe, Paste; see [History](#history)) with its total, and the full table
-  behind **Table view**.
+  pasted**, **Opened <host>**, **Failed: …** or **Cancelled**), the LLM model
+  and the instruction's audio length; **Copy** copies the reply, and a failed
+  run has none. A search box (transcripts and instructions) and an **All /
+  Failed** filter narrow the loaded rows, new ones appear at the top as they
+  finish, and **Show older** loads more (200 at a time, up to 2000). Failed
+  dictations are red; the newest one, while its recording is still saved, has
+  **Retry**, which transcribes the saved clip and adds the result to the list
+  (nothing is pasted, since the focus is Parla itself). **Clear history…**
+  truncates the file after a confirmation.
+- **Timings** shows the dictations among the loaded rows (command runs are left
+  out) as a latency log: median, fastest and slowest key-up-to-pasted tiles, one
+  stacked bar per dictation (Ready, Transcribe, Paste; see [History](#history))
+  with its total, and the full table behind **Table view**.
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a

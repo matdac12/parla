@@ -29,7 +29,7 @@ pub fn cost_usd(provider_id: &str, model: &str, mode: &str, audio_ms: u64) -> Op
 
 /// Command mode's LLM: US dollars per million tokens (in, out), or `None` when
 /// the model is not in the table. Checked 2026-10-17 on OpenAI's pricing page.
-pub fn usd_per_million_tokens(model: &str) -> Option<(f64, f64)> {
+fn usd_per_million_tokens(model: &str) -> Option<(f64, f64)> {
     match model {
         "gpt-6-luna" => Some((0.10, 0.50)),
         _ => None,

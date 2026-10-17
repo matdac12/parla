@@ -130,43 +130,38 @@ impl Stats {
     }
 
     fn bill(&mut self, provider_id: &str, model: &str, mode: &str, audio_ms: u64) {
-        let index = match self.usage.iter().position(|usage| {
+        let found = self.usage.iter_mut().find(|usage| {
             usage.provider_id == provider_id && usage.model == model && usage.mode == mode
-        }) {
-            Some(index) => index,
-            None => {
-                self.usage.push(Usage {
-                    provider_id: provider_id.into(),
-                    model: model.into(),
-                    mode: mode.into(),
-                    audio_ms: 0,
-                    requests: 0,
-                });
-                self.usage.len() - 1
+        });
+        match found {
+            Some(usage) => {
+                usage.audio_ms = usage.audio_ms.saturating_add(audio_ms);
+                usage.requests = usage.requests.saturating_add(1);
             }
-        };
-        let usage = &mut self.usage[index];
-        usage.audio_ms = usage.audio_ms.saturating_add(audio_ms);
-        usage.requests = usage.requests.saturating_add(1);
+            None => self.usage.push(Usage {
+                provider_id: provider_id.into(),
+                model: model.into(),
+                mode: mode.into(),
+                audio_ms,
+                requests: 1,
+            }),
+        }
     }
 
     fn bill_tokens(&mut self, model: &str, tokens_in: u64, tokens_out: u64) {
-        let index = match self.llm_usage.iter().position(|usage| usage.model == model) {
-            Some(index) => index,
-            None => {
-                self.llm_usage.push(LlmUsage {
-                    model: model.into(),
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    requests: 0,
-                });
-                self.llm_usage.len() - 1
+        match self.llm_usage.iter_mut().find(|usage| usage.model == model) {
+            Some(usage) => {
+                usage.tokens_in = usage.tokens_in.saturating_add(tokens_in);
+                usage.tokens_out = usage.tokens_out.saturating_add(tokens_out);
+                usage.requests = usage.requests.saturating_add(1);
             }
-        };
-        let usage = &mut self.llm_usage[index];
-        usage.tokens_in = usage.tokens_in.saturating_add(tokens_in);
-        usage.tokens_out = usage.tokens_out.saturating_add(tokens_out);
-        usage.requests = usage.requests.saturating_add(1);
+            None => self.llm_usage.push(LlmUsage {
+                model: model.into(),
+                tokens_in,
+                tokens_out,
+                requests: 1,
+            }),
+        }
     }
 }
 

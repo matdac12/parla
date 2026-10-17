@@ -199,46 +199,43 @@ function commandOutcome(record: DictationRecord): string {
   }
 }
 
-/** A command row's meta line: orange tag, outcome, LLM and instruction audio. */
-function commandMeta(record: DictationRecord): HTMLDivElement {
-  const failed = record.outcome === "failed" || record.error !== null;
+/** The text, meta line and Copy text of a row. A command row shows its
+ *  instruction under an orange tag; Copy copies the reply. */
+function content(record: DictationRecord): { text: string; meta: HTMLDivElement; copy: string | undefined } {
+  const ok = record.error === null;
   const meta = el("div", "mt");
+  if (!isCommand(record)) {
+    const parts = [providerName(record.provider_id), seconds(record.audio_ms)];
+    if (ok) parts.push(`${number.format(wordCount(record.text))} words`);
+    meta.textContent = parts.join(" · ");
+    return { text: ok ? record.text : `Failed: ${record.error}`, meta, copy: ok ? record.text : undefined };
+  }
   const rest = [record.llm_model, seconds(record.audio_ms)].filter((part) => part !== undefined);
   meta.append(
     el("span", "tag", "Command"),
-    el("span", failed ? "bad" : undefined, commandOutcome(record)),
+    el("span", ok ? undefined : "bad", commandOutcome(record)),
     ` · ${rest.join(" · ")}`,
   );
-  return meta;
+  return { text: record.text.trim() || "No instruction", meta, copy: ok ? record.reply : undefined };
 }
 
 /** `today` is set on Home, where rows are not grouped by day: older rows
  *  then show their date instead of their time. */
 function row(record: DictationRecord, retryable: boolean, today?: number): HTMLLIElement {
-  const command = isCommand(record);
-  const ok = record.error === null;
-  const item = el("li", command ? "command" : ok ? undefined : "failed");
+  const item = el("li", record.error === null ? undefined : "failed");
   const when = el("span", "tm", today !== undefined && startOfDay(record.started_at) !== today
     ? shortDayFormat.format(record.started_at)
     : clock(record.started_at));
   when.title = fullDate(record.started_at);
 
-  // A command row shows its instruction; its meta line says how it ended.
-  const text = el("p", "tx", command
-    ? record.text.trim() || "No instruction"
-    : ok ? record.text : `Failed: ${record.error}`);
+  const { text: shown, meta, copy } = content(record);
+  const text = el("p", "tx", shown);
   // Click expands the two-line clamp, unless the click ended a text selection.
   text.addEventListener("click", () => {
     if (window.getSelection()?.isCollapsed !== false) text.classList.toggle("expanded");
   });
   const body = el("div");
-  if (command) {
-    body.append(text, commandMeta(record));
-  } else {
-    const meta = [providerName(record.provider_id), seconds(record.audio_ms)];
-    if (ok) meta.push(`${number.format(wordCount(record.text))} words`);
-    body.append(text, el("div", "mt", meta.join(" · ")));
-  }
+  body.append(text, meta);
 
   const actions = el("div", "act");
   if (retryable) {
@@ -248,12 +245,8 @@ function row(record: DictationRecord, retryable: boolean, today?: number): HTMLL
     wireRetry(retry);
     actions.append(retry);
   }
-  if (command) {
-    // Copy copies the reply; a failed run has none to offer.
-    const reply = record.reply ?? "";
-    if (ok && record.outcome !== "failed" && reply.trim() !== "") actions.append(copyButton(reply, "Copy reply"));
-  } else if (ok && record.text.trim() !== "") {
-    actions.append(copyButton(record.text));
+  if (copy !== undefined && copy.trim() !== "") {
+    actions.append(copyButton(copy, isCommand(record) ? "Copy reply" : undefined));
   }
   item.append(when, body, actions);
   return item;
@@ -337,8 +330,10 @@ function renderHistory(retryable: DictationRecord | undefined): void {
 
   const count = records.length;
   const commands = records.filter(isCommand).length;
-  const kept = commands === 0 ? plural(count, "dictation") : `${plural(count - commands, "dictation")} and ${plural(commands, "command run")}`;
-  lede.textContent = count >= limit ? `The newest ${kept} kept on this PC.` : `${kept} kept on this PC.`;
+  const kept = [plural(count - commands, "dictation")];
+  if (commands > 0) kept.push(plural(commands, "command run"));
+  const what = kept.join(" and ");
+  lede.textContent = count >= limit ? `The newest ${what} kept on this PC.` : `${what} kept on this PC.`;
   empty.hidden = shown.length > 0;
   empty.textContent = count === 0
     ? "No dictations yet."
