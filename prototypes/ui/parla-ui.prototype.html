@@ -56,6 +56,14 @@ html[data-theme="dark"] {
   --st-ready: #3987e5; --st-transcribe: #d95926; --st-paste: #199e70;
 }
 
+/* accent candidates: html[data-accent] wins over the base tokens; dark pairs are stepped for the dark surface */
+html[data-accent="blue"] { --accent: #0067c0; --accent-hover: #005a9e; --on-accent: #ffffff; }
+html[data-theme="dark"][data-accent="blue"] { --accent: #4cc2ff; --accent-hover: #7dd3ff; --on-accent: #002338; }
+html[data-accent="graphite"] { --accent: #27272a; --accent-hover: #3f3f46; --on-accent: #ffffff; }
+html[data-theme="dark"][data-accent="graphite"] { --accent: #e4e4e7; --accent-hover: #ffffff; --on-accent: #18181b; }
+html[data-accent="teal"] { --accent: #0f766e; --accent-hover: #115e59; --on-accent: #ffffff; }
+html[data-theme="dark"][data-accent="teal"] { --accent: #2dd4bf; --accent-hover: #5eead4; --on-accent: #042f2e; }
+
 * { box-sizing: border-box; }
 body { margin: 0; font-family: var(--font); font-size: 14px; line-height: 1.5; color: var(--text);
   background: var(--desk); -webkit-font-smoothing: antialiased; }
@@ -152,6 +160,10 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); box-sh
 .proto-bar .lbl { padding: 0 10px; min-width: 260px; text-align: center; }
 .proto-bar .lbl b { color: #fde047; }
 .proto-bar .lbl small { display: block; color: #bbb; font-size: 11px; margin-top: 2px; white-space: normal; max-width: 460px; }
+.proto-bar .accents { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 6px; border-left: 1px solid #333; margin-left: 2px; }
+.proto-bar button.sw-acc { width: 18px; height: 18px; padding: 0; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 1px #555; }
+.proto-bar button.sw-acc.on { box-shadow: 0 0 0 2px #111, 0 0 0 4px #fde047; }
+.proto-bar .accname { color: #bbb; font-size: 11px; min-width: 120px; }
 .proto-tag { position: fixed; top: 10px; right: 12px; z-index: 1000; font: 600 11px system-ui; letter-spacing: 0.06em; background: #fde047; color: #111; padding: 3px 8px; border-radius: 4px; }
 .toast { position: fixed; left: 50%; bottom: 92px; transform: translateX(-50%); z-index: 1001; background: #111; color: #fff; font: 13px system-ui; padding: 8px 14px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
 
@@ -279,7 +291,7 @@ tr.failed { background: var(--danger-bg); }
 .a-hero { display: flex; align-items: center; gap: 16px; padding: 18px 20px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); margin-bottom: 14px; }
 .a-hero .how { flex: 1; display: flex; flex-direction: column; gap: 7px; }
 .a-hero .how div { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text-2); font-size: 0.9rem; }
-.a-hero .how div span.w { width: 104px; color: var(--text-3); font-size: 0.8rem; }
+.a-hero .how div span.w { width: 96px; color: var(--text-3); font-size: 0.8rem; }
 .a-strip { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 22px; }
 .a-strip > div { padding: 12px 16px; border-left: 1px solid var(--border); } .a-strip > div:first-child { border-left: 0; }
 .a-strip .v { font-size: 1.35rem; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
@@ -464,6 +476,7 @@ tr.failed { background: var(--danger-bg); }
   <div class="lbl" id="vlabel"></div>
   <button type="button" id="next" aria-label="Next variant">▶</button>
   <button type="button" id="theme" title="Toggle light/dark">◐</button>
+  <span class="accents" id="accents"></span>
 </div>
 <div class="tip" id="tip" hidden></div>
 <div class="toast" id="toast" hidden></div>
@@ -500,15 +513,25 @@ const VARIANTS = [
   { key: "current", name: "Current (baseline)", idea: "What ships today: home + one long settings form in the app window, the latency log in a second window, a 7-item tray menu." },
   { key: "a", name: "Sidebar app", idea: "One window with a left rail: Home, History, Timings, and Settings split into short pages with an explicit Save bar. The latency log moves in; the tray menu shrinks." },
   { key: "b", name: "Quiet feed", idea: "Transcript-first single column grouped by day; stats in one sentence; timings as an inline toggle; provider switch in the header; settings in a slide-over sheet that saves itself." },
+  { key: "mix", name: "Chosen mix: A window + C tray", idea: "A's window + C's tray flyout (right-click keeps A's menu); pill untouched. Pick an accent with the swatches." },
   { key: "c", name: "Tray flyout", idea: "Left-click the tray icon for a Windows-style flyout (status, provider, quick toggles, last dictations). The window becomes History master-detail, Stats and a one-screen settings grid." },
+];
+
+// Accent candidates replacing the indigo (Mattia: "too much AI vibes").
+const ACCENTS = [
+  { key: "blue", name: "Windows blue", swatch: "#0067c0" },
+  { key: "graphite", name: "Graphite (no colour)", swatch: "#3f3f46" },
+  { key: "teal", name: "Teal", swatch: "#0f766e" },
+  { key: "indigo", name: "Indigo (today, for comparison)", swatch: "#4f46e5" },
 ];
 
 // ---------------------------------------------------------------- in-memory state
 const params = new URLSearchParams(location.search);
 const S = {
-  variant: VARIANTS.some((v) => v.key === params.get("variant")) ? params.get("variant") : "current",
+  variant: VARIANTS.some((v) => v.key === params.get("variant")) ? params.get("variant") : "mix",
   theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
-  view: { current: "home", a: "home", b: "feed", c: "history" },
+  view: { current: "home", a: "home", mix: "home", b: "feed", c: "history" },
+  accent: ACCENTS.some((a) => a.key === params.get("accent")) ? params.get("accent") : "blue",
   q: "", filter: "all", copied: null, retrying: false, dismissed: false,
   provider: "parakeet", model: "parakeet-v3", dl: null,
   streaming: true, captions: true, dim: true, dimLevel: 30, compat: false, delay: 250,
@@ -598,7 +621,7 @@ function pillPanel() {
     b: "<b>Changes:</b> locked mode shows elapsed time (0:12); a failed pill says why in a chip above it (uses the existing caption area). Same window sizes.",
     c: "<b>Changes:</b> no mode icon: hands-free shows as a lilac ring, done/failed as a green/red ring. Live captions grow out of the pill as one card instead of a separate box.",
   };
-  const note = S.variant === "a" ? "Unchanged from today: A keeps the current pill." : notes[pv];
+  const note = S.variant === "a" ? "Unchanged from today: A keeps the current pill." : S.variant === "mix" ? "Unchanged from today (Mattia's call). The accent colour does not reach the pill." : notes[pv];
   return `<div class="col side">
     <p class="panel-title">Overlay pill <span class="sub">— on any wallpaper</span></p>
     <div class="pills">
@@ -630,7 +653,13 @@ function trayPanel() {
     b: "First line is a disabled status row (engine + ready), so a right-click answers \"is it working?\". Retry only appears when there is something to retry.",
     c: "",
   };
-  if (S.variant === "c") {
+  menus.mix = menus.a;
+  if (S.variant === "c" || S.variant === "mix") {
+    const mix = S.variant === "mix";
+    // In the mix the flyout links into A's window views.
+    const go = mix
+      ? `<button type="button" data-action="view" data-view="history">History</button><button type="button" data-action="view" data-view="timings">Timings</button><span class="sp"></span><button type="button" data-action="note" data-note="Records 3 s and plays it back">Test mic</button><button type="button" data-action="view" data-view="s-transcription" title="Settings">${ICON.gear}</button>`
+      : `<button type="button" data-action="cview" data-view="history">History</button><button type="button" data-action="cview" data-view="stats">Stats</button><span class="sp"></span><button type="button" data-action="cview" data-view="settings">${ICON.gear}</button>`;
     const recent = RECORDS.slice(0, 4);
     const last = recent[0];
     const flyout = `<div class="flyout">
@@ -645,17 +674,19 @@ function trayPanel() {
         <div class="fly-last"><div class="mt"><span>Last dictation · ${ago(last.at)}</span><span>${PNAME[last.provider]}</span></div><p>${textOf(last)}</p>${copyBtn(last)}</div>
         ${recent.slice(1).map((r) => `<div class="fly-mini ${ok(r) ? "" : "failed"}"><small>${clock(r.at)}</small><span>${textOf(r)}</span>${ok(r) ? copyBtn(r) : retryBtn(r)}</div>`).join("")}
       </div>
-      <div class="fly-foot"><button type="button" data-action="cview" data-view="history">History</button><button type="button" data-action="cview" data-view="stats">Stats</button><span class="sp"></span><button type="button" data-action="cview" data-view="settings">${ICON.gear}</button><button type="button" data-action="note" data-note="Quits Parla">Quit</button></div>
+      <div class="fly-foot">${go}<button type="button" data-action="note" data-note="Quits Parla">Quit</button></div>
     </div>`;
     return `<div class="col side">
       <p class="panel-title">Tray <span class="sub">— click the Parla icon:</span>
         <button type="button" class="wchip ${S.tray === "flyout" ? "on" : ""}" data-action="tray" data-mode="flyout">left-click</button>
         <button type="button" class="wchip ${S.tray === "menu" ? "on" : ""}" data-action="tray" data-mode="menu">right-click</button></p>
       <div class="screen" style="height:560px">
-        ${S.tray === "flyout" ? flyout : `<div class="native-menu">${menus.c}</div>`}
+        ${S.tray === "flyout" ? flyout : `<div class="native-menu">${menus[S.variant]}</div>`}
         ${taskbar()}
       </div>
-      <p class="side-note">${S.tray === "flyout" ? "Left-click opens this flyout (a small extra webview, created on demand and kept off the hotkey path). Provider and toggles apply at once; History/Stats/⚙ open the window on that tab." : "Right-click keeps a native menu, now just three items."}</p>
+      <p class="side-note">${S.tray === "flyout"
+        ? `Left-click opens this flyout (a small extra webview, created on demand and kept off the hotkey path). Provider and toggles apply at once; ${mix ? "History, Timings and ⚙ open the window on that page" : "History/Stats/⚙ open the window on that tab"}.`
+        : mix ? "Right-click keeps A's short native menu (Test mic and Retry stay reachable without opening anything)." : "Right-click keeps a native menu, now just three items."}</p>
     </div>`;
   }
   return `<div class="col side">
@@ -732,7 +763,7 @@ const A_PAGES = [
   ["s-audio", "Other audio", ICON.speaker], ["s-vocab", "Vocabulary", ICON.book], ["s-clipboard", "Clipboard", ICON.clip],
 ];
 function vA() {
-  const v = S.view.a;
+  const v = S.view[S.variant];
   const nav = (id, label, icon, extra = "") => `<button type="button" class="a-nav ${v === id ? "on" : ""}" data-action="view" data-view="${id}">${icon}${label}${extra}</button>`;
   const pages = { home: aHome, history: aHistory, timings: aTimings };
   const body = pages[v] ? pages[v]() : aSettings(v);
@@ -755,7 +786,7 @@ function aHome() {
   return `<div class="a-page">
     <div class="a-hero"><div class="how">
       <div><span class="w">Push to talk</span>Hold ${kbd("Ctrl+Alt")}</div>
-      <div><span class="w">Hands-free</span>Tap ${kbd("Ctrl+Alt+Space")}, then ${kbd("Ctrl+Alt")} to stop</div>
+      <div><span class="w">Hands-free</span>Tap ${kbd("Ctrl+Alt+Space")} <span class="muted">· ${kbd("Ctrl+Alt")} stops</span></div>
       <div><span class="w">Cancel</span>${kbd("Esc")}</div></div>
       <button type="button" data-action="note" data-note="Records 3 s and plays it back (same as the tray item)">Test mic</button></div>
     ${f && !S.dismissed ? `<div class="banner"><span>Last dictation failed: ${esc(f.error)}.</span>${retryBtn(f)}<button type="button" class="small" data-action="dismiss">Dismiss</button></div>` : ""}
@@ -891,7 +922,9 @@ const zoomFit = () => Math.min(1, (innerWidth - 48) / 900);
 function render() {
   const focus = document.activeElement && document.activeElement.id ? { id: document.activeElement.id, a: document.activeElement.selectionStart, b: document.activeElement.selectionEnd } : null;
   document.documentElement.dataset.theme = S.theme;
-  const view = { current: vCurrent, a: vA, b: vB, c: vC }[S.variant]();
+  document.documentElement.dataset.accent = S.accent;
+  document.getElementById("accents").innerHTML = ACCENTS.map((a) => `<button type="button" class="sw-acc ${S.accent === a.key ? "on" : ""}" data-accent="${a.key}" title="${a.name}" style="--c:${a.swatch}"></button>`).join("") + `<span class="accname">${ACCENTS.find((a) => a.key === S.accent).name}</span>`;
+  const view = { current: vCurrent, a: vA, mix: vA, b: vB, c: vC }[S.variant]();
   const chips = S.variant === "current"
     ? `<div class="wchips"><button type="button" class="wchip ${S.view.current !== "latency" ? "on" : ""}" data-action="view" data-view="home">Parla · app.html</button><button type="button" class="wchip ${S.view.current === "latency" ? "on" : ""}" data-action="view" data-view="latency">Parla History · history.html</button></div>`
     : `<div class="wchips"><span class="wchip on">Parla · one window</span></div>`;
@@ -912,7 +945,7 @@ function toast(msg) {
   const t = document.getElementById("toast"); t.textContent = msg; t.hidden = false;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => (t.hidden = true), 1800);
 }
-const usesSaveButton = () => S.variant === "current" || S.variant === "a";
+const usesSaveButton = () => ["current", "a", "mix"].includes(S.variant);
 function changed() {
   if (usesSaveButton()) { S.dirty = true; S.savedMsg = ""; }
   else { S.savedAt = Date.now(); setTimeout(render, 1600); }
@@ -983,6 +1016,12 @@ document.addEventListener("mouseover", (e) => {
 });
 document.getElementById("prev").onclick = () => cycle(-1);
 document.getElementById("next").onclick = () => cycle(1);
+document.getElementById("accents").onclick = (e) => {
+  const b = e.target.closest("[data-accent]"); if (!b) return;
+  S.accent = b.dataset.accent;
+  const u = new URL(location.href); u.searchParams.set("accent", S.accent); history.replaceState(null, "", u);
+  render();
+};
 document.getElementById("theme").onclick = () => { S.theme = S.theme === "dark" ? "light" : "dark"; render(); };
 addEventListener("resize", render);
 render();
