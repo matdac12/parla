@@ -130,7 +130,7 @@ at the bottom opens the benchmark window.
   **Copy** on hover. [Command runs](#command-mode-experimental) sit among them
   with an orange **Command** tag: the instruction, then the outcome (**Edit
   shown in the Card**, **Answer shown in the Card**, **Opened <host>**,
-  **Failed: …** or **Cancelled**; older rows may read **Reply pasted**), the
+  **Reminder set**, **Failed: …** or **Cancelled**; older rows may read **Reply pasted**), the
   LLM model and the instruction's audio length; **Copy** copies the reply
   whenever there is one. A search box (transcripts and instructions) and an **All /
   Failed** filter narrow the loaded rows, new ones appear at the top as they
@@ -188,9 +188,28 @@ The **Command mode** card holds the `command` section of `settings.json`
 - **Model**, default `gpt-6-luna`; clearing the field restores it.
 - **Reasoning effort**, `low` (default) or `none`; see the
   [live eval](#the-command-mode-eval).
+- **Reminders in Traccia** (`command.reminders`, PARLA-82), off by default. It
+  is greyed out, with a hint, until command mode is on and a Traccia URL and
+  token are set; Save refuses it on without them. Save checks only what it
+  changes, so a Traccia section already in the file never blocks another save. On, it
+  offers command mode the `create_reminder` tool (see [Tools](#command-mode-experimental)).
+- **Traccia URL** and **Traccia token**, stored in `providers.traccia`
+  (`base_url`, `token`) next to the other keys. The URL is your Traccia on the
+  tailnet (`https://<traccia-host>.<tailnet>.ts.net`); Save trims it and drops
+  a trailing slash, and accepts `http` or `https` only, with no `?` or `#`. Create the token on the
+  Traccia server with `traccia token create --name parla --actor you --scope todos`.
+- **Test connection** checks the URL and token as typed, saved or not: it
+  calls `GET /v1/me` and `GET /v1/projects` (2 s each once connected) and shows
+  "Connected as you · token parla · 11 projects", with a warning when the token
+  writes as an agent. Failures read "Traccia can't be reached. Is Tailscale
+  on?" (within about 5 s), "Traccia didn't answer in 2 s.", "Traccia rejected
+  the token…", "This Traccia token can't create To-dos…" or "Traccia error
+  (HTTP 502)." Only Traccia's error code and field names are kept, never its
+  message; the token is never logged.
 
 Saving arms or disarms the command chord and rebinds it at once, with no
-restart. Model and effort are read by each command run.
+restart. Model and effort are read by each command run. Nothing about Traccia
+runs at startup or while dictating.
 
 ### Tray icon
 
@@ -405,7 +424,7 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   time and are never a shell or anything destructive (ADR-0002). Each has a
   strict JSON schema, a validator and an executor. Parla runs the call and
   sends nothing back to the model: one round trip. Nothing is pasted and your
-  clipboard text is given back. Today the allowlist holds one tool:
+  clipboard text is given back. Today the allowlist holds two tools:
   - **`open_url`** `{"url": "…"}`: "apri la pagina di Wikipedia su Roma",
     "cerca ristoranti a Milano" or "open the GitHub page for tauri" open the
     page in your **default browser**, through the shell's default handler
@@ -416,6 +435,70 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
     cross and a notification, and nothing opens. The pill shows
     **"Opened <host>"** beside the check. Esc while waiting for the reply
     opens nothing.
+  - **`create_reminder`** `{"title", "day", "time"}`, only with **Reminders in
+    Traccia** on (PARLA-82; ADR-0004): "ricordami di chiamare Luca domani alle
+    15" or "remind me next Monday morning to send the invoice" creates a
+    To-do in your Traccia Personal Space with `POST /v1/todos`, and the
+    reminder Card confirms it (below). The model gives the title and
+    the local day and time it heard (`YYYY-MM-DD`, `HH:MM`, each possibly
+    null) against the request's `Now:` line; Parla decides the rest
+    (`command_mode/when.rs`):
+    - a day and a time become a UTC `remindAt` by Windows' own time-zone
+      rules, so DST is right and "at 3" means 3 wherever you are (a time said
+      twice when the clocks go back is the first; one that doesn't exist when
+      they go forward is the hour after);
+    - a day alone gets a 09:00 Reminder, or none if it is today and 09:00
+      has passed (an earlier day fails as past);
+    - neither is an Anytime To-do with no Reminder.
+
+    "…il preventivo per Cittadellese" or "…del progetto CRM" puts the
+    Project's `@KEY` in the title (`Mandare il preventivo @CIT`), which
+    Traccia turns into the Project's chip. Parla keeps your active and paused
+    Projects in memory (`GET /v1/projects`, 2 s): the list is fetched in the
+    background when you confirm a command hold, only with the tool on and
+    only when it is missing or older than 10 minutes, and a failed fetch keeps
+    the last one. Nothing is fetched at startup or for a dictation. A run
+    uses the list in hand; only the first one after starting Parla, if the
+    fetch is still going, waits for it, at most 500 ms. The request lists
+    them under `Projects in Traccia (KEY: Name):`, one `KEY: Name` line each
+    after `Now:`, never in the tool's schema, and the model may only use a
+    listed key. With no list yet, the To-do gets no `@KEY`.
+
+    With the tool on, the system prompt gets its rules (only the instruction
+    line asks for a reminder, never a selection; a weekday means the next
+    one; stasera is 18:00; only a listed `@KEY`) and the request says `Now:
+    Saturday 2026-10-17 21:14` instead of `Date: 2026-10-17`. Off, the request is exactly as
+    before. Traccia has 5 s to answer; nothing is queued or retried. A time
+    already past fails with "15:00 today has already passed.", and the other
+    failures with their own message: Tailscale off ("Traccia can't be
+    reached. Is Tailscale on?"), a token error, a missing scope, a server
+    error, or a URL with the wrong http/https or port, which Parla never
+    follows if it redirects. Esc counts until the reply is in; once the
+    request to Traccia has started it is ignored.
+
+    **The reminder Card** (PARLA-88) opens above the check, tagged
+    **Reminder** with an orange dot and the instruction as its header. Its
+    body is the title as Traccia stored it (`@KEY` included), and a muted
+    second line is the day and time from Traccia's answer, not from the
+    request: `Sun 18/10 · 15:00`, `Today · 15:00`, `Today · no reminder` or
+    `Anytime · no reminder`, so a misheard day or an hour lost to DST shows.
+    - **Open** (filled) opens the To-do's panel in your default browser, only
+      if its address is on the configured Traccia URL (same scheme, host and
+      port, under its path); otherwise a notification says nothing opened.
+    - **Undo** deletes the To-do (`DELETE /v1/todos/{id}`, 5 s; it goes to
+      Traccia's Trash) while the Card stays up. Done, the Card closes and the
+      log says `Parla card: reminder undone` (a 404, gone already, counts as
+      done); failed, a "Command mode: Undo
+      failed: …" notification appears and the Card stays, its buttons back
+      and no longer counting down, so you can try again or Open. History
+      keeps the row as `created`.
+    - **✕** dismisses it. There is no Copy: the text stays selectable.
+    - It is the one Card that closes itself: a ring beside the tag turns
+      once, then fills its circle over 5 s, and the Card and the check fade
+      and slide away (300 ms). Hovering does not pause it. A click, or the
+      next session, closes it sooner. With **reduce motion** on in Windows
+      there is no ring and no fade: the Card stays still for its 5 s, then
+      disappears.
 - An empty or silent instruction ends quietly: no LLM call and no row.
 - A network error, a timeout, an API error, a reply cut off by the token cap
   or an empty reply shows the red cross and a "Command mode: …" notification,
@@ -428,17 +511,19 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 - A hold that reaches the 120 s cap fails without asking the LLM; the
   instruction is still recorded.
 - Each run is a `kind: "command"` row in history: the instruction (`text`),
-  `outcome` (`shown`, `opened`, `failed` or `cancelled`; `pasted` on rows from
-  before the Card), `llm_model`, `tokens_in` and `tokens_out` (whenever a
+  `outcome` (`shown`, `opened`, `created`, `failed` or `cancelled`; `pasted`
+  on rows from before the Card), `llm_model`, `tokens_in` and `tokens_out` (whenever a
   reply came back, even one cut off, refused or unreadable; a request Esc
   drops mid-flight is never read, so its tokens are not counted), the
   `reply` and its `reply_kind` (`edit` or `answer`; not
   `kind`, which says the row is a command),
-  for an `opened` run the `tool` (`open_url`) and the `url`,
+  for an `opened` run the `tool` (`open_url`) and the `url`, for a `created`
+  run the `tool` (`create_reminder`), the To-do's `url` and, as `reply`, what
+  Traccia stored (`Chiamare Luca · 2026-10-18 15:00`),
   `selection_chars` (the selection's length, 0 for none; its text is never
   kept), `app` (the focused executable), and stage times from key-up
   (`provider_returned` for the transcript, `llm_returned` for the reply,
-  `opened` for a page). The Card's button goes to stderr only (`Parla card:
+  `opened` for a page or a To-do). The Card's button goes to stderr only (`Parla card:
   replaced`). A cancel while you are still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app
@@ -457,14 +542,21 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 #### The command mode eval
 
 `src-tauri/tests/command_eval.rs` is a live eval of the built-in system prompt
-and the tools, text only, never audio. It sends 31 fixed IT/EN instructions
+and the tools, text only, never audio. It sends 58 fixed IT/EN instructions
 (rewrite, correct, shorten, translate both ways, bullets, an injection and
 selections that only mention searching, answers with nothing selected, a
-value to insert, questions about a selection, open a page, search) through
-the real request builder, parser and URL validator, 3 times at effort `none`
-and 3 at `low`, taking turns. Each reply is graded: the outcome kind (text or
-`open_url`); for a page, an http(s) address Parla would open on a plausible
-host with the expected terms; for a text, its `kind` (rewrites, translations,
+value to insert, questions about a selection, open a page, search, and 19
+reminders with their controls: an undated one, a weekday said on that
+weekday, an email reminding someone else, and selections that say
+"ricordami"; and 5 with Projects: listed ones by name or key, and two that
+aren't listed) through the real request builder, parser and tool validators,
+with reminders on, a fixed Now and a fixed Projects list (`CRM`, `CIT:
+Cittadellese`, `PARLA: Parla`), 3 times at effort `none` and 3 at `low`,
+taking turns. Each reply is graded: the outcome kind (text, `open_url` or
+`create_reminder`); for a page, an http(s) address Parla would open on a
+plausible host with the expected terms; for a reminder, the exact day and
+time, a title with the expected words and no day or time, and the listed
+Project's `@KEY` or none at all; for a text, its `kind` (rewrites, translations,
 drafts and inserted values are edits; questions are answers), no markdown,
 stray spaces or leaked tags, for an edit no preamble or wrapping quotes, plus
 a cheap correctness check (the language, words a rewrite must keep, the
@@ -482,7 +574,11 @@ $env:OPENAI_API_KEY = "sk-..."
 cargo test --locked --test command_eval -- --ignored --nocapture
 ```
 
-About 190 calls, 4 minutes and about a cent. Without the key it skips.
+About 350 calls, 8 minutes and about 4 cents. Without the key it skips.
+`PARLA_EVAL_REMINDERS=off` sends the requests as with the tool off (the
+request before PARLA-86) and skips the reminder cases;
+`PARLA_EVAL_PROJECTS=off` sends no Projects list, as before the first fetch,
+and then expects no `@KEY` in any title.
 To probe a flaky case, `PARLA_EVAL_CASES=10,17` picks cases by index and
 `PARLA_EVAL_RUNS=10` sets the repeats. Time it only on the machine lock turn
 (see `AGENTS.md`). The grading itself is tested offline by `cargo test`.
@@ -521,6 +617,10 @@ defaults. Example:
     },
     "parakeet": {
       "model_dir": null
+    },
+    "traccia": {
+      "base_url": "https://traccia.example.ts.net",
+      "token": "YOUR_TRACCIA_TODOS_TOKEN"
     }
   }
 }
@@ -533,7 +633,12 @@ environment value, even an empty one, wins over the file). `language` is `null`
 for automatic detection or an ISO code such as `"it"`. Model names are
 configurable per provider. The settings view prefills each model field with its
 default (`gpt-transcribe`, `grok-voice-transcribe-2.0`) and restores it if you
-clear the field.
+clear the field. `TRACCIA_URL` and `TRACCIA_TOKEN` override
+`providers.traccia` for the live test only
+(`cargo test --locked --lib commands::traccia -- --ignored --nocapture`,
+which otherwise reads `providers.traccia` from settings.json without writing
+it). Its write tests create `[parla-test]` To-dos with no Reminder, or one in
+2027, and delete them, one through the reminder Card's Undo.
 
 ### OpenAI
 

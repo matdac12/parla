@@ -305,10 +305,13 @@ fn run_session(
     }
     // While the user is still speaking, never for a dictation or a quick
     // Ctrl+Shift shortcut: read the selection (PARLA-64) and open the
-    // connection the LLM request will use.
+    // connection the LLM request will use, and with reminders on, refresh a
+    // stale Projects list in the background (PARLA-87).
     let selection = (command && held).then(|| {
         crate::provider::openai::prewarm(&settings);
-        SelectionRead::start()
+        let read = SelectionRead::start();
+        command_mode::traccia::refresh_projects(&settings);
+        read
     });
     // After the mic started, so it never delays the first syllable.
     let dimmed = held.then(|| crate::dim::dim(&settings));
@@ -381,7 +384,7 @@ fn run_session(
         let run = command_mode::Run {
             settings: &settings.command,
             key_up,
-            date: command_mode::today(),
+            now: command_mode::when::SystemClock.now(),
             cancelled: &cancelled,
             hold_error,
             focus: focus.as_ref(),
@@ -389,7 +392,9 @@ fn run_session(
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         if let Some(overlay) = overlay {
             match outcome {
-                command_mode::Outcome::Shown(card) => overlay.finish(Ending::Card(card)),
+                command_mode::Outcome::Shown(card) | command_mode::Outcome::Reminded(card) => {
+                    overlay.finish(Ending::Card(card))
+                }
                 command_mode::Outcome::Opened { host } => {
                     overlay.finish_labelled(&format!("Opened {host}"))
                 }
@@ -662,11 +667,17 @@ fn finish_command(
     let (key_up, cancelled) = (run.key_up, run.cancelled);
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     record.kind = timing::COMMAND_KIND.into();
+    let traccia = command_mode::traccia::Remote(settings);
     let ports = command_mode::Ports {
         desktop: &CommandDesktop,
         llm: &command_mode::responses::OpenAi(settings),
         browser: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
+        reminders: settings
+            .command
+            .reminders
+            .then_some(&traccia as &dyn command_mode::Reminders),
+        clock: &command_mode::when::SystemClock,
     };
     // Joined once the instruction is in: the read has finished, or stops
     // watching for a slow copy.
@@ -692,9 +703,9 @@ fn finish_command(
         }
     });
     match &outcome {
-        command_mode::Outcome::Shown(_) | command_mode::Outcome::Opened { .. } => {
-            crate::failure::on_success(app)
-        }
+        command_mode::Outcome::Shown(_)
+        | command_mode::Outcome::Opened { .. }
+        | command_mode::Outcome::Reminded(_) => crate::failure::on_success(app),
         command_mode::Outcome::Failed(command_mode::Failure::Transcription(error)) => {
             crate::failure::notify_instruction_error(app, &settings.active_provider, error)
         }

@@ -217,6 +217,27 @@
                   <option value="low">Low</option>
                 </select>
               </div>
+              <div class="field">
+                <label><input id="command-reminders" type="checkbox" aria-describedby="command-reminders-hint" /> Reminders in Traccia</label>
+                <p id="command-reminders-hint" class="hint">
+                  Say “ricordami di chiamare Luca domani alle 15” and Parla creates a To-do with a Reminder in your Traccia, over your tailnet.
+                </p>
+                <p id="command-reminders-needs" class="hint capture-hint" hidden>
+                  Needs command mode on, and the Traccia URL and token below.
+                </p>
+              </div>
+              <div id="traccia-fields"></div>
+              <p class="hint">
+                Create the token on the Traccia server with <code>traccia token create --name parla --actor you --scope todos</code>:
+                it can only reach To-dos and the Project list.
+              </p>
+              <div class="field">
+                <div class="hotkey-row">
+                  <button type="button" id="traccia-test" class="secondary">Test connection</button>
+                </div>
+                <p id="traccia-result" class="status provider-status" role="status" aria-live="polite"></p>
+                <p id="traccia-warning" class="hint capture-hint" hidden></p>
+              </div>
             </section>
             <section class="card">
               <h2>While I speak</h2>

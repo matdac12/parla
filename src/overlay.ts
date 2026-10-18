@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 
 const BARS = 9;
 const pill = document.getElementById("pill") as HTMLDivElement;
+const overlayRoot = document.querySelector(".overlay-root") as HTMLDivElement;
 const captions = document.getElementById("captions") as HTMLDivElement;
 const captionText = captions.querySelector(".caption-text") as HTMLDivElement;
 const stable = captions.querySelector(".caption-stable") as HTMLSpanElement;
@@ -100,8 +101,8 @@ retry.addEventListener("click", () => {
   void invoke("retry_last_failed").catch(() => undefined);
 });
 
-// Beside the check when there is something to say, e.g. "Opened <host>"
-// after command mode opened a page.
+// Beside the check when there is something to say: "Opened <host>" after
+// command mode opened a page.
 const label = document.createElement("span");
 label.className = "label";
 
@@ -127,6 +128,9 @@ render();
 
 function setPhase(nextPhase: string): void {
   phase = nextPhase;
+  // A new session: the last reminder Card's fade is over. It stays on until
+  // then, or the faded check would come back before the window hides.
+  delete overlayRoot.dataset.leaving;
   if (phase === "recording") {
     history.fill(0);
     render();
@@ -175,25 +179,39 @@ void listen<CaptionUpdate>("caption", (event) => queueCaption(event.payload));
 
 // The Card (PARLA-80): text Parla did not paste, above the check, until a
 // button closes it or the next session starts. Rust says what it shows; the
-// window takes clicks only over the box reported here.
+// window takes clicks only over the box reported here. A reminder's Card
+// (PARLA-88) also counts down: its ring fills over 5 s, then Rust says
+// "card-leave" and closes it once the fade is done.
 /** The footer's buttons; Dismiss is always the ✕. */
-type CardAction = "copy" | "paste" | "replace";
+type CardAction = "copy" | "paste" | "replace" | "open" | "undo";
 interface CardView {
-  tag: "not_pasted" | "command";
+  tag: "not_pasted" | "command" | "reminder";
   header: string | null;
   text: string;
+  /** A muted second line: a reminder's day and time. */
+  detail?: string;
   actions: CardAction[];
   primary: CardAction;
 }
-const TAGS: Record<CardView["tag"], string> = { not_pasted: "Not pasted · no text field", command: "Command" };
-const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste", replace: "Replace" };
+const TAGS: Record<CardView["tag"], string> = {
+  not_pasted: "Not pasted · no text field",
+  command: "Command",
+  reminder: "Reminder",
+};
+const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste", replace: "Replace", open: "Open", undo: "Undo" };
 const card = document.getElementById("card") as HTMLElement;
 const cardClose = card.querySelector(".card-close") as HTMLButtonElement;
 const cardTag = card.querySelector(".card-tag span") as HTMLSpanElement;
 const cardHeader = card.querySelector(".card-header") as HTMLSpanElement;
 const cardBody = card.querySelector(".card-body") as HTMLDivElement;
+const cardDetail = card.querySelector(".card-detail") as HTMLDivElement;
 const cardFoot = card.querySelector(".card-foot") as HTMLDivElement;
 let cardGeneration = 0;
+
+/** Stops the ring: a click, a close, or the next Card. */
+function stopCountdown(): void {
+  delete card.dataset.countdown;
+}
 
 function reportCardBounds(): void {
   if (card.hidden) return;
@@ -204,14 +222,18 @@ function reportCardBounds(): void {
   }).catch(() => undefined);
 }
 
-function showCard(generation: number, view: CardView): void {
+function showCard(generation: number, view: CardView, countdown: boolean): void {
   cardGeneration = generation;
+  stopCountdown();
+  delete overlayRoot.dataset.leaving;
   card.setAttribute("aria-label", TAGS[view.tag]);
   card.dataset.tag = view.tag;
   cardTag.textContent = TAGS[view.tag];
   cardHeader.textContent = view.header === null ? "" : `“${view.header}”`;
   cardBody.textContent = view.text;
   cardBody.scrollTop = 0;
+  cardDetail.textContent = view.detail ?? "";
+  cardDetail.hidden = view.detail === undefined;
   cardFoot.replaceChildren(...view.actions.map((action) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -222,6 +244,11 @@ function showCard(generation: number, view: CardView): void {
   }));
   cardClose.disabled = false;
   card.hidden = false;
+  if (countdown) {
+    // A layout with the ring hidden first, so a new Card's ring starts over.
+    void card.offsetWidth;
+    card.dataset.countdown = "";
+  }
   // Laid out already; again once the window has grown and the entrance ends.
   reportCardBounds();
 }
@@ -229,13 +256,23 @@ function showCard(generation: number, view: CardView): void {
 card.addEventListener("click", (event) => {
   const button = (event.target as Element).closest<HTMLButtonElement>("button[data-action]");
   if (button === null || button.disabled) return;
-  // One action per Card: Rust also takes it only once.
+  // One action per Card: Rust also takes it only once. A failed Undo sends
+  // the Card again, its buttons back.
   card.querySelectorAll("button").forEach((other) => { other.disabled = true; });
+  stopCountdown();
   void invoke("card_action", { generation: cardGeneration, action: button.dataset.action }).catch(() => undefined);
 });
 card.addEventListener("animationend", reportCardBounds);
 window.addEventListener("resize", reportCardBounds);
-void listen<{ generation: number; card: CardView } | null>("card", (event) => {
-  if (event.payload === null) card.hidden = true;
-  else showCard(event.payload.generation, event.payload.card);
+void listen<{ generation: number; card: CardView; countdown: boolean } | null>("card", (event) => {
+  if (event.payload === null) {
+    card.hidden = true;
+    stopCountdown();
+  } else showCard(event.payload.generation, event.payload.card, event.payload.countdown);
+});
+// The countdown ran out: the Card and the check fade, then Rust closes them.
+void listen<number>("card-leave", (event) => {
+  if (event.payload === cardGeneration && !card.hidden && card.dataset.countdown !== undefined) {
+    overlayRoot.dataset.leaving = "";
+  }
 });

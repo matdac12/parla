@@ -103,16 +103,25 @@ impl SttProvider for OpenAi {
     }
 }
 
+/// The shared client's connect timeout; Traccia's probe budget derives from it.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The connect timeout and pool settings every Parla client shares; the
+/// Traccia client adds its own redirect policy (PARLA-86).
+pub(crate) fn client_builder() -> reqwest::blocking::ClientBuilder {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+}
+
 /// Shared with command mode's Responses call, which sets its own timeout.
 pub(crate) fn client() -> Result<&'static Client, ProviderError> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            Client::builder()
-                .connect_timeout(Duration::from_secs(5))
+            client_builder()
                 .timeout(Duration::from_secs(30))
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .map_err(|e| e.to_string())
         })
