@@ -194,6 +194,8 @@ function commandOutcome(record: DictationRecord): string {
         return "Opened a page";
       }
     }
+    case "created":
+      return "Reminder set";
     case "cancelled":
       return "Cancelled";
     default:

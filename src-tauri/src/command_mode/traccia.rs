@@ -2,16 +2,23 @@
 //! reached over his tailnet with a `todos`-scoped token. Command mode only;
 //! nothing here runs at startup or on the dictation path (ADR-0001).
 
+use super::when::{Date, When};
 use crate::{provider::openai, settings::Settings};
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::{
+    blocking::RequestBuilder,
+    header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     net::TcpStream,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
 /// For `/v1/me` and the Projects list, once connected.
 const GET_TIMEOUT: Duration = Duration::from_secs(2);
+/// For creating a To-do (spec §5).
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `providers.traccia`. The env overrides are for the live test only.
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -125,6 +132,16 @@ pub enum Error {
     Status(u16),
     /// A 2xx body that isn't the expected JSON.
     Unreadable,
+    /// A 3xx: never followed, since a redirect to another origin drops the
+    /// token and would read as a token error (an http URL on an https
+    /// server).
+    Redirect,
+    /// Something answers at the address, but the connection failed while
+    /// opening: an https URL on a plain HTTP port, or a certificate refused.
+    Protocol,
+    /// The connection broke once open, before an answer could be read: an
+    /// http URL on a TLS port, or a reset. A POST may have gone through.
+    Dropped,
 }
 
 impl std::fmt::Display for Error {
@@ -155,6 +172,18 @@ impl std::fmt::Display for Error {
             ),
             Self::Status(status) => write!(f, "Traccia error (HTTP {status})."),
             Self::Unreadable => write!(f, "Traccia's reply could not be read."),
+            Self::Redirect => write!(
+                f,
+                "The Traccia URL redirects elsewhere. Check it in Settings → Command mode (http or https?)."
+            ),
+            Self::Protocol => write!(
+                f,
+                "Something answers at the Traccia URL, but not as Traccia. Check it in Settings → Command mode (http or https, and the port)."
+            ),
+            Self::Dropped => write!(
+                f,
+                "The connection to Traccia broke before it answered. Check the Traccia URL in Settings → Command mode (http or https, and the port)."
+            ),
         }
     }
 }
@@ -174,6 +203,7 @@ fn parse_error(status: u16, body: &str) -> Error {
             fields.sort();
             Error::Refused { code, fields }
         }
+        300..=399 => Error::Redirect,
         401 => Error::Token,
         403 => Error::Scope,
         _ => Error::Status(status),
@@ -220,7 +250,134 @@ fn parse_projects(body: &str) -> Result<Vec<Project>, Error> {
         .collect())
 }
 
-/// Blocking calls on the shared client: run them off the UI thread.
+/// The To-do Traccia stored, as `POST /v1/todos` returned it: what the
+/// history row (and slice 4's Card) shows, not what Parla asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Created {
+    pub id: String,
+    /// Opens it in the dashboard.
+    pub url: String,
+    /// As stored, `@KEY`s included.
+    pub title: String,
+    /// The Planned day, `YYYY-MM-DD`; None for Anytime.
+    pub day: Option<String>,
+    /// The Reminder's `HH:MM`; None for no Reminder.
+    pub time: Option<String>,
+}
+
+impl Created {
+    /// `Chiamare Luca · 2026-10-18 15:00`, for the history row.
+    pub fn summary(&self) -> String {
+        match (&self.day, &self.time) {
+            (Some(day), Some(time)) => format!("{} · {day} {time}", self.title),
+            (Some(day), None) => format!("{} · {day}", self.title),
+            _ => self.title.clone(),
+        }
+    }
+}
+
+fn parse_created(body: &str) -> Result<Created, Error> {
+    #[derive(Deserialize)]
+    struct Reminder {
+        time: String,
+    }
+    #[derive(Deserialize)]
+    struct Todo {
+        id: String,
+        url: String,
+        title: String,
+        day: Option<String>,
+        reminder: Option<Reminder>,
+    }
+    let todo: Todo = serde_json::from_str(body).map_err(|_| Error::Unreadable)?;
+    Ok(Created {
+        id: todo.id,
+        url: todo.url,
+        title: todo.title,
+        day: todo.day,
+        time: todo.reminder.map(|reminder| reminder.time),
+    })
+}
+
+/// `{title, remindAt}`, `{title, day}` or `{title}`; off Windows, the day
+/// and time as said, which Traccia reads in its Owner timezone.
+fn create_body(title: &str, when: &When) -> serde_json::Value {
+    match when {
+        When::At { utc: Some(utc), .. } => serde_json::json!({"title": title, "remindAt": utc}),
+        When::At {
+            day,
+            time,
+            utc: None,
+        } => serde_json::json!({
+            "title": title,
+            "day": day.to_string(),
+            "time": time.to_string(),
+        }),
+        When::Day(day) => serde_json::json!({"title": title, "day": day.to_string()}),
+        When::Anytime => serde_json::json!({"title": title}),
+    }
+}
+
+/// The spec §5 wording for a `create` that failed. A refused moment is one
+/// already past (Parla sends nothing malformed), named by the day and time
+/// Parla asked for.
+pub fn reminder_message(error: &Error, when: &When, today: Date) -> String {
+    match (error, when) {
+        (Error::Refused { fields, .. }, When::At { day, time, .. })
+            if fields
+                .iter()
+                .any(|field| matches!(field.as_str(), "remindAt" | "time" | "day")) =>
+        {
+            let day = if *day == today {
+                "today".to_string()
+            } else {
+                format!("on {} {:02}/{:02}", &day.weekday()[..3], day.day, day.month)
+            };
+            format!("{time} {day} has already passed.")
+        }
+        (Error::Refused { fields, .. }, _) if fields.is_empty() => {
+            "Traccia refused the reminder.".into()
+        }
+        (Error::Refused { fields, .. }, _) => {
+            format!("Traccia refused the reminder ({}).", fields.join(", "))
+        }
+        // The POST may have gone through: say so rather than invite a duplicate.
+        (Error::Dropped | Error::Timeout(_), _) => {
+            format!("{error} The reminder may have been created.")
+        }
+        (error, _) => error.to_string(),
+    }
+}
+
+/// The shared client's settings, but never following a redirect (see
+/// `Error::Redirect`): reqwest sets that per client. Built at the first
+/// Traccia call, in command mode only.
+fn http() -> Result<&'static reqwest::blocking::Client, Error> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            openai::client_builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| eprintln!("Cannot build the Traccia client: {error}"))
+                .ok()
+        })
+        .as_ref()
+        .ok_or(Error::Unreachable)
+}
+
+/// The real `Reminders` port: the saved connection (or the env overrides),
+/// resolved at each run.
+pub struct Remote<'a>(pub &'a Settings);
+
+impl super::Reminders for Remote<'_> {
+    fn create(&self, title: &str, when: &When) -> Result<Created, Error> {
+        let config = TracciaConfig::resolved(self.0)?;
+        Client::for_writes(&config).create(title, when)
+    }
+}
+
+/// Blocking calls: run them off the UI thread.
 pub struct Client<'a> {
     config: &'a TracciaConfig,
     timeout: Duration,
@@ -234,6 +391,46 @@ impl<'a> Client<'a> {
         }
     }
 
+    /// With the POST's budget.
+    pub fn for_writes(config: &'a TracciaConfig) -> Self {
+        Self {
+            config,
+            timeout: WRITE_TIMEOUT,
+        }
+    }
+
+    /// `POST /v1/todos`. Never retried (ADR-0004).
+    pub fn create(&self, title: &str, when: &When) -> Result<Created, Error> {
+        let request = http()?
+            .post(self.url("/v1/todos"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(create_body(title, when).to_string());
+        parse_created(&self.send(request)?)
+    }
+
+    /// `DELETE /v1/todos/{id}`, for the live tests until slice 4's Undo.
+    #[cfg(test)]
+    pub(crate) fn delete(&self, id: &str) -> Result<(), Error> {
+        self.send(http()?.delete(self.url(&format!("/v1/todos/{id}"))))
+            .map(drop)
+    }
+
+    /// The open To-dos' titles (the first 250), for the live tests.
+    #[cfg(test)]
+    pub(crate) fn open_titles(&self) -> Result<Vec<String>, Error> {
+        #[derive(Deserialize)]
+        struct Item {
+            title: String,
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            items: Vec<Item>,
+        }
+        let page: Page = serde_json::from_str(&self.get("/v1/todos?state=open&limit=250")?)
+            .map_err(|_| Error::Unreadable)?;
+        Ok(page.items.into_iter().map(|item| item.title).collect())
+    }
+
     pub fn me(&self) -> Result<Me, Error> {
         parse_me(&self.get("/v1/me")?)
     }
@@ -243,13 +440,20 @@ impl<'a> Client<'a> {
         parse_projects(&self.get("/v1/projects?limit=250")?)
     }
 
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.base_url)
+    }
+
     fn get(&self, path: &str) -> Result<String, Error> {
+        self.send(http()?.get(self.url(path)))
+    }
+
+    /// The body of a 2xx, or the error.
+    fn send(&self, request: RequestBuilder) -> Result<String, Error> {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.config.token))
             .map_err(|_| Error::Token)?;
         authorization.set_sensitive(true);
-        let client = openai::client().map_err(|_| Error::Unreachable)?;
-        let response = client
-            .get(format!("{}{path}", self.config.base_url))
+        let response = request
             .timeout(self.timeout)
             .header(AUTHORIZATION, authorization)
             .send()
@@ -263,14 +467,20 @@ impl<'a> Client<'a> {
         }
     }
 
-    /// The request timeout also covers connecting, so it can't tell a host
-    /// that is down from a server that hangs. Only then, a plain TCP connect
-    /// within the rest of the shared connect timeout tells them apart.
+    /// A failure alone can't tell a host that is down from a server that
+    /// hangs (the request timeout also covers connecting), nor from one that
+    /// speaks another protocol (a TLS handshake fails as a connect error). A
+    /// plain TCP connect, within the rest of the shared connect timeout,
+    /// tells them apart; a connect that timed out already needs none.
     fn transport(&self, error: &reqwest::Error) -> Error {
-        if error.is_timeout() && !error.is_connect() && self.reachable() {
-            Error::Timeout(self.timeout)
-        } else {
+        if error.is_connect() && error.is_timeout() || !self.reachable() {
             Error::Unreachable
+        } else if error.is_timeout() {
+            Error::Timeout(self.timeout)
+        } else if error.is_connect() {
+            Error::Protocol
+        } else {
+            Error::Dropped
         }
     }
 
@@ -329,6 +539,7 @@ pub fn check(config: &TracciaConfig) -> Result<Connection, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command_mode::when::test_support::{date, time};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -528,7 +739,15 @@ mod tests {
                 while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
                     head.push(byte[0]);
                 }
-                let _ = sender.send(String::from_utf8_lossy(&head).into_owned());
+                let head = String::from_utf8_lossy(&head).into_owned();
+                // A POST's body too, or answering early resets the request.
+                let length = head
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:")?.trim().parse().ok())
+                    .unwrap_or(0);
+                stream.read_exact(&mut vec![0; length]).unwrap();
+                let _ = sender.send(head);
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
@@ -615,5 +834,218 @@ mod tests {
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         drop(listener);
+    }
+    fn at(day: &str, hour: &str, utc: Option<&str>) -> When {
+        When::At {
+            day: date(day),
+            time: time(hour),
+            utc: utc.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn the_create_body_carries_a_moment_a_day_or_neither() {
+        let title = "Chiamare Luca";
+        for (when, body) in [
+            (
+                at("2026-10-18", "15:00", Some("2026-10-18T13:00:00Z")),
+                serde_json::json!({"title": title, "remindAt": "2026-10-18T13:00:00Z"}),
+            ),
+            // Off Windows: the day and time as said, in Traccia's zone.
+            (
+                at("2026-10-18", "15:00", None),
+                serde_json::json!({"title": title, "day": "2026-10-18", "time": "15:00"}),
+            ),
+            (
+                When::Day(date("2026-10-17")),
+                serde_json::json!({"title": title, "day": "2026-10-17"}),
+            ),
+            (When::Anytime, serde_json::json!({"title": title})),
+        ] {
+            assert_eq!(create_body(title, &when), body, "{when:?}");
+        }
+    }
+
+    #[test]
+    fn a_created_to_do_reads_its_id_url_title_day_and_time() {
+        let created = parse_created(&fixture("todo_created")).unwrap();
+        assert_eq!(
+            created,
+            Created {
+                id: "01K8TODO0000000000000000AB".into(),
+                url: "https://traccia.example.ts.net/personal?todo=01K8TODO0000000000000000AB"
+                    .into(),
+                title: "Chiamare Luca @CRM".into(),
+                day: Some("2026-10-18".into()),
+                time: Some("15:00".into()),
+            }
+        );
+        assert_eq!(created.summary(), "Chiamare Luca @CRM · 2026-10-18 15:00");
+        let anytime = parse_created(&fixture("todo_anytime")).unwrap();
+        assert_eq!(
+            (anytime.day.as_deref(), anytime.time.as_deref()),
+            (None, None)
+        );
+        assert_eq!(anytime.summary(), "Comprare il latte");
+        let day_only = Created {
+            time: None,
+            ..created
+        };
+        assert_eq!(day_only.summary(), "Chiamare Luca @CRM · 2026-10-18");
+        assert_eq!(parse_created(r#"{"id":"x"}"#), Err(Error::Unreadable));
+    }
+
+    fn passed_error() -> Error {
+        parse_error(400, &fixture("error_400_remind_at"))
+    }
+
+    #[test]
+    fn a_refused_reminder_says_why_in_the_spec_wording() {
+        let today = date("2026-10-17");
+        let passed = |when: &When| reminder_message(&passed_error(), when, today);
+        assert_eq!(
+            passed(&at("2026-10-17", "15:00", Some("2026-10-17T13:00:00Z"))),
+            "15:00 today has already passed."
+        );
+        assert_eq!(
+            passed(&at("2026-10-16", "10:00", None)),
+            "10:00 on Fri 16/10 has already passed."
+        );
+        // A moment field with no moment sent is no past moment.
+        assert_eq!(
+            passed(&When::Day(today)),
+            "Traccia refused the reminder (remindAt)."
+        );
+        let title = parse_error(400, &fixture("error_400_title"));
+        assert_eq!(
+            reminder_message(&title, &When::Anytime, today),
+            "Traccia refused the reminder (title)."
+        );
+        assert_eq!(
+            reminder_message(&parse_error(400, ""), &When::Anytime, today),
+            "Traccia refused the reminder."
+        );
+        // Every other failure as for Test connection (spec §5).
+        for error in [
+            Error::Unreachable,
+            Error::Token,
+            Error::Scope,
+            Error::Status(502),
+            Error::Redirect,
+            Error::Protocol,
+        ] {
+            assert_eq!(
+                reminder_message(&error, &When::Anytime, today),
+                error.to_string()
+            );
+        }
+        // The POST may have gone through: no invitation to a duplicate.
+        assert_eq!(
+            reminder_message(&Error::Timeout(WRITE_TIMEOUT), &When::Anytime, today),
+            "Traccia didn't answer in 5 s. The reminder may have been created."
+        );
+        for name in ["error_400_remind_at", "error_400_title"] {
+            let text = reminder_message(&parse_error(400, &fixture(name)), &When::Anytime, today);
+            assert!(!text.contains("SERVER-MESSAGE"), "{text}");
+        }
+    }
+
+    #[test]
+    fn create_posts_the_to_do_with_the_bearer_token_and_reads_the_201() {
+        let (base, heads) = serve(vec![http("201 Created", &fixture("todo_created"))]);
+        let config = TracciaConfig::new(&base, TOKEN).unwrap();
+        let created = Client::for_writes(&config)
+            .create(
+                "Chiamare Luca @CRM",
+                &at("2026-10-18", "15:00", Some("2026-10-18T13:00:00Z")),
+            )
+            .unwrap();
+        assert_eq!(created.id, "01K8TODO0000000000000000AB");
+        let head = heads.recv().unwrap();
+        assert!(head.starts_with("POST /v1/todos HTTP/1.1\r\n"), "{head}");
+        let lower = head.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer test-token\r\n"),
+            "{head}"
+        );
+        assert!(
+            lower.contains("content-type: application/json\r\n"),
+            "{head}"
+        );
+        assert_eq!(Client::for_writes(&config).timeout, WRITE_TIMEOUT);
+    }
+
+    #[test]
+    fn create_maps_a_refusal_and_a_server_that_hangs() {
+        let (base, _heads) = serve(vec![http(
+            "400 Bad Request",
+            &fixture("error_400_remind_at"),
+        )]);
+        let config = TracciaConfig::new(&base, TOKEN).unwrap();
+        let refused = Client::for_writes(&config).create("Chiamare", &When::Anytime);
+        assert_eq!(refused.err(), Some(passed_error()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let config = TracciaConfig::new(&base, TOKEN).unwrap();
+        let client = Client {
+            timeout: Duration::from_millis(300),
+            ..Client::for_writes(&config)
+        };
+        assert_eq!(
+            client.create("Chiamare", &When::Anytime),
+            Err(Error::Timeout(Duration::from_millis(300)))
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn a_redirect_is_never_followed_and_says_to_check_the_url() {
+        // An http URL on a server that moved to https: following it would
+        // drop the token and read as a token error.
+        let (base, heads) = serve(vec![
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: https://traccia.example.ts.net/v1/me\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        ]);
+        let config = TracciaConfig::new(&base, TOKEN).unwrap();
+        assert_eq!(Client::new(&config).me(), Err(Error::Redirect));
+        heads.recv().unwrap();
+        assert!(heads.try_recv().is_err(), "one request only");
+        let message = Error::Redirect.to_string();
+        assert!(message.contains("Traccia URL"), "{message}");
+    }
+
+    /// Writes `reply` as soon as a connection opens, without reading, then
+    /// keeps listening for the reachability check.
+    fn answer_at_once(reply: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let _ = stream.write_all(reply);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        address.to_string()
+    }
+
+    #[test]
+    fn https_to_a_plain_http_port_or_the_reverse_says_to_check_the_url() {
+        // https:// on a plain HTTP server: the TLS handshake reads HTTP.
+        let plain = answer_at_once(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        let config = TracciaConfig::new(&format!("https://{plain}"), TOKEN).unwrap();
+        assert_eq!(Client::new(&config).me(), Err(Error::Protocol));
+        // http:// on a TLS port: the server sends a TLS alert, not HTTP.
+        let tls = answer_at_once(b"\x15\x03\x03\x00\x02\x02\x46");
+        let config = TracciaConfig::new(&format!("http://{tls}"), TOKEN).unwrap();
+        assert_eq!(Client::new(&config).me(), Err(Error::Dropped));
+        // A POST that broke may have gone through: the message says so.
+        let message = reminder_message(&Error::Dropped, &When::Anytime, date("2026-10-17"));
+        assert!(message.contains("http or https"), "{message}");
+        assert!(
+            message.ends_with("The reminder may have been created."),
+            "{message}"
+        );
+        let message = Error::Protocol.to_string();
+        assert!(message.contains("http or https"), "{message}");
     }
 }

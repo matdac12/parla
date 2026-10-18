@@ -3,7 +3,7 @@
 use parla_lib::{
     command_mode::{
         responses::{send, Content, Reply, Request},
-        today,
+        when::SystemClock,
     },
     settings::CommandSettings,
 };
@@ -47,7 +47,8 @@ fn ask_at(effort: &str, instruction: &str, selection: Option<&str>) -> Option<Re
             instruction: instruction.into(),
             selection: selection.map(Into::into),
             app: Some("notepad.exe".into()),
-            date: today(),
+            now: SystemClock.now(),
+            reminders: false,
         },
     )
     .expect("live reply");

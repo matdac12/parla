@@ -84,6 +84,116 @@ mod tests {
         assert_eq!(error, traccia::Error::Token.to_string());
     }
 
+    // PARLA-86: `[parla-test]` To-dos with no Reminder, or one in 2027, so
+    // nothing pings; each is deleted before anything is checked. Only ids,
+    // titles, days and times are printed, never the URL.
+
+    #[test]
+    #[ignore = "creates and deletes [parla-test] To-dos in the real Traccia"]
+    fn live_create_returns_the_to_do_and_it_is_deleted() {
+        use crate::command_mode::when::{Date, LocalClock, SystemClock, Time, When};
+        let Some(config) = live_config() else { return };
+        let client = traccia::Client::for_writes(&config);
+        let (day, time) = (
+            Date::parse("2027-01-15").unwrap(),
+            Time::parse("10:00").unwrap(),
+        );
+        let utc = SystemClock.to_utc(day, time);
+        println!("2027-01-15 10:00 local is remindAt {utc:?}");
+        let cases = [
+            ("[parla-test] PARLA-86 anytime", When::Anytime, None, None),
+            (
+                "[parla-test] PARLA-86 day only",
+                When::Day(day),
+                Some("2027-01-15"),
+                None,
+            ),
+            (
+                "[parla-test] PARLA-86 remindAt 2027",
+                When::At { day, time, utc },
+                Some("2027-01-15"),
+                Some("10:00"),
+            ),
+        ];
+        for (title, when, want_day, want_time) in &cases {
+            let started = std::time::Instant::now();
+            let created = client.create(title, when).unwrap();
+            let elapsed = started.elapsed().as_millis();
+            let deleted = client.delete(&created.id);
+            println!(
+                "created {} {:?} (day {:?}, time {:?}) in {elapsed} ms; deleted: {deleted:?}",
+                created.id, created.title, created.day, created.time
+            );
+            assert_eq!(deleted, Ok(()));
+            assert_eq!(created.title, *title);
+            assert_eq!(created.day.as_deref(), *want_day);
+            assert_eq!(created.time.as_deref(), *want_time);
+            assert!(created.url.starts_with(&config.base_url));
+            assert!(created.url.ends_with(&created.id));
+        }
+        let left: Vec<String> = client
+            .open_titles()
+            .unwrap()
+            .into_iter()
+            .filter(|title| cases.iter().any(|(created, ..)| title == created))
+            .collect();
+        assert!(left.is_empty(), "left open: {left:?}");
+    }
+
+    #[test]
+    #[ignore = "asks the real Traccia for a past reminder, which it refuses"]
+    fn live_a_past_moment_is_refused_and_creates_nothing() {
+        use crate::command_mode::when::{Date, LocalClock, SystemClock, Time, When};
+        let Some(config) = live_config() else { return };
+        let client = traccia::Client::for_writes(&config);
+        let title = "[parla-test] PARLA-86 past";
+        let (day, time) = (
+            Date::parse("2026-10-17").unwrap(),
+            Time::parse("10:00").unwrap(),
+        );
+        let when = When::At {
+            day,
+            time,
+            utc: SystemClock.to_utc(day, time),
+        };
+        let error = match client.create(title, &when) {
+            Err(error) => error,
+            Ok(created) => {
+                let deleted = client.delete(&created.id);
+                panic!("created {} (deleted: {deleted:?})", created.id);
+            }
+        };
+        let message = traccia::reminder_message(&error, &when, SystemClock.now().date);
+        println!("{error:?}: {message}");
+        assert_eq!(message, "10:00 on Sat 17/10 has already passed.");
+        let titles = client.open_titles().unwrap();
+        assert!(!titles.iter().any(|open| open == title));
+    }
+
+    #[test]
+    #[ignore = "calls the real Traccia over the tailnet"]
+    fn live_the_wrong_scheme_says_to_check_the_url_not_the_token() {
+        let Some(config) = live_config() else { return };
+        let swapped = match config.base_url.split_once("://") {
+            Some(("https", rest)) => format!("http://{rest}"),
+            Some((_, rest)) => format!("https://{rest}"),
+            None => return,
+        };
+        let error = test_connection(&swapped, &config.token).unwrap_err();
+        println!("the other scheme: {error}");
+        assert!(
+            [
+                traccia::Error::Redirect,
+                traccia::Error::Protocol,
+                traccia::Error::Dropped,
+                traccia::Error::Unreachable
+            ]
+            .iter()
+            .any(|expected| error == expected.to_string()),
+            "{error}"
+        );
+    }
+
     #[test]
     #[ignore = "waits on the network for up to 5 s"]
     fn live_an_unreachable_traccia_fails_within_about_5_s() {

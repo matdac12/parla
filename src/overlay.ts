@@ -100,8 +100,8 @@ retry.addEventListener("click", () => {
   void invoke("retry_last_failed").catch(() => undefined);
 });
 
-// Beside the check when there is something to say, e.g. "Opened <host>"
-// after command mode opened a page.
+// Beside the check when there is something to say: "Opened <host>" after
+// command mode opened a page, "Reminder set" after it created a To-do.
 const label = document.createElement("span");
 label.className = "label";
 
