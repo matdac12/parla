@@ -381,7 +381,7 @@ fn run_session(
         let run = command_mode::Run {
             settings: &settings.command,
             key_up,
-            date: command_mode::today(),
+            now: command_mode::when::LocalClock::now(&command_mode::when::SystemClock),
             cancelled: &cancelled,
             hold_error,
             focus: focus.as_ref(),
@@ -393,6 +393,7 @@ fn run_session(
                 command_mode::Outcome::Opened { host } => {
                     overlay.finish_labelled(&format!("Opened {host}"))
                 }
+                command_mode::Outcome::Reminded(_) => overlay.finish_labelled("Reminder set"),
                 // A command run keeps no clip: Retry would re-run a dictation's.
                 command_mode::Outcome::Failed(_) => overlay.finish(Ending::Failed { retry: false }),
                 // Dropping the pill unfinished hides it.
@@ -662,11 +663,17 @@ fn finish_command(
     let (key_up, cancelled) = (run.key_up, run.cancelled);
     let mut record = DictationRecord::new(started_at, &settings.active_provider);
     record.kind = timing::COMMAND_KIND.into();
+    let traccia = command_mode::traccia::Remote(settings);
     let ports = command_mode::Ports {
         desktop: &CommandDesktop,
         llm: &command_mode::responses::OpenAi(settings),
         browser: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
+        reminders: settings
+            .command
+            .reminders
+            .then_some(&traccia as &dyn command_mode::Reminders),
+        clock: &command_mode::when::SystemClock,
     };
     // Joined once the instruction is in: the read has finished, or stops
     // watching for a slow copy.
@@ -692,9 +699,9 @@ fn finish_command(
         }
     });
     match &outcome {
-        command_mode::Outcome::Shown(_) | command_mode::Outcome::Opened { .. } => {
-            crate::failure::on_success(app)
-        }
+        command_mode::Outcome::Shown(_)
+        | command_mode::Outcome::Opened { .. }
+        | command_mode::Outcome::Reminded(_) => crate::failure::on_success(app),
         command_mode::Outcome::Failed(command_mode::Failure::Transcription(error)) => {
             crate::failure::notify_instruction_error(app, &settings.active_provider, error)
         }

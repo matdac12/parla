@@ -92,6 +92,8 @@ pub enum CommandOutcome {
     Shown,
     /// A tool opened a page instead of a paste.
     Opened,
+    /// `create_reminder` created a To-do in Traccia (PARLA-86).
+    Created,
     Failed,
     Cancelled,
 }

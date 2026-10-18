@@ -1,16 +1,20 @@
 //! The command mode eval (PARLA-68): fixed IT/EN instructions through the
-//! real request builder, parser and URL validator, 3x at each reasoning
+//! real request builder, parser and tool validators, 3x at each reasoning
 //! effort, graded and timed. It informed the default effort (`low`, Mattia's
-//! call), and grades each text reply's `kind`, edit or answer (PARLA-81);
-//! re-run it whenever the system prompt, the request or a tool changes:
+//! call), grades each text reply's `kind`, edit or answer (PARLA-81), and each
+//! reminder's day, time and title against a fixed Now (PARLA-86). It runs with
+//! reminders on; `PARLA_EVAL_REMINDERS=off` sends the requests as with the
+//! tool off and skips the reminder cases. Re-run it whenever the system
+//! prompt, the request or a tool changes:
 //! `OPENAI_API_KEY=... cargo test --test command_eval -- --ignored --nocapture`
-//! (about 190 calls, about a cent). The grading itself runs offline in every
+//! (about 320 calls, about 2 cents). The grading itself runs offline in every
 //! `cargo test`.
 
 use parla_lib::{
     command_mode::{
         responses::{send, Content, Reply, Request, ToolCall},
         tools::{self, Tool},
+        when::{Date, LocalNow, Time},
         Kind,
     },
     settings::CommandSettings,
@@ -42,6 +46,34 @@ enum Expect {
         hosts: &'static [&'static str],
         has: &'static [&'static str],
     },
+    /// A `create_reminder` call that Parla's validator accepts, said at
+    /// `now`, for exactly this local `day` and `time` (None: unsaid), whose
+    /// title has every `title` word and no day or time.
+    Remind {
+        now: &'static str,
+        day: Option<&'static str>,
+        time: Option<&'static str>,
+        title: &'static [&'static str],
+    },
+}
+
+/// The probe's two Nows (PARLA-82): a Saturday evening, and a Monday morning
+/// for the weekday cases. Every other case is said on the Saturday.
+const SATURDAY: &str = "2026-10-17 21:14";
+const MONDAY: &str = "2026-10-19 10:00";
+
+const fn reminds(
+    now: &'static str,
+    day: Option<&'static str>,
+    time: Option<&'static str>,
+    title: &'static [&'static str],
+) -> Expect {
+    Expect::Remind {
+        now,
+        day,
+        time,
+        title,
+    }
 }
 
 const SEARCH_ENGINES: &[&str] = &["google.com", "google.it", "bing.com", "duckduckgo.com"];
@@ -255,7 +287,137 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
         Some("tauri global shortcut plugin"),
         opens_on(&["google.com", "google.it"], &["tauri", "shortcut"]),
     ),
+    // Reminders (PARLA-86): the probe's cases (spec §1), with Mattia's
+    // decisions: a day alone has no time here (Parla adds 09:00), stasera is
+    // 18:00 and a day said is kept even when its time has passed (Traccia
+    // then refuses it), a weekday on that weekday is a week on.
+    (
+        "ricordami di chiamare Luca domani alle 15",
+        None,
+        reminds(SATURDAY, Some("2026-10-18"), Some("15:00"), &["luca"]),
+    ),
+    (
+        "remind me next Monday morning to send the invoice",
+        None,
+        reminds(SATURDAY, Some("2026-10-19"), Some("09:00"), &["invoice"]),
+    ),
+    (
+        "ricordami tra due ore di spegnere il forno",
+        None,
+        reminds(SATURDAY, Some("2026-10-17"), Some("23:14"), &["forno"]),
+    ),
+    (
+        "ricordami lunedì di pagare l'affitto",
+        None,
+        reminds(SATURDAY, Some("2026-10-19"), None, &["affitto"]),
+    ),
+    (
+        "remind me on Tuesday the 27th at 10 to call the dentist",
+        None,
+        reminds(SATURDAY, Some("2026-10-27"), Some("10:00"), &["dentist"]),
+    ),
+    (
+        "ricordami giovedì prossimo alle 9 di mandare il preventivo per Cittadellese",
+        None,
+        reminds(SATURDAY, Some("2026-10-22"), Some("09:00"), &["preventivo"]),
+    ),
+    (
+        "remind me at 8 to take the pills",
+        None,
+        reminds(SATURDAY, Some("2026-10-18"), Some("08:00"), &["pill"]),
+    ),
+    (
+        "ricordami il 3 novembre alle 15 della riunione del progetto CRM",
+        None,
+        reminds(SATURDAY, Some("2026-11-03"), Some("15:00"), &["riunione"]),
+    ),
+    (
+        "ricordami fra 10 minuti di controllare la lavatrice",
+        None,
+        reminds(SATURDAY, Some("2026-10-17"), Some("21:24"), &["lavatrice"]),
+    ),
+    (
+        "ricordami venerdì pomeriggio di sentire il commercialista",
+        None,
+        reminds(MONDAY, Some("2026-10-23"), Some("15:00"), &["commercialista"]),
+    ),
+    (
+        "ricordami stasera di chiamare la mamma",
+        None,
+        reminds(SATURDAY, Some("2026-10-17"), Some("18:00"), &["mamma"]),
+    ),
+    (
+        "ricordami dopodomani a mezzogiorno di ritirare il pacco",
+        None,
+        reminds(SATURDAY, Some("2026-10-19"), Some("12:00"), &["pacco"]),
+    ),
+    (
+        "remind me in 90 minutes to stretch",
+        None,
+        reminds(SATURDAY, Some("2026-10-17"), Some("22:44"), &["stretch"]),
+    ),
+    (
+        "ricordami il 2 alle 9 di pagare la bolletta",
+        None,
+        reminds(SATURDAY, Some("2026-11-02"), Some("09:00"), &["bolletta"]),
+    ),
+    (
+        "ricordami oggi alle 10 di chiamare la banca",
+        None,
+        reminds(SATURDAY, Some("2026-10-17"), Some("10:00"), &["banca"]),
+    ),
+    (
+        "ricordami tra una settimana di rinnovare il dominio",
+        None,
+        reminds(SATURDAY, Some("2026-10-24"), None, &["dominio"]),
+    ),
+    (
+        "aggiungi un promemoria per sabato prossimo: cena da Marco alle 20",
+        None,
+        reminds(MONDAY, Some("2026-10-24"), Some("20:00"), &["marco"]),
+    ),
+    // The controls (spec §Testing): an undated reminder, a weekday said on
+    // that weekday, a reminder for someone else, and selections that say
+    // "ricordami" or name a time, which are never asked for a reminder.
+    (
+        "ricordami di comprare il latte",
+        None,
+        reminds(SATURDAY, None, None, &["latte"]),
+    ),
+    (
+        "ricordami lunedì alle 10 di fare il backup",
+        None,
+        reminds(MONDAY, Some("2026-10-26"), Some("10:00"), &["backup"]),
+    ),
+    (
+        "scrivi una mail per ricordare a Luca la riunione di domani alle 15",
+        None,
+        says(It, &["luca", "riunione"]),
+    ),
+    (
+        "traduci in inglese",
+        Some("Ricordami di chiamare Luca domani alle 15."),
+        translates(En, &["luca", "tomorrow"], &["ricordami", "domani"]),
+    ),
+    (
+        "traduci in inglese",
+        Some("Ciao, ci vediamo domani alle 15."),
+        translates(En, &["tomorrow"], &["vediamo", "domani"]),
+    ),
 ];
+
+/// A request's Now: the reminder case's, else the Saturday.
+fn now_of(expect: &Expect) -> LocalNow {
+    let now = match expect {
+        Expect::Remind { now, .. } => now,
+        _ => SATURDAY,
+    };
+    let (date, time) = now.split_once(' ').unwrap();
+    LocalNow {
+        date: Date::parse(date).unwrap(),
+        time: Time::parse(time).unwrap(),
+    }
+}
 
 #[derive(Debug, Default)]
 struct Verdict {
@@ -375,6 +537,22 @@ fn grade(expect: &Expect, reply: &Reply) -> Verdict {
             problems: vec!["replied with text instead of opening".into()],
             ..Verdict::default()
         },
+        (Expect::Remind { .. }, Content::Text { .. }) => Verdict {
+            problems: vec!["replied with text instead of a reminder".into()],
+            ..Verdict::default()
+        },
+        (Expect::Open { .. } | Expect::Remind { .. }, Content::Call(call))
+            if call.name
+                != match expect {
+                    Expect::Open { .. } => tools::OPEN_URL,
+                    _ => tools::CREATE_REMINDER,
+                } =>
+        {
+            Verdict {
+                problems: vec![format!("called {}", call.name)],
+                ..Verdict::default()
+            }
+        }
         (
             Expect::Text {
                 kind,
@@ -398,6 +576,87 @@ fn grade(expect: &Expect, reply: &Reply) -> Verdict {
             verdict
         }
         (Expect::Open { hosts, has }, Content::Call(call)) => grade_page(hosts, has, call),
+        (
+            Expect::Remind {
+                day, time, title, ..
+            },
+            Content::Call(call),
+        ) => grade_reminder(*day, *time, title, call),
+    }
+}
+
+/// Words that put a day or a time in a title, which the prompt forbids.
+const WHEN_WORDS: &[&str] = &[
+    "oggi",
+    "domani",
+    "dopodomani",
+    "stasera",
+    "lunedì",
+    "martedì",
+    "mercoledì",
+    "giovedì",
+    "venerdì",
+    "sabato",
+    "domenica",
+    "today",
+    "tomorrow",
+    "tonight",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+];
+
+/// Parla's own validator, then the day and time exactly, and the title.
+fn grade_reminder(
+    day: Option<&str>,
+    time: Option<&str>,
+    keeps: &[&'static str],
+    call: &ToolCall,
+) -> Verdict {
+    let problems = match tools::validate(call, true) {
+        Err(refused) => vec![refused],
+        Ok(Tool::CreateReminder {
+            title,
+            day: got_day,
+            time: got_time,
+        }) => {
+            let mut problems = Vec::new();
+            let (got_day, got_time) = (
+                got_day.map(|day| day.to_string()),
+                got_time.map(|time| time.to_string()),
+            );
+            if got_day.as_deref() != day {
+                problems.push(format!("day {got_day:?}, not {day:?}"));
+            }
+            if got_time.as_deref() != time {
+                problems.push(format!("time {got_time:?}, not {time:?}"));
+            }
+            let lower = title.to_lowercase();
+            problems.extend(missing(&lower, keeps));
+            let dated = lower
+                .split(|c: char| !c.is_alphanumeric() && c != ':')
+                .any(|word| {
+                    WHEN_WORDS.contains(&word)
+                        || (!word.is_empty()
+                            && word.chars().all(|c| c.is_ascii_digit() || c == ':'))
+                });
+            if dated {
+                problems.push(format!("a day or time in the title {title:?}"));
+            }
+            problems
+        }
+        Ok(other) => vec![format!("{other:?}")],
+    };
+    Verdict {
+        kind_ok: true,
+        reply_kind_ok: false,
+        clean: false,
+        correct: problems.is_empty(),
+        problems,
     }
 }
 
@@ -473,8 +732,9 @@ fn grade_text(
 
 /// Parla's own validator, so a refused address fails as it would in the app.
 fn grade_page(hosts: &[&'static str], has: &[&'static str], call: &ToolCall) -> Verdict {
-    let problems = match tools::validate(call) {
+    let problems = match tools::validate(call, true) {
         Err(refused) => vec![refused],
+        Ok(Tool::CreateReminder { .. }) => vec!["a reminder".into()],
         Ok(Tool::OpenUrl(url)) => {
             let host = url.host_str().unwrap_or_default();
             let mut problems = Vec::new();
@@ -519,6 +779,14 @@ struct Sample {
 
 fn is_text(sample: &Sample) -> bool {
     matches!(CASES[sample.case].2, Expect::Text { .. })
+}
+
+fn is_page(sample: &Sample) -> bool {
+    matches!(CASES[sample.case].2, Expect::Open { .. })
+}
+
+fn is_reminder(sample: &Sample) -> bool {
+    matches!(CASES[sample.case].2, Expect::Remind { .. })
 }
 
 /// How many of the samples `within` scope `pass`.
@@ -576,23 +844,26 @@ fn table(samples: &[Sample]) -> String {
         format!("| {name} | {} |\n", cells.join(" | "))
     };
     let all = |_: &Sample| true;
-    let opens = |sample: &Sample| !is_text(sample);
     [
         format!(
             "| | `{}` |\n|---|{}\n",
             EFFORTS.join("` | `"),
             "---|".repeat(EFFORTS.len())
         ),
-        row("Outcome kind right (text vs `open_url`)", &|samples| {
-            share(samples, all, |sample| sample.verdict.kind_ok)
-        }),
+        row(
+            "Outcome kind right (text, `open_url` or `create_reminder`)",
+            &|samples| share(samples, all, |sample| sample.verdict.kind_ok),
+        ),
         row("Reply kind right (edit vs answer)", &|samples| {
             share(samples, is_text, |sample| sample.verdict.reply_kind_ok)
         }),
         row(
             "Pages right (http(s), plausible host and terms)",
-            &|samples| share(samples, opens, |sample| sample.verdict.correct),
+            &|samples| share(samples, is_page, |sample| sample.verdict.correct),
         ),
+        row("Reminders right (day, time, title)", &|samples| {
+            share(samples, is_reminder, |sample| sample.verdict.correct)
+        }),
         row("Text clean (no preamble, quotes or markdown)", &|samples| {
             share(samples, is_text, |sample| sample.verdict.clean)
         }),
@@ -606,7 +877,10 @@ fn table(samples: &[Sample]) -> String {
             times(samples, is_text)
         }),
         row("Reply time median / p90, `open_url`", &|samples| {
-            times(samples, opens)
+            times(samples, is_page)
+        }),
+        row("Reply time median / p90, `create_reminder`", &|samples| {
+            times(samples, is_reminder)
         }),
         row("Tokens in / out (cost)", &spend),
         row("Failed calls, left out above", &|samples| {
@@ -621,7 +895,7 @@ fn table(samples: &[Sample]) -> String {
 }
 
 #[test]
-#[ignore = "live: about 160 OpenAI Responses calls, under a cent"]
+#[ignore = "live: about 320 OpenAI Responses calls, about 2 cents"]
 fn the_eval_grades_every_case_at_each_effort() {
     let Some(key) = std::env::var("OPENAI_API_KEY")
         .ok()
@@ -631,8 +905,10 @@ fn the_eval_grades_every_case_at_each_effort() {
         return;
     };
     let defaults = CommandSettings::default();
+    let knob = |name| std::env::var(name).ok();
+    let reminders = knob("PARLA_EVAL_REMINDERS").as_deref() != Some("off");
     let request = |effort: &str, case: usize| {
-        let (instruction, selection, _) = &CASES[case];
+        let (instruction, selection, expect) = &CASES[case];
         Request {
             model: defaults.model.clone(),
             reasoning_effort: effort.into(),
@@ -640,14 +916,14 @@ fn the_eval_grades_every_case_at_each_effort() {
             selection: selection.map(Into::into),
             app: Some("notepad.exe".into()),
             // Fixed, so every eval sends the same requests.
-            date: "2026-10-17".into(),
+            now: now_of(expect),
+            reminders,
         }
     };
     // Untimed: opens the connection, as the app's pre-warm at the hold does.
     let _ = send(&key, &request(EFFORTS[0], 0));
 
     // To probe a flaky case: PARLA_EVAL_CASES=10,17 PARLA_EVAL_RUNS=10.
-    let knob = |name| std::env::var(name).ok();
     let repeats = knob("PARLA_EVAL_RUNS")
         .and_then(|repeats| repeats.parse().ok())
         .unwrap_or(RUNS);
@@ -660,6 +936,11 @@ fn the_eval_grades_every_case_at_each_effort() {
                 .collect()
         },
     );
+    // With the tool off, a reminder can't be right.
+    let cases: Vec<usize> = cases
+        .into_iter()
+        .filter(|&case| reminders || !matches!(CASES[case].2, Expect::Remind { .. }))
+        .collect();
 
     let mut samples = Vec::new();
     // The efforts take turns on each case, so network drift hits both alike.
@@ -929,6 +1210,56 @@ mod grading {
         assert!(!grade(&wiki, &opens("https://notwikipedia.org/wiki/Roma")).correct);
     }
 
+    fn reminder(title: &str, day: Option<&str>, time: Option<&str>) -> Reply {
+        reply(Content::Call(ToolCall {
+            name: tools::CREATE_REMINDER.into(),
+            arguments: serde_json::json!({ "title": title, "day": day, "time": time }).to_string(),
+        }))
+    }
+
+    #[test]
+    fn a_reminder_is_right_on_the_exact_day_time_and_title() {
+        let luca = reminds(SATURDAY, Some("2026-10-18"), Some("15:00"), &["luca"]);
+        let right = grade(
+            &luca,
+            &reminder("Chiamare Luca", Some("2026-10-18"), Some("15:00")),
+        );
+        assert!(right.kind_ok && right.correct, "{:?}", right.problems);
+        for wrong in [
+            reminder("Chiamare Luca", Some("2026-10-19"), Some("15:00")),
+            reminder("Chiamare Luca", Some("2026-10-18"), Some("15:30")),
+            reminder("Chiamare Luca", Some("2026-10-18"), None),
+            reminder("Chiamare Marco", Some("2026-10-18"), Some("15:00")),
+            reminder("Chiamare Luca domani", Some("2026-10-18"), Some("15:00")),
+            reminder(
+                "Chiamare Luca alle 15:00",
+                Some("2026-10-18"),
+                Some("15:00"),
+            ),
+            // Refused by Parla's validator, as in the app.
+            reminder("Chiamare Luca", Some("2026-02-30"), Some("15:00")),
+        ] {
+            let verdict = grade(&luca, &wrong);
+            assert!(verdict.kind_ok && !verdict.correct, "{wrong:?}");
+        }
+        let undated = reminds(SATURDAY, None, None, &["latte"]);
+        assert!(grade(&undated, &reminder("Comprare il latte", None, None)).correct);
+        // Text or a page instead of a reminder, or a reminder instead of
+        // either, is the wrong outcome kind.
+        assert!(!grade(&undated, &text("Comprare il latte.")).kind_ok);
+        assert!(!grade(&undated, &opens("https://example.com/")).kind_ok);
+        assert!(!grade(&FORMAL, &reminder("Chiamare", None, None)).kind_ok);
+        let wiki = opens_on(&["wikipedia.org"], &[]);
+        assert!(!grade(&wiki, &reminder("Leggere Roma", None, None)).kind_ok);
+    }
+
+    #[test]
+    fn a_reminder_case_is_said_at_its_own_now() {
+        let monday = reminds(MONDAY, None, None, &[]);
+        assert_eq!(now_of(&monday).line(), "Monday 2026-10-19 10:00");
+        assert_eq!(now_of(&FORMAL).line(), "Saturday 2026-10-17 21:14");
+    }
+
     #[test]
     fn the_table_has_a_column_per_effort_with_shares_times_and_cost() {
         let sample = |effort, case, ms, kind_ok, correct| Sample {
@@ -953,29 +1284,37 @@ mod grading {
             ..sample("low", 0, 0, false, false)
         };
         // Case 0 is a text.
-        let page = CASES
-            .iter()
-            .position(|(_, _, expect)| matches!(expect, Expect::Open { .. }))
-            .unwrap();
+        let first = |kind: fn(&Expect) -> bool| {
+            CASES
+                .iter()
+                .position(|(_, _, expect)| kind(expect))
+                .unwrap()
+        };
+        let page = first(|expect| matches!(expect, Expect::Open { .. }));
+        let remind = first(|expect| matches!(expect, Expect::Remind { .. }));
         let table = table(&[
             sample("none", 0, 1000, true, true),
             sample("none", page, 3000, false, false),
+            sample("none", remind, 5000, true, false),
             sample("low", 0, 2000, true, false),
             sample("low", page, 4000, true, true),
+            sample("low", remind, 6000, true, true),
             timeout,
         ]);
         assert_eq!(
             table,
             "| | `none` | `low` |\n|---|---|---|\n\
-             | Outcome kind right (text vs `open_url`) | 1/2 | 2/2 |\n\
+             | Outcome kind right (text, `open_url` or `create_reminder`) | 2/3 | 3/3 |\n\
              | Reply kind right (edit vs answer) | 1/1 | 0/1 |\n\
              | Pages right (http(s), plausible host and terms) | 0/1 | 1/1 |\n\
+             | Reminders right (day, time, title) | 0/1 | 1/1 |\n\
              | Text clean (no preamble, quotes or markdown) | 1/1 | 1/1 |\n\
              | Text correct (language, kept words, bullets) | 1/1 | 0/1 |\n\
-             | Reply time median / p90, all | 1.00 / 3.00 s | 2.00 / 4.00 s |\n\
+             | Reply time median / p90, all | 3.00 / 5.00 s | 4.00 / 6.00 s |\n\
              | Reply time median / p90, text | 1.00 / 1.00 s | 2.00 / 2.00 s |\n\
              | Reply time median / p90, `open_url` | 3.00 / 3.00 s | 4.00 / 4.00 s |\n\
-             | Tokens in / out (cost) | 2000000 / 200000 ($0.3000) | 2000000 / 200000 ($0.3000) |\n\
+             | Reply time median / p90, `create_reminder` | 5.00 / 5.00 s | 6.00 / 6.00 s |\n\
+             | Tokens in / out (cost) | 3000000 / 300000 ($0.4500) | 3000000 / 300000 ($0.4500) |\n\
              | Failed calls, left out above | 0 | 1 |\n"
         );
     }

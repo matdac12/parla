@@ -5,9 +5,10 @@
 //! the selection (PARLA-64), the empty-instruction rule, the LLM call,
 //! cancellation, giving the user's clipboard back, the Card the reply opens
 //! in (PARLA-81) and the history row, or running an allowlisted tool instead
-//! (PARLA-65). It never pastes: the Card's buttons do, on a click (ADR-0003).
-//! It talks to the desktop, the LLM, the browser and history through narrow
-//! ports, so it is tested with fakes and flow.rs supplies the real ones.
+//! (PARLA-65, PARLA-86). It never pastes: the Card's buttons do, on a click
+//! (ADR-0003). It talks to the desktop, the LLM, the browser, Traccia, the
+//! clock and history through narrow ports, so it is tested with fakes and
+//! flow.rs supplies the real ones.
 pub mod responses;
 pub mod tools;
 pub mod traccia;
@@ -26,6 +27,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
+use tools::Tool;
+use when::{LocalClock, When};
 
 /// The focused app and the clipboard, through the inserter.
 pub trait Desktop {
@@ -62,18 +65,28 @@ pub trait HistorySink {
     fn record(&self, record: DictationRecord);
 }
 
+/// Mattia's To-dos in Traccia (ADR-0004).
+pub trait Reminders {
+    /// One blocking `POST`, never retried.
+    fn create(&self, title: &str, when: &When) -> Result<traccia::Created, traccia::Error>;
+}
+
 pub struct Ports<'a> {
     pub desktop: &'a dyn Desktop,
     pub llm: &'a dyn Llm,
     pub browser: &'a dyn UrlOpener,
     pub history: &'a dyn HistorySink,
+    /// Some only while `command.reminders` is on: it offers `create_reminder`.
+    pub reminders: Option<&'a dyn Reminders>,
+    /// Turns a reminder's local day and time into UTC.
+    pub clock: &'a dyn LocalClock,
 }
 
 pub struct Run<'a> {
     pub settings: &'a CommandSettings,
     pub key_up: Instant,
-    /// Today, local `YYYY-MM-DD`, for the request.
-    pub date: String,
+    /// The local date and time at key-up, for the request.
+    pub now: when::LocalNow,
     /// Set by Esc, from key-up until the reply is in.
     pub cancelled: &'a AtomicBool,
     /// The hold hit the cap: the instruction is recorded but not sent.
@@ -278,21 +291,6 @@ pub fn read_selection(desktop: &dyn Desktop, joined: &AtomicBool) -> Selection {
     selection
 }
 
-/// Today, local `YYYY-MM-DD`.
-#[cfg(windows)]
-pub fn today() -> String {
-    // SAFETY: SYSTEMTIME is plain data, and GetLocalTime only fills it.
-    let mut now = unsafe { std::mem::zeroed() };
-    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut now) };
-    format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
-}
-
-/// Off Windows, where Parla does not run, no date.
-#[cfg(not(windows))]
-pub fn today() -> String {
-    String::new()
-}
-
 /// A text reply's kind (ADR-0003): it picks the Card's main button, never
 /// whether Parla pastes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -331,6 +329,8 @@ pub enum Outcome {
     Opened {
         host: String,
     },
+    /// `create_reminder` created this To-do: the pill says so.
+    Reminded(traccia::Created),
     Cancelled,
     Failed(Failure),
 }
@@ -387,6 +387,7 @@ pub fn run(
         Outcome::Silent => unreachable!("a silent run returned above"),
         Outcome::Shown(_) => CommandOutcome::Shown,
         Outcome::Opened { .. } => CommandOutcome::Opened,
+        Outcome::Reminded(_) => CommandOutcome::Created,
         Outcome::Cancelled => CommandOutcome::Cancelled,
         Outcome::Failed(_) => CommandOutcome::Failed,
     });
@@ -415,7 +416,8 @@ fn reply_and_act(
         instruction: record.text.clone(),
         selection: selection.text.clone(),
         app: selection.app.clone(),
-        date: run.date.clone(),
+        now: run.now,
+        reminders: ports.reminders.is_some(),
     };
     record.llm_model = Some(request.model.clone());
     let reply = ports.llm.reply(&request, run.cancelled);
@@ -461,25 +463,40 @@ fn run_tool(
     record: &mut DictationRecord,
     call: &responses::ToolCall,
 ) -> Outcome {
-    let tool = match tools::validate(call, false) {
+    let failed = |reason| Outcome::Failed(Failure::Command(ProviderError::Other(reason)));
+    let tool = match tools::validate(call, ports.reminders.is_some()) {
         Ok(tool) => tool,
-        Err(reason) => return Outcome::Failed(Failure::Command(ProviderError::Other(reason))),
+        Err(reason) => return failed(reason),
     };
-    let tools::Tool::OpenUrl(url) = tool else {
-        unreachable!("reminders are off")
-    };
-    match ports.browser.open(url.as_str()) {
-        Ok(()) => {
-            record.opened = Some(timing::elapsed_ms(run.key_up));
-            record.tool = Some(call.name.clone());
-            record.url = Some(url.to_string());
-            Outcome::Opened {
-                host: url.host_str().unwrap_or_default().into(),
+    match tool {
+        Tool::OpenUrl(url) => match ports.browser.open(url.as_str()) {
+            Ok(()) => {
+                record.opened = Some(timing::elapsed_ms(run.key_up));
+                record.tool = Some(call.name.clone());
+                record.url = Some(url.to_string());
+                Outcome::Opened {
+                    host: url.host_str().unwrap_or_default().into(),
+                }
+            }
+            Err(error) => failed(format!("could not open the page ({error}).")),
+        },
+        Tool::CreateReminder { title, day, time } => {
+            let Some(reminders) = ports.reminders else {
+                return failed("reminders are off.".into());
+            };
+            let when = when::resolve(day, time, run.now, ports.clock);
+            // Esc counted until the reply was in. From here on it is
+            // ignored: a To-do created after Esc would surprise.
+            match reminders.create(&title, &when) {
+                Ok(created) => {
+                    record.tool = Some(call.name.clone());
+                    record.url = Some(created.url.clone());
+                    record.reply = Some(created.summary());
+                    Outcome::Reminded(created)
+                }
+                Err(error) => failed(traccia::reminder_message(&error, &when, run.now.date)),
             }
         }
-        Err(error) => Outcome::Failed(Failure::Command(ProviderError::Other(format!(
-            "could not open the page ({error})."
-        )))),
     }
 }
 
@@ -490,9 +507,10 @@ mod tests {
     use crate::focus_probe::test_support::{answered, probe_on};
     use std::{
         cell::{Cell, RefCell},
-        sync::mpsc,
+        sync::{mpsc, Arc},
         time::SystemTime,
     };
+    use when::{Date, LocalNow, Time};
 
     #[test]
     fn the_buttons_follow_the_kind_the_selection_and_the_probe() {
@@ -730,7 +748,9 @@ mod tests {
         llm: FakeLlm,
         browser: FakeBrowser,
         history: FakeHistory,
-        cancelled: AtomicBool,
+        /// Some: reminders are on.
+        reminders: Option<FakeReminders>,
+        cancelled: Arc<AtomicBool>,
         settings: CommandSettings,
         /// Another app writes the clipboard after the read ended, before
         /// the run joins it.
@@ -744,7 +764,8 @@ mod tests {
                 llm: FakeLlm::new(reply),
                 browser: FakeBrowser::default(),
                 history: FakeHistory::default(),
-                cancelled: AtomicBool::new(false),
+                reminders: None,
+                cancelled: Arc::default(),
                 settings: CommandSettings::default(),
                 stray: None,
                 focus: None,
@@ -760,11 +781,16 @@ mod tests {
                 llm: &self.llm,
                 browser: &self.browser,
                 history: &self.history,
+                reminders: self
+                    .reminders
+                    .as_ref()
+                    .map(|reminders| reminders as &dyn Reminders),
+                clock: &RomeInOctober,
             };
             let input = Run {
                 settings: &self.settings,
                 key_up: Instant::now(),
-                date: "2026-10-17".into(),
+                now: saturday_evening(),
                 cancelled: &self.cancelled,
                 hold_error,
                 focus: self.focus.as_ref(),
@@ -835,7 +861,8 @@ mod tests {
                 instruction: "Scrivi un saluto breve".into(),
                 selection: None,
                 app: Some("notepad.exe".into()),
-                date: "2026-10-17".into(),
+                now: saturday_evening(),
+                reminders: false,
             }]
         );
         let [row] = &h.rows()[..] else {
@@ -1059,7 +1086,7 @@ mod tests {
         let request = &h.llm.requests.borrow()[0];
         assert_eq!(request.selection.as_deref(), Some("ciao a tutti"));
         assert_eq!(request.app.as_deref(), Some("notepad.exe"));
-        assert_eq!(request.date, "2026-10-17");
+        assert_eq!(request.now, saturday_evening());
         // Copied with Ctrl+Insert alone; the user's clipboard comes back once.
         assert_eq!(h.desktop.keys(), [CopyKey::CtrlInsert]);
         assert_eq!(h.writes(), ["user copy"]);
@@ -1313,14 +1340,6 @@ mod tests {
         assert_eq!(h.writes(), ["user copy"]);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn today_is_a_plain_iso_date() {
-        let today = today();
-        assert_eq!(today.len(), 10, "{today}");
-        assert!(today.starts_with("20") && today.as_bytes()[4] == b'-');
-    }
-
     #[test]
     fn a_copy_the_user_makes_during_the_run_is_kept() {
         let h = Harness::selecting(Err(ProviderError::Timeout), "ciao");
@@ -1440,5 +1459,272 @@ mod tests {
         assert!(row.error.as_deref().unwrap().contains("no default browser"));
         // `tool` and `url` describe a page that opened.
         assert!(row.tool.is_none() && row.url.is_none());
+    }
+
+    fn saturday_evening() -> LocalNow {
+        LocalNow {
+            date: Date::parse("2026-10-17").unwrap(),
+            time: Time::parse("21:14").unwrap(),
+        }
+    }
+
+    /// Rome before the clocks go back: UTC+2.
+    struct RomeInOctober;
+    impl LocalClock for RomeInOctober {
+        fn now(&self) -> LocalNow {
+            saturday_evening()
+        }
+        fn to_utc(&self, day: Date, time: Time) -> Option<String> {
+            Some(format!("{day}T{:02}:{:02}:00Z", time.hour - 2, time.minute))
+        }
+    }
+
+    /// Traccia: answers every POST with `result`; with `esc`, Esc is
+    /// pressed while the POST is on its way.
+    struct FakeReminders {
+        result: Result<traccia::Created, traccia::Error>,
+        created: RefCell<Vec<(String, When)>>,
+        esc: Option<Arc<AtomicBool>>,
+    }
+    impl FakeReminders {
+        fn answering(result: Result<traccia::Created, traccia::Error>) -> Self {
+            Self {
+                result,
+                created: RefCell::default(),
+                esc: None,
+            }
+        }
+    }
+    impl Reminders for FakeReminders {
+        fn create(&self, title: &str, when: &When) -> Result<traccia::Created, traccia::Error> {
+            self.created.borrow_mut().push((title.into(), when.clone()));
+            if let Some(esc) = &self.esc {
+                esc.store(true, Ordering::Release);
+            }
+            self.result.clone()
+        }
+    }
+
+    fn stored() -> traccia::Created {
+        traccia::Created {
+            id: "01K8TODO0000000000000000AB".into(),
+            url: "https://traccia.example.ts.net/personal?todo=01K8TODO0000000000000000AB".into(),
+            title: "Chiamare Luca".into(),
+            day: Some("2026-10-18".into()),
+            time: Some("15:00".into()),
+        }
+    }
+
+    fn remind(title: &str, day: Option<&str>, time: Option<&str>) -> Result<Reply, ProviderError> {
+        Ok(Reply {
+            content: Content::Call(responses::ToolCall {
+                name: tools::CREATE_REMINDER.into(),
+                arguments: serde_json::json!({ "title": title, "day": day, "time": time })
+                    .to_string(),
+            }),
+            tokens_in: Some(980),
+            tokens_out: Some(38),
+        })
+    }
+
+    impl Harness {
+        /// Reminders on, Traccia answering `result`.
+        fn reminding(
+            reply: Result<Reply, ProviderError>,
+            result: Result<traccia::Created, traccia::Error>,
+        ) -> Self {
+            let mut h = Self::selecting(reply, "ciao");
+            h.reminders = Some(FakeReminders::answering(result));
+            h
+        }
+        fn created(&self) -> Vec<(String, When)> {
+            self.reminders.as_ref().unwrap().created.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn a_reminder_call_creates_one_to_do_and_records_it() {
+        let h = Harness::reminding(
+            remind("Chiamare Luca", Some("2026-10-18"), Some("15:00")),
+            Ok(stored()),
+        );
+        let outcome = h.run("ricordami di chiamare Luca domani alle 15");
+        assert_eq!(outcome, Outcome::Reminded(stored()));
+        assert_eq!(
+            h.created(),
+            [(
+                "Chiamare Luca".to_string(),
+                When::At {
+                    day: Date::parse("2026-10-18").unwrap(),
+                    time: Time::parse("15:00").unwrap(),
+                    utc: Some("2026-10-18T13:00:00Z".into()),
+                }
+            )]
+        );
+        // The tool was offered, in a single round trip.
+        let requests = h.llm.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].reminders);
+        // The clipboard the copy borrowed comes back, and nothing is pasted.
+        assert_eq!(h.writes(), ["user copy"]);
+        let [row] = &h.rows()[..] else {
+            panic!("one row")
+        };
+        assert_eq!(row.outcome, Some(CommandOutcome::Created));
+        assert_eq!(row.tool.as_deref(), Some("create_reminder"));
+        assert_eq!(row.url.as_deref(), Some(stored().url.as_str()));
+        assert_eq!(
+            row.reply.as_deref(),
+            Some("Chiamare Luca · 2026-10-18 15:00")
+        );
+        assert_eq!((row.tokens_in, row.tokens_out), (Some(980), Some(38)));
+        assert!(row.error.is_none() && row.reply_kind.is_none() && row.pasted.is_none());
+        let json = serde_json::to_value(row).unwrap();
+        assert_eq!(json["outcome"], "created");
+        assert_eq!(json["tool"], "create_reminder");
+    }
+
+    #[test]
+    fn an_undated_reminder_is_an_anytime_to_do() {
+        let anytime = traccia::Created {
+            title: "Comprare il latte".into(),
+            day: None,
+            time: None,
+            ..stored()
+        };
+        let h = Harness::reminding(remind("Comprare il latte", None, None), Ok(anytime));
+        assert!(matches!(
+            h.run("ricordami di comprare il latte"),
+            Outcome::Reminded(_)
+        ));
+        assert_eq!(
+            h.created(),
+            [("Comprare il latte".to_string(), When::Anytime)]
+        );
+        assert_eq!(h.rows()[0].reply.as_deref(), Some("Comprare il latte"));
+    }
+
+    #[test]
+    fn esc_before_the_post_creates_nothing() {
+        let mut h = Harness::reminding(
+            remind("Chiamare Luca", Some("2026-10-18"), Some("15:00")),
+            Ok(stored()),
+        );
+        h.llm.late = true;
+        assert_eq!(h.run("ricordami di chiamare Luca"), Outcome::Cancelled);
+        assert!(h.created().is_empty());
+        assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Cancelled));
+        assert_eq!(h.writes(), ["user copy"]);
+    }
+
+    #[test]
+    fn esc_once_the_post_started_is_ignored() {
+        let mut h = Harness::reminding(
+            remind("Chiamare Luca", Some("2026-10-18"), Some("15:00")),
+            Ok(stored()),
+        );
+        h.reminders.as_mut().unwrap().esc = Some(h.cancelled.clone());
+        assert_eq!(
+            h.run("ricordami di chiamare Luca"),
+            Outcome::Reminded(stored())
+        );
+        assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Created));
+    }
+
+    #[test]
+    fn every_traccia_failure_fails_loudly_with_the_spec_message() {
+        let refused = |field: &str| traccia::Error::Refused {
+            code: Some("validation_error".into()),
+            fields: vec![field.into()],
+        };
+        let cases = [
+            (
+                remind("Chiamare la banca", Some("2026-10-17"), Some("10:00")),
+                refused("remindAt"),
+                "10:00 today has already passed.",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                refused("title"),
+                "Traccia refused the reminder (title).",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                traccia::Error::Unreachable,
+                "Traccia can't be reached. Is Tailscale on?",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                traccia::Error::Timeout(traccia::WRITE_TIMEOUT),
+                "Traccia didn't answer in 5 s.",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                traccia::Error::Token,
+                "Traccia rejected the token. Check it in Settings → Command mode.",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                traccia::Error::Scope,
+                "This Traccia token can't create To-dos (it needs the todos scope).",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                traccia::Error::Status(502),
+                "Traccia error (HTTP 502).",
+            ),
+            (
+                remind("Chiamare Luca", None, None),
+                traccia::Error::Missing,
+                "Add the Traccia URL and token first.",
+            ),
+        ];
+        for (reply, error, message) in cases {
+            let h = Harness::reminding(reply, Err(error));
+            assert_eq!(
+                h.run("ricordami di chiamare"),
+                Outcome::Failed(Failure::Command(ProviderError::Other(message.into()))),
+                "{message}"
+            );
+            assert_eq!(h.created().len(), 1, "one POST, no retry: {message}");
+            assert_eq!(h.writes(), ["user copy"], "{message}");
+            let row = &h.rows()[0];
+            assert_eq!(row.outcome, Some(CommandOutcome::Failed));
+            assert_eq!(row.error.as_deref(), Some(message));
+            assert!(row.tool.is_none() && row.url.is_none() && row.reply.is_none());
+        }
+    }
+
+    #[test]
+    fn a_reminder_the_validator_refuses_is_never_sent() {
+        for reply in [
+            remind("", None, None),
+            remind("Pagare", Some("2026-02-30"), None),
+            remind("Pagare", None, Some("25:00")),
+        ] {
+            let h = Harness::reminding(reply, Ok(stored()));
+            assert_eq!(
+                h.run("ricordami di pagare"),
+                Outcome::Failed(Failure::Command(ProviderError::Other(
+                    "the reminder could not be read.".into()
+                )))
+            );
+            assert!(h.created().is_empty());
+            assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Failed));
+        }
+    }
+
+    #[test]
+    fn with_reminders_off_the_tool_is_not_offered_and_a_stray_call_is_refused() {
+        let h = Harness::new(remind("Chiamare Luca", None, None));
+        let outcome = h.run("ricordami di chiamare Luca");
+        assert_eq!(
+            outcome,
+            Outcome::Failed(Failure::Command(ProviderError::Other(
+                "the reply asked for an unknown tool (create_reminder).".into()
+            )))
+        );
+        assert!(!h.llm.requests.borrow()[0].reminders);
+        assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Failed));
     }
 }
