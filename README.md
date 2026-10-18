@@ -438,8 +438,8 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   - **`create_reminder`** `{"title", "day", "time"}`, only with **Reminders in
     Traccia** on (PARLA-82; ADR-0004): "ricordami di chiamare Luca domani alle
     15" or "remind me next Monday morning to send the invoice" creates a
-    To-do in your Traccia Personal Space with `POST /v1/todos`, and the pill
-    shows **"Reminder set"** beside the check. The model gives the title and
+    To-do in your Traccia Personal Space with `POST /v1/todos`, and the
+    reminder Card confirms it (below). The model gives the title and
     the local day and time it heard (`YYYY-MM-DD`, `HH:MM`, each possibly
     null) against the request's `Now:` line; Parla decides the rest
     (`command_mode/when.rs`):
@@ -474,8 +474,29 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
     reached. Is Tailscale on?"), a token error, a missing scope, a server
     error, or a URL with the wrong http/https or port, which Parla never
     follows if it redirects. Esc counts until the reply is in; once the
-    request to Traccia has started it is ignored. The Card with Open and
-    Undo comes in a later release.
+    request to Traccia has started it is ignored.
+
+    **The reminder Card** (PARLA-88) opens above the check, tagged
+    **Reminder** with an orange dot and the instruction as its header. Its
+    body is the title as Traccia stored it (`@KEY` included), and a muted
+    second line is the day and time from Traccia's answer, not from the
+    request: `Sun 18/10 · 15:00`, `Today · 15:00`, `Today · no reminder` or
+    `Anytime · no reminder`, so a misheard day or an hour lost to DST shows.
+    - **Open** (filled) opens the To-do's panel in your default browser, only
+      if its address is on the configured Traccia URL.
+    - **Undo** deletes the To-do (`DELETE /v1/todos/{id}`, 5 s; it goes to
+      Traccia's Trash) while the Card stays up. Done, the Card closes and the
+      log says `Parla card: reminder undone`; failed, a "Command mode: Undo
+      failed: …" notification appears and the Card stays, its buttons back
+      and no longer counting down, so you can try again or Open. History
+      keeps the row as `created`.
+    - **✕** dismisses it. There is no Copy: the text stays selectable.
+    - It is the one Card that closes itself: a ring beside the tag turns
+      once, then fills its circle over 5 s, and the Card and the check fade
+      and slide away (300 ms). Hovering does not pause it. A click, or the
+      next session, closes it sooner. With **reduce motion** on in Windows
+      there is no ring and no fade: the Card stays still for its 5 s, then
+      disappears.
 - An empty or silent instruction ends quietly: no LLM call and no row.
 - A network error, a timeout, an API error, a reply cut off by the token cap
   or an empty reply shows the red cross and a "Command mode: …" notification,
@@ -614,7 +635,8 @@ clear the field. `TRACCIA_URL` and `TRACCIA_TOKEN` override
 `providers.traccia` for the live test only
 (`cargo test --locked --lib commands::traccia -- --ignored --nocapture`,
 which otherwise reads `providers.traccia` from settings.json without writing
-it).
+it). Its write tests create `[parla-test]` To-dos with no Reminder, or one in
+2027, and delete them, one through the reminder Card's Undo.
 
 ### OpenAI
 
