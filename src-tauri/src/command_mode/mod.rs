@@ -10,6 +10,7 @@
 //! ports, so it is tested with fakes and flow.rs supplies the real ones.
 pub mod responses;
 pub mod tools;
+pub mod traccia;
 
 pub use crate::inserter::Borrowed;
 use crate::{

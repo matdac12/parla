@@ -1,0 +1,10 @@
+{
+  "items": [
+    {"id": "01J0000000000000000000CRM0", "key": "CRM", "name": "CRM", "status": "active", "description": null},
+    {"id": "01J0000000000000000000CIT0", "key": "CIT", "name": "Cittadellese", "status": "paused"},
+    {"id": "01J0000000000000000000OLD0", "key": "OLD", "name": "Old site", "status": "completed"},
+    {"id": "01J0000000000000000000NOP0", "key": "NOP", "name": "Dropped idea", "status": "canceled"},
+    {"id": "01J000000000000000000PARLA", "key": "PARLA", "name": "Parla", "status": "active"}
+  ],
+  "nextCursor": null
+}

@@ -160,12 +160,13 @@ fn select_provider_with(
 // Caller holds SaveLock; the settings RwLock is held only to snapshot/commit.
 fn save_with(
     shared: &std::sync::RwLock<Settings>,
-    requested: Settings,
+    mut requested: Settings,
     persist: impl FnOnce(&Settings) -> Result<(), String>,
     apply: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<SaveResult, String> {
     settings::validate_vocabulary(&requested.vocabulary)?;
     settings::command_chord(&requested)?;
+    crate::command_mode::traccia::validate_settings(&mut requested)?;
     let previous = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
     persist(&requested)?;
     // Model and effort are read per command run; only the chord needs applying.
@@ -349,6 +350,7 @@ mod tests {
                 hotkey: hotkey.into(),
                 model: "gpt-6-luna-test".into(),
                 reasoning_effort: "none".into(),
+                reminders: false,
             },
             ..Settings::default()
         }
@@ -424,6 +426,76 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shared.read().unwrap().command.hotkey, "Ctrl+Alt");
+    }
+
+    fn reminders(base_url: &str, token: &str) -> Settings {
+        let mut settings = command_mode(true, "LCtrl+Shift");
+        settings.command.reminders = true;
+        settings.providers.insert(
+            "traccia".into(),
+            serde_json::json!({"base_url": base_url, "token": token}),
+        );
+        settings
+    }
+
+    #[test]
+    fn reminders_on_without_a_traccia_url_and_token_is_refused_and_not_saved() {
+        let shared = RwLock::new(Settings::default());
+        let mut no_section = command_mode(true, "LCtrl+Shift");
+        no_section.command.reminders = true;
+        for requested in [
+            no_section,
+            reminders("", "test-token"),
+            reminders("https://traccia.example.ts.net", " "),
+        ] {
+            let error = save_with(
+                &shared,
+                requested,
+                |_| panic!("reminders without a connection persisted"),
+                |_| panic!("reminders without a connection applied"),
+            )
+            .unwrap_err();
+            assert!(error.contains("Traccia URL and token"), "{error}");
+        }
+        assert!(!shared.read().unwrap().command.reminders);
+        save_with(
+            &shared,
+            reminders("https://traccia.example.ts.net", "test-token"),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(shared.read().unwrap().command.reminders);
+    }
+
+    #[test]
+    fn the_traccia_url_is_saved_trimmed_without_a_trailing_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let shared = RwLock::new(Settings::default());
+        save_with(
+            &shared,
+            reminders("  https://traccia.example.ts.net/  ", "test-token"),
+            |value| settings::save(&path, value),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let saved = settings::load(&path).unwrap();
+        assert_eq!(
+            saved.providers["traccia"]["base_url"],
+            "https://traccia.example.ts.net"
+        );
+        assert_eq!(saved.providers["traccia"]["token"], "test-token");
+        assert_eq!(
+            shared.read().unwrap().providers["traccia"]["base_url"],
+            "https://traccia.example.ts.net"
+        );
+        // Not http(s): refused even with reminders off, so it is never stored.
+        let mut bad = reminders("traccia.example.ts.net", "test-token");
+        bad.command.reminders = false;
+        let error =
+            save_with(&shared, bad, |_| panic!("a bad URL persisted"), |_| Ok(())).unwrap_err();
+        assert!(error.contains("http:// or https://"), "{error}");
     }
 
     #[test]

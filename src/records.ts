@@ -98,8 +98,10 @@ export interface Settings {
   dim_other_audio: boolean;
   dim_audio_level: number;
   /** Command mode (the Settings "Command mode" card). `hotkey` is a modifier
-   *  hold such as "LCtrl+Shift"; `reasoning_effort` is "none" or "low". */
-  command: { enabled: boolean; hotkey: string; model: string; reasoning_effort: string };
+   *  hold such as "LCtrl+Shift"; `reasoning_effort` is "none" or "low";
+   *  `reminders` is the create_reminder tool, which needs `providers.traccia`
+   *  (`base_url`, `token`). */
+  command: { enabled: boolean; hotkey: string; model: string; reasoning_effort: string; reminders: boolean };
   providers: Record<string, Record<string, unknown>>;
 }
 

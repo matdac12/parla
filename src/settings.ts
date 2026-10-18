@@ -99,6 +99,14 @@ const els = {
   commandWarning: byId<HTMLParagraphElement>("command-hotkey-warning"),
   commandModel: byId<HTMLInputElement>("command-model"),
   commandEffort: byId<HTMLSelectElement>("command-effort"),
+  commandReminders: byId<HTMLInputElement>("command-reminders"),
+  remindersNeeds: byId<HTMLParagraphElement>("command-reminders-needs"),
+  tracciaUrl: byId<HTMLInputElement>("traccia-url"),
+  tracciaToken: byId<HTMLInputElement>("traccia-token"),
+  tracciaTokenRow: byId<HTMLDivElement>("traccia-token-row"),
+  tracciaTest: byId<HTMLButtonElement>("traccia-test"),
+  tracciaResult: byId<HTMLParagraphElement>("traccia-result"),
+  tracciaWarning: byId<HTMLParagraphElement>("traccia-warning"),
   status: byId<HTMLSpanElement>("status"),
   savebar: byId<HTMLDivElement>("savebar"),
   discard: byId<HTMLButtonElement>("discard"),
@@ -576,6 +584,53 @@ function renderCommandAvailability(): void {
   // Without a key it can only be turned off, never on.
   els.commandEnabled.disabled = !keySet && !settings.command.enabled;
   els.commandKeyHint.hidden = keySet;
+  // Reminders need command mode and a Traccia connection; save_settings
+  // refuses them on without a URL and a token. Once on, they can be turned off.
+  const ready = settings.command.enabled && tracciaField("base_url") !== "" && tracciaField("token") !== "";
+  els.commandReminders.disabled = !ready && !settings.command.reminders;
+  els.remindersNeeds.hidden = ready;
+}
+
+/** A `providers.traccia` field as typed, trimmed; "" when unset. */
+function tracciaField(key: "base_url" | "token"): string {
+  const value = state.settings?.providers.traccia?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+let tracciaCheck = 0;
+
+/** Test connection with the URL and token as typed, saved or not. */
+async function testTraccia(): Promise<void> {
+  const token = ++tracciaCheck;
+  els.tracciaTest.disabled = true;
+  showTracciaResult("Testing…", "");
+  try {
+    const result = await invoke<{ message: string; warning: string | null }>("test_traccia", {
+      baseUrl: tracciaField("base_url"),
+      token: tracciaField("token"),
+    });
+    if (token !== tracciaCheck) return;
+    showTracciaResult(result.message, "success", result.warning);
+  } catch (error) {
+    if (token !== tracciaCheck) return;
+    showTracciaResult(String(error), "error");
+  } finally {
+    if (token === tracciaCheck) els.tracciaTest.disabled = false;
+  }
+}
+
+function showTracciaResult(text: string, kind: "success" | "error" | "", warning: string | null = null): void {
+  els.tracciaResult.textContent = text;
+  els.tracciaResult.className = kind ? `status provider-status status-${kind}` : "status provider-status";
+  els.tracciaWarning.textContent = warning ?? "";
+  els.tracciaWarning.hidden = warning === null;
+}
+
+/** An edit makes the last test's result stale. */
+function clearTracciaResult(): void {
+  tracciaCheck += 1;
+  els.tracciaTest.disabled = false;
+  showTracciaResult("", "");
 }
 
 /** The (command, dictation) hotkeys last checked, so edits elsewhere in the
@@ -808,6 +863,7 @@ async function onSettingsChanged(): Promise<void> {
   const texts = [
     [els.hotkey, "hotkey"], [els.delay, "restore_delay_ms"], [els.vocabulary, "vocabulary"],
     [els.commandHotkey, "command"], [els.commandModel, "command"],
+    [els.tracciaUrl, "providers"], [els.tracciaToken, "providers"],
   ] as const;
   const typed = texts.map(([input]) => input.value);
   fillForm(state.settings);
@@ -837,6 +893,10 @@ function fillForm(settings: Settings): void {
   els.commandHotkey.value = settings.command.hotkey;
   els.commandModel.value = settings.command.model || DEFAULT_COMMAND_MODEL;
   els.commandEffort.value = settings.command.reasoning_effort;
+  els.commandReminders.checked = settings.command.reminders;
+  const traccia = settings.providers.traccia;
+  els.tracciaUrl.value = typeof traccia?.base_url === "string" ? traccia.base_url : "";
+  els.tracciaToken.value = typeof traccia?.token === "string" ? traccia.token : "";
 }
 
 function wireForm(): void {
@@ -875,6 +935,22 @@ function wireForm(): void {
     state.settings.command.reasoning_effort = els.commandEffort.value;
     updateDirty();
   });
+  els.commandReminders.addEventListener("change", () => {
+    if (!state.settings) return;
+    state.settings.command.reminders = els.commandReminders.checked;
+    updateDirty();
+  });
+  // Stored as typed; save_settings trims the URL and drops a trailing slash.
+  for (const [input, key] of [[els.tracciaUrl, "base_url"], [els.tracciaToken, "token"]] as const) {
+    input.addEventListener("input", () => {
+      if (!state.settings) return;
+      providerSection(state.settings, "traccia")[key] = input.value;
+      clearTracciaResult();
+      updateDirty();
+    });
+  }
+  els.tracciaTokenRow.append(revealToggle(els.tracciaToken));
+  els.tracciaTest.addEventListener("click", () => void testTraccia());
   els.delay.addEventListener("input", () => {
     if (!state.settings) return;
     const value = Number.parseInt(els.delay.value, 10);

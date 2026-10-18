@@ -94,6 +94,7 @@ pub fn run() {
             commands::settings::select_provider,
             commands::settings::select_model,
             commands::settings::check_command_hotkey,
+            commands::traccia::test_traccia,
             commands::history::get_history,
             commands::history::clear_history,
             commands::card::card_bounds,
