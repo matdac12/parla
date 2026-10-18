@@ -451,10 +451,23 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
       has passed (an earlier day fails as past);
     - neither is an Anytime To-do with no Reminder.
 
+    "…il preventivo per Cittadellese" or "…del progetto CRM" puts the
+    Project's `@KEY` in the title (`Mandare il preventivo @CIT`), which
+    Traccia turns into the Project's chip. Parla keeps your active and paused
+    Projects in memory (`GET /v1/projects`, 2 s): the list is fetched in the
+    background when you confirm a command hold, only with the tool on and
+    only when it is missing or older than 10 minutes, and a failed fetch keeps
+    the last one. Nothing is fetched at startup or for a dictation. A run
+    uses the list in hand; only the first one after starting Parla, if the
+    fetch is still going, waits for it, at most 500 ms. The request lists
+    them under `Projects in Traccia (KEY: Name):`, one `KEY: Name` line each
+    after `Now:`, never in the tool's schema, and the model may only use a
+    listed key. With no list yet, the To-do gets no `@KEY`.
+
     With the tool on, the system prompt gets its rules (only the instruction
     line asks for a reminder, never a selection; a weekday means the next
-    one; stasera is 18:00) and the request says `Now: Saturday 2026-10-17
-    21:14` instead of `Date: 2026-10-17`. Off, the request is exactly as
+    one; stasera is 18:00; only a listed `@KEY`) and the request says `Now:
+    Saturday 2026-10-17 21:14` instead of `Date: 2026-10-17`. Off, the request is exactly as
     before. Traccia has 5 s to answer; nothing is queued or retried. A time
     already past fails with "15:00 today has already passed.", and the other
     failures with their own message: Tailscale off ("Traccia can't be
@@ -506,18 +519,21 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
 #### The command mode eval
 
 `src-tauri/tests/command_eval.rs` is a live eval of the built-in system prompt
-and the tools, text only, never audio. It sends 53 fixed IT/EN instructions
+and the tools, text only, never audio. It sends 58 fixed IT/EN instructions
 (rewrite, correct, shorten, translate both ways, bullets, an injection and
 selections that only mention searching, answers with nothing selected, a
 value to insert, questions about a selection, open a page, search, and 19
 reminders with their controls: an undated one, a weekday said on that
 weekday, an email reminding someone else, and selections that say
-"ricordami") through the real request builder, parser and tool validators,
-with reminders on and a fixed Now, 3 times at effort `none` and 3 at `low`,
+"ricordami"; and 5 with Projects: listed ones by name or key, and two that
+aren't listed) through the real request builder, parser and tool validators,
+with reminders on, a fixed Now and a fixed Projects list (`CRM`, `CIT:
+Cittadellese`, `PARLA: Parla`), 3 times at effort `none` and 3 at `low`,
 taking turns. Each reply is graded: the outcome kind (text, `open_url` or
 `create_reminder`); for a page, an http(s) address Parla would open on a
 plausible host with the expected terms; for a reminder, the exact day and
-time and a title with the expected words and no day or time; for a text, its `kind` (rewrites, translations,
+time, a title with the expected words and no day or time, and the listed
+Project's `@KEY` or none at all; for a text, its `kind` (rewrites, translations,
 drafts and inserted values are edits; questions are answers), no markdown,
 stray spaces or leaked tags, for an edit no preamble or wrapping quotes, plus
 a cheap correctness check (the language, words a rewrite must keep, the
@@ -535,9 +551,11 @@ $env:OPENAI_API_KEY = "sk-..."
 cargo test --locked --test command_eval -- --ignored --nocapture
 ```
 
-About 320 calls, 8 minutes and about 2 cents. Without the key it skips.
+About 350 calls, 8 minutes and about 4 cents. Without the key it skips.
 `PARLA_EVAL_REMINDERS=off` sends the requests as with the tool off (the
-request before PARLA-86) and skips the reminder cases.
+request before PARLA-86) and skips the reminder cases;
+`PARLA_EVAL_PROJECTS=off` sends no Projects list, as before the first fetch,
+and then expects no `@KEY` in any title.
 To probe a flaky case, `PARLA_EVAL_CASES=10,17` picks cases by index and
 `PARLA_EVAL_RUNS=10` sets the repeats. Time it only on the machine lock turn
 (see `AGENTS.md`). The grading itself is tested offline by `cargo test`.

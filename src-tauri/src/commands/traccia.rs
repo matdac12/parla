@@ -77,6 +77,28 @@ mod tests {
 
     #[test]
     #[ignore = "calls the real Traccia over the tailnet"]
+    fn live_the_projects_cache_fetches_the_real_list() {
+        use std::time::{Duration, Instant};
+        let Some(config) = live_config() else { return };
+        let cache: &'static traccia::ProjectsCache =
+            Box::leak(Box::new(traccia::ProjectsCache::new()));
+        let started = Instant::now();
+        cache.refresh_if_stale(started, move || traccia::Client::new(&config).projects());
+        // The run's wait is 500 ms; a cold TLS handshake may take longer here.
+        let projects = cache.snapshot(Duration::from_secs(3));
+        println!(
+            "{} projects in {} ms:",
+            projects.len(),
+            started.elapsed().as_millis()
+        );
+        for project in &projects {
+            println!("  {}: {}", project.key, project.name);
+        }
+        assert!(!projects.is_empty());
+    }
+
+    #[test]
+    #[ignore = "calls the real Traccia over the tailnet"]
     fn live_a_wrong_token_is_rejected() {
         let Some(config) = live_config() else { return };
         let error = test_connection(&config.base_url, "test-token").unwrap_err();
