@@ -294,12 +294,21 @@ impl Created {
     }
 }
 
-/// Whether `url` is a page of the Traccia at `base_url` (normalised, so with
-/// no trailing slash): Open goes nowhere else.
+/// Whether `url` is a page of the Traccia at `base_url`: the same scheme,
+/// host and port, parsed (so case and a default port don't matter), and
+/// under its path. Open goes nowhere else.
 pub fn on_base_url(url: &str, base_url: &str) -> bool {
-    !base_url.is_empty()
+    let (Ok(url), Ok(base)) = (reqwest::Url::parse(url), reqwest::Url::parse(base_url)) else {
+        return false;
+    };
+    let prefix = base.path().trim_end_matches('/');
+    url.scheme() == base.scheme()
+        && url.host_str().is_some()
+        && url.host_str() == base.host_str()
+        && url.port_or_known_default() == base.port_or_known_default()
         && url
-            .strip_prefix(base_url)
+            .path()
+            .strip_prefix(prefix)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
@@ -449,15 +458,18 @@ impl<'a> Client<'a> {
     }
 
     /// `DELETE /v1/todos/{id}`: the Card's Undo, a soft delete Traccia can
-    /// restore from its Trash. An id that isn't a plain token (it came from
-    /// Traccia's reply) is never put in the path.
+    /// restore from its Trash. A 404 means it is gone already (an Undo that
+    /// timed out after Traccia had it), so it counts as done. An id that isn't
+    /// a plain token (it came from Traccia's reply) is never put in the path.
     pub fn undo(&self, id: &str) -> Result<(), Error> {
         let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
         if id.is_empty() || !id.chars().all(plain) {
             return Err(Error::Unreadable);
         }
-        self.send(http()?.delete(self.url(&format!("/v1/todos/{id}"))))
-            .map(drop)
+        match self.send(http()?.delete(self.url(&format!("/v1/todos/{id}")))) {
+            Ok(_) | Err(Error::Status(404)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// The open To-dos' titles (the first 250), for the live tests.
@@ -1159,10 +1171,8 @@ mod tests {
         assert!(head
             .to_ascii_lowercase()
             .contains("authorization: bearer test-token\r\n"));
-        assert_eq!(
-            client.undo("01K8TODO0000000000000000AB"),
-            Err(Error::Status(404))
-        );
+        // Gone already (an Undo that timed out after Traccia got it): undone.
+        assert_eq!(client.undo("01K8TODO0000000000000000AB"), Ok(()));
     }
 
     #[test]
@@ -1180,12 +1190,30 @@ mod tests {
         let todo = format!("{URL}/personal?todo=01K8TODO0000000000000000AB");
         assert!(on_base_url(&todo, URL));
         assert!(on_base_url(URL, URL));
+        // The same origin, written another way in Settings.
+        assert!(on_base_url(&todo, "https://Traccia.Example.ts.net"));
+        assert!(on_base_url(&todo, "https://traccia.example.ts.net:443"));
+        // Under a path prefix, and only under it.
+        assert!(on_base_url(
+            "https://host.example.ts.net/traccia/personal?todo=1",
+            "https://host.example.ts.net/traccia"
+        ));
+        assert!(!on_base_url(
+            "https://host.example.ts.net/tracciax/personal",
+            "https://host.example.ts.net/traccia"
+        ));
+        assert!(!on_base_url(
+            "https://host.example.ts.net/personal",
+            "https://host.example.ts.net/traccia"
+        ));
         for other in [
             "https://evil.example.com/personal?todo=1",
             "https://traccia.example.ts.net.evil.com/personal",
             "https://traccia.example.ts.netx/personal",
             "http://traccia.example.ts.net/personal",
             "https://traccia.example.ts.net@evil.com/",
+            "https://traccia.example.ts.net:8443/personal",
+            "javascript:alert(1)",
             "",
         ] {
             assert!(!on_base_url(other, URL), "{other}");

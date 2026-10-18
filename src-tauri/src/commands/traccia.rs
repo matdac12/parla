@@ -189,8 +189,8 @@ mod tests {
         assert_eq!(undone, Ok(()));
         let open = client.open_titles().unwrap();
         assert!(!open.iter().any(|open| open == title), "left open");
-        // Undone already: Traccia says so, and the Card would keep itself.
-        println!("a second undo: {:?}", client.undo(&created.id));
+        // Undone already: Traccia's 404 counts as done.
+        assert_eq!(client.undo(&created.id), Ok(()));
     }
 
     #[test]

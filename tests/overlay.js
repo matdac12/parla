@@ -126,9 +126,15 @@ await check("only its own generation's leave fades the card and the check", asyn
     assert(fading !== undefined && fading.effect.getTiming().duration === 300, "The Card does not fade over 300 ms");
     assert(named(pill, "pill-leave") !== undefined, "The check does not go with the Card");
   }
+  // A click can't race the close: the fading Card takes none.
+  assert(getComputedStyle(card).pointerEvents === "none", "The fading Card still takes clicks");
+  // Rust closes it, then hides the window: the faded check must not come back.
   await emit("card", null);
   await settle();
-  assert(card.hidden && !root.hasAttribute("data-leaving"), "Closing left the leave on");
+  assert(card.hidden && root.hasAttribute("data-leaving"), "Closing brought the faded check back");
+  await emit("phase", "recording");
+  await settle();
+  assert(!root.hasAttribute("data-leaving"), "The next session's pill stayed faded");
 });
 await check("Undo stops the countdown, and a failed Undo gives the buttons back with no ring", async () => {
   await emit("card", { generation: 8, card: reminder, countdown: true });

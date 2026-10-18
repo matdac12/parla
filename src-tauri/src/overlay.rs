@@ -332,9 +332,11 @@ fn hide(app: &tauri::AppHandle) {
 struct ShownCard {
     generation: u64,
     card: crate::card::Card,
-    /// An Undo is running: the countdown leaves the Card up, and a second
-    /// Undo is ignored.
+    /// An Undo is running: a second Undo is ignored.
     held: bool,
+    /// A reminder's countdown will close it. An Undo stops it for good: a
+    /// Card whose Undo failed waits for a click, like any Card.
+    counting: bool,
     /// The window's position and scale, when it could be placed. Read by the
     /// Windows cursor thread only, like `bounds`.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -403,10 +405,10 @@ fn closed(app: &tauri::AppHandle, generation: u64) {
     }
 }
 
-/// The Card of `generation`, unless an Undo holds it.
-fn live(slot: &mut Option<ShownCard>, generation: u64) -> Option<&mut ShownCard> {
+/// The Card of `generation`, while its countdown runs.
+fn counting(slot: &mut Option<ShownCard>, generation: u64) -> Option<&mut ShownCard> {
     slot.as_mut()
-        .filter(|s| s.generation == generation && !s.held)
+        .filter(|s| s.generation == generation && s.counting)
 }
 
 /// Undo's click: the To-do of the Card of `generation`, which stays open and
@@ -416,25 +418,28 @@ pub fn hold_card(generation: u64) -> Option<crate::card::Todo> {
 }
 
 fn hold(slot: &mut Option<ShownCard>, generation: u64) -> Option<crate::card::Todo> {
-    let shown = live(slot, generation)?;
+    let shown = slot
+        .as_mut()
+        .filter(|s| s.generation == generation && !s.held)?;
     let todo = shown.card.todo.clone()?;
     shown.held = true;
+    shown.counting = false;
     Some(todo)
 }
 
 /// After a failed Undo: the Card of `generation` again, its buttons back and
 /// no countdown. It waits for a click or the next session, like any Card.
 pub fn keep_card(app: &tauri::AppHandle, generation: u64) {
-    let view = shown_card()
-        .as_mut()
-        .filter(|s| s.generation == generation)
-        .map(|shown| {
-            shown.held = false;
-            view(generation, &shown.card, false)
-        });
+    let view = release(&mut shown_card(), generation).map(|card| view(generation, card, false));
     if let Some(view) = view {
         let _ = app.emit_to(LABEL, "card", view);
     }
+}
+
+fn release(slot: &mut Option<ShownCard>, generation: u64) -> Option<&crate::card::Card> {
+    let shown = slot.as_mut().filter(|s| s.generation == generation)?;
+    shown.held = false;
+    Some(&shown.card)
 }
 
 /// What the page renders: the Card, and whether its countdown ring runs.
@@ -442,10 +447,10 @@ fn view(generation: u64, card: &crate::card::Card, countdown: bool) -> serde_jso
     serde_json::json!({"generation": generation, "card": card, "countdown": countdown})
 }
 
-/// The countdown's end: the Card of `generation`, unless an Undo holds it or
-/// it is gone (a click, or the next session, closed it first).
+/// The countdown's end: the Card of `generation`, unless an Undo stopped its
+/// countdown or it is gone (a click, or the next session, closed it first).
 fn expire(slot: &mut Option<ShownCard>, generation: u64) -> Option<ShownCard> {
-    live(slot, generation)?;
+    counting(slot, generation)?;
     slot.take()
 }
 
@@ -458,7 +463,7 @@ fn count_down(app: &tauri::AppHandle, generation: u64) {
         .name("parla-card-countdown".into())
         .spawn(move || {
             std::thread::sleep(CARD_COUNTDOWN);
-            if live(&mut shown_card(), generation).is_none() {
+            if counting(&mut shown_card(), generation).is_none() {
                 return;
             }
             let _ = app.emit_to(LABEL, "card-leave", generation);
@@ -593,6 +598,7 @@ impl Overlay {
             generation,
             card,
             held: false,
+            counting: countdown,
             placed: None,
             bounds: None,
         });
@@ -656,7 +662,7 @@ impl Drop for Overlay {
 
 #[cfg(test)]
 mod tests {
-    use super::{dismissable, expire, hold, Bounds, ShownCard};
+    use super::{dismissable, expire, hold, release, Bounds, ShownCard};
     use crate::card::Card;
     use tauri::PhysicalPosition;
 
@@ -671,9 +677,24 @@ mod tests {
                 "https://traccia.example.ts.net/personal?todo=01K8TODO0000000000000000AB".into(),
             ),
             held: false,
+            counting: true,
             placed: None,
             bounds: None,
         })
+    }
+
+    #[test]
+    fn a_failed_undo_leaves_the_card_up_with_no_countdown() {
+        // Traccia answered the Undo fast, well inside the 5 s.
+        let mut slot = shown(5);
+        assert!(hold(&mut slot, 5).is_some());
+        assert!(release(&mut slot, 5).is_some());
+        // The old timer runs out: the Card stays for a retry.
+        assert!(expire(&mut slot, 5).is_none());
+        assert!(slot.is_some());
+        assert!(hold(&mut slot, 5).is_some());
+        // Another session's Card is never released.
+        assert!(release(&mut slot, 4).is_none());
     }
 
     #[test]

@@ -483,10 +483,12 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
     request: `Sun 18/10 · 15:00`, `Today · 15:00`, `Today · no reminder` or
     `Anytime · no reminder`, so a misheard day or an hour lost to DST shows.
     - **Open** (filled) opens the To-do's panel in your default browser, only
-      if its address is on the configured Traccia URL.
+      if its address is on the configured Traccia URL (same scheme, host and
+      port, under its path); otherwise a notification says nothing opened.
     - **Undo** deletes the To-do (`DELETE /v1/todos/{id}`, 5 s; it goes to
       Traccia's Trash) while the Card stays up. Done, the Card closes and the
-      log says `Parla card: reminder undone`; failed, a "Command mode: Undo
+      log says `Parla card: reminder undone` (a 404, gone already, counts as
+      done); failed, a "Command mode: Undo
       failed: …" notification appears and the Card stays, its buttons back
       and no longer counting down, so you can try again or Open. History
       keeps the row as `created`.

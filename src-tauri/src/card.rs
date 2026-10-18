@@ -185,11 +185,16 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
             let base_url = traccia::TracciaConfig::resolved(&settings())
                 .ok()
                 .map(|config| config.base_url);
-            open(
-                &card,
-                base_url.as_deref(),
-                &crate::command_mode::tools::DefaultBrowser,
-            )
+            let browser = crate::command_mode::tools::DefaultBrowser;
+            open(&card, base_url.as_deref(), &browser)
+                .map(String::from)
+                .unwrap_or_else(|message| {
+                    crate::failure::notify_command_error(
+                        app,
+                        &crate::provider::ProviderError::Other(message.clone()),
+                    );
+                    message
+                })
         }),
         Action::Dismiss => take().map(|_| "dismissed".into()),
     };
@@ -199,20 +204,25 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
 }
 
 /// Open: the To-do's panel, only if it is on the configured Traccia
-/// (`base_url`). Returns the log line, which never names the url.
-fn open(card: &Card, base_url: Option<&str>, browser: &dyn UrlOpener) -> String {
+/// (`base_url`). The log line, or why nothing opened (for the notification
+/// too); neither names the url.
+fn open(
+    card: &Card,
+    base_url: Option<&str>,
+    browser: &dyn UrlOpener,
+) -> Result<&'static str, String> {
     let Some(url) = card
         .todo
         .as_ref()
         .map(|todo| todo.url.as_str())
         .filter(|url| base_url.is_some_and(|base| traccia::on_base_url(url, base)))
     else {
-        return "Open refused: the To-do is not on the Traccia URL".into();
+        return Err("Open refused: the To-do is not on the Traccia URL".into());
     };
-    match browser.open(url) {
-        Ok(()) => "opened the To-do".into(),
-        Err(error) => format!("Open failed: {error}"),
-    }
+    browser
+        .open(url)
+        .map(|()| "opened the To-do")
+        .map_err(|error| format!("Open failed: {error}"))
 }
 
 /// The reminder Card on screen, as Undo sees it.
@@ -365,7 +375,10 @@ mod tests {
     #[test]
     fn open_goes_only_to_the_configured_traccia() {
         let browser = Browser::default();
-        assert_eq!(open(&reminder(), Some(BASE), &browser), "opened the To-do");
+        assert_eq!(
+            open(&reminder(), Some(BASE), &browser),
+            Ok("opened the To-do")
+        );
         assert_eq!(
             *browser.opened.borrow(),
             [format!("{BASE}/personal?todo=01K8TODO0000000000000000AB")]
@@ -380,8 +393,10 @@ mod tests {
             (&reminder(), None),
             (&Card::caught_dictation("x".into()), Some(BASE)),
         ] {
-            let line = open(card, base, &browser);
-            assert_eq!(line, "Open refused: the To-do is not on the Traccia URL");
+            assert_eq!(
+                open(card, base, &browser),
+                Err("Open refused: the To-do is not on the Traccia URL".to_string())
+            );
         }
         assert!(browser.opened.borrow().is_empty());
         let failing = Browser {
@@ -390,7 +405,7 @@ mod tests {
         };
         assert_eq!(
             open(&reminder(), Some(BASE), &failing),
-            "Open failed: no browser"
+            Err("Open failed: no browser".to_string())
         );
     }
 

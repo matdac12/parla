@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 
 const BARS = 9;
 const pill = document.getElementById("pill") as HTMLDivElement;
+const overlayRoot = document.querySelector(".overlay-root") as HTMLDivElement;
 const captions = document.getElementById("captions") as HTMLDivElement;
 const captionText = captions.querySelector(".caption-text") as HTMLDivElement;
 const stable = captions.querySelector(".caption-stable") as HTMLSpanElement;
@@ -127,6 +128,9 @@ render();
 
 function setPhase(nextPhase: string): void {
   phase = nextPhase;
+  // A new session: the last reminder Card's fade is over. It stays on until
+  // then, or the faded check would come back before the window hides.
+  delete overlayRoot.dataset.leaving;
   if (phase === "recording") {
     history.fill(0);
     render();
@@ -195,7 +199,6 @@ const TAGS: Record<CardView["tag"], string> = {
   reminder: "Reminder",
 };
 const ACTIONS: Record<CardAction, string> = { copy: "Copy", paste: "Paste", replace: "Replace", open: "Open", undo: "Undo" };
-const overlayRoot = document.querySelector(".overlay-root") as HTMLDivElement;
 const card = document.getElementById("card") as HTMLElement;
 const cardClose = card.querySelector(".card-close") as HTMLButtonElement;
 const cardTag = card.querySelector(".card-tag span") as HTMLSpanElement;
@@ -205,10 +208,9 @@ const cardDetail = card.querySelector(".card-detail") as HTMLDivElement;
 const cardFoot = card.querySelector(".card-foot") as HTMLDivElement;
 let cardGeneration = 0;
 
-/** Stops the ring and any fade: a click, a close, or the next Card. */
+/** Stops the ring: a click, a close, or the next Card. */
 function stopCountdown(): void {
   delete card.dataset.countdown;
-  delete overlayRoot.dataset.leaving;
 }
 
 function reportCardBounds(): void {
@@ -223,6 +225,7 @@ function reportCardBounds(): void {
 function showCard(generation: number, view: CardView, countdown: boolean): void {
   cardGeneration = generation;
   stopCountdown();
+  delete overlayRoot.dataset.leaving;
   card.setAttribute("aria-label", TAGS[view.tag]);
   card.dataset.tag = view.tag;
   cardTag.textContent = TAGS[view.tag];

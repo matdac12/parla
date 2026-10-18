@@ -320,8 +320,9 @@ body {
   }
 }
 /* The countdown's end: the Card fades and slides down, and the check goes
-   with it. */
+   with it. It takes no click now, so none can race Rust's close. */
 .overlay-root[data-leaving] .card {
+  pointer-events: none;
   animation: card-leave 300ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 .overlay-root[data-leaving] .pill {
