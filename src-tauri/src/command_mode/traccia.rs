@@ -2,18 +2,16 @@
 //! reached over his tailnet with a `todos`-scoped token. Command mode only;
 //! nothing here runs at startup or on the dictation path (ADR-0001).
 
-use crate::settings::Settings;
+use crate::{provider::openai, settings::Settings};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::{
-    net::{TcpStream, ToSocketAddrs},
-    time::Duration,
+    net::TcpStream,
+    time::{Duration, Instant},
 };
 
-/// The shared client's connect timeout (`openai::client`).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// For `/v1/me` and the Projects list, once connected.
-pub const GET_TIMEOUT: Duration = Duration::from_secs(2);
+const GET_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `providers.traccia`. The env overrides are for the live test only.
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -26,12 +24,13 @@ pub struct TracciaConfig {
 impl TracciaConfig {
     /// A usable connection: a normalised URL and a token, both set.
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
+        let base_url = normalize_base_url(base_url)?;
         let token = token.trim();
-        if base_url.trim().is_empty() || token.is_empty() {
+        if token.is_empty() {
             return Err(Error::Missing);
         }
         Ok(Self {
-            base_url: normalize_base_url(base_url)?,
+            base_url,
             token: token.into(),
         })
     }
@@ -73,8 +72,8 @@ pub fn normalize_base_url(raw: &str) -> Result<String, Error> {
     }
 }
 
-/// Checked on every save (PARLA-85): the stored URL is normalised, and
-/// reminders turn on only with a URL and a token.
+/// Checked when the Settings form saves (PARLA-85): the stored URL is
+/// normalised, and reminders turn on only with a URL and a token.
 pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
     if let Some(serde_json::Value::String(url)) = settings
         .providers
@@ -145,13 +144,11 @@ impl std::fmt::Display for Error {
 
 /// A non-2xx answer. The body is `{error:{code,message,details}}`; anything
 /// else still maps by status.
-pub fn parse_error(status: u16, body: &str) -> Error {
+fn parse_error(status: u16, body: &str) -> Error {
     match status {
         400 => {
-            let error = serde_json::from_str::<serde_json::Value>(body)
-                .ok()
-                .and_then(|mut value| value.get_mut("error").map(serde_json::Value::take))
-                .unwrap_or_default();
+            let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let error = &value["error"];
             let code = error["code"].as_str().map(Into::into);
             let mut fields: Vec<String> = error["details"]["fields"]
                 .as_object()
@@ -174,7 +171,7 @@ pub struct Me {
     pub token_name: String,
 }
 
-pub fn parse_me(body: &str) -> Result<Me, Error> {
+fn parse_me(body: &str) -> Result<Me, Error> {
     serde_json::from_str(body).map_err(|_| Error::Unreadable)
 }
 
@@ -186,7 +183,7 @@ pub struct Project {
 }
 
 /// One page of `GET /v1/projects`, keeping the active and paused Projects.
-pub fn parse_projects(body: &str) -> Result<Vec<Project>, Error> {
+fn parse_projects(body: &str) -> Result<Vec<Project>, Error> {
     #[derive(Deserialize)]
     struct Item {
         #[serde(flatten)]
@@ -233,19 +230,19 @@ impl<'a> Client<'a> {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.config.token))
             .map_err(|_| Error::Token)?;
         authorization.set_sensitive(true);
-        let client = crate::provider::openai::client().map_err(|_| Error::Unreachable)?;
+        let client = openai::client().map_err(|_| Error::Unreachable)?;
         let response = client
             .get(format!("{}{path}", self.config.base_url))
             .timeout(self.timeout)
             .header(AUTHORIZATION, authorization)
             .send()
             .map_err(|e| self.transport(&e))?;
-        let status = response.status().as_u16();
+        let status = response.status();
         let body = response.text().map_err(|e| self.transport(&e))?;
-        if (200..300).contains(&status) {
+        if status.is_success() {
             Ok(body)
         } else {
-            Err(parse_error(status, &body))
+            Err(parse_error(status.as_u16(), &body))
         }
     }
 
@@ -261,18 +258,18 @@ impl<'a> Client<'a> {
     }
 
     fn reachable(&self) -> bool {
-        let budget = CONNECT_TIMEOUT
+        let budget = openai::CONNECT_TIMEOUT
             .saturating_sub(self.timeout)
             .max(Duration::from_secs(1));
-        let Ok(url) = reqwest::Url::parse(&self.config.base_url) else {
-            return false;
-        };
-        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-            return false;
-        };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        (host, port).to_socket_addrs().is_ok_and(|mut addresses| {
-            addresses.any(|address| TcpStream::connect_timeout(&address, budget).is_ok())
+        let deadline = Instant::now() + budget;
+        let addresses = reqwest::Url::parse(&self.config.base_url)
+            .ok()
+            .and_then(|url| url.socket_addrs(|| None).ok())
+            .unwrap_or_default();
+        // One budget for all the addresses (IPv4 and IPv6), not one each.
+        addresses.iter().any(|address| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            !left.is_zero() && TcpStream::connect_timeout(address, left).is_ok()
         })
     }
 }
@@ -280,8 +277,7 @@ impl<'a> Client<'a> {
 /// What Test connection reports.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Connection {
-    pub actor: String,
-    pub token_name: String,
+    pub me: Me,
     pub projects: usize,
 }
 
@@ -290,16 +286,16 @@ impl Connection {
         let plural = if self.projects == 1 { "" } else { "s" };
         format!(
             "Connected as {} · token {} · {} project{plural}",
-            self.actor, self.token_name, self.projects
+            self.me.actor, self.me.token_name, self.projects
         )
     }
 
     /// To-dos made with an agent's token would be stamped as the agent's.
     pub fn warning(&self) -> Option<String> {
-        (self.actor != "you").then(|| {
+        (self.me.actor != "you").then(|| {
             format!(
                 "This token writes as {}, so To-dos would be stamped as theirs. Create one with: traccia token create --name parla --actor you --scope todos",
-                self.actor
+                self.me.actor
             )
         })
     }
@@ -310,11 +306,7 @@ pub fn check(config: &TracciaConfig) -> Result<Connection, Error> {
     let client = Client::new(config);
     let me = client.me()?;
     let projects = client.projects()?.len();
-    Ok(Connection {
-        actor: me.actor,
-        token_name: me.token_name,
-        projects,
-    })
+    Ok(Connection { me, projects })
 }
 
 #[cfg(test)]
@@ -481,8 +473,10 @@ mod tests {
     #[test]
     fn the_summary_names_the_actor_the_token_and_the_project_count() {
         let mut connection = Connection {
-            actor: "you".into(),
-            token_name: "parla".into(),
+            me: Me {
+                actor: "you".into(),
+                token_name: "parla".into(),
+            },
             projects: 12,
         };
         assert_eq!(
@@ -495,7 +489,7 @@ mod tests {
             connection.summary(),
             "Connected as you · token parla · 1 project"
         );
-        connection.actor = "agent".into();
+        connection.me.actor = "agent".into();
         let warning = connection.warning().unwrap();
         assert!(warning.contains("agent"), "{warning}");
         assert!(warning.contains("--actor you"), "{warning}");

@@ -226,20 +226,11 @@
                   Needs command mode on, and the Traccia URL and token below.
                 </p>
               </div>
-              <div class="field">
-                <label for="traccia-url">Traccia URL</label>
-                <input id="traccia-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://<traccia-host>.<tailnet>.ts.net" />
-              </div>
-              <div class="field">
-                <label for="traccia-token">Traccia token</label>
-                <div class="password-row" id="traccia-token-row">
-                  <input id="traccia-token" type="password" autocomplete="off" spellcheck="false" aria-describedby="traccia-token-hint" />
-                </div>
-                <p id="traccia-token-hint" class="hint">
-                  Create it on the Traccia server with <code>traccia token create --name parla --actor you --scope todos</code>:
-                  it can only reach To-dos and the Project list.
-                </p>
-              </div>
+              <div id="traccia-fields"></div>
+              <p class="hint">
+                Create the token on the Traccia server with <code>traccia token create --name parla --actor you --scope todos</code>:
+                it can only reach To-dos and the Project list.
+              </p>
               <div class="field">
                 <div class="hotkey-row">
                   <button type="button" id="traccia-test" class="secondary">Test connection</button>

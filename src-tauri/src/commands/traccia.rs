@@ -42,6 +42,27 @@ mod tests {
         );
     }
 
+    /// The Test connection command's path, minus the IPC, against the real
+    /// Traccia: `cargo test --locked --lib test_traccia_live -- --ignored --nocapture`.
+    /// The connection comes as in `tests/traccia_live.rs`; nothing is printed
+    /// but the result.
+    #[test]
+    #[ignore = "calls the real Traccia over the tailnet"]
+    fn test_traccia_live() {
+        let saved = std::env::var_os("APPDATA")
+            .map(|dir| std::path::Path::new(&dir).join("com.matdac6.parla/settings.json"))
+            .and_then(|path| crate::settings::load(&path).ok())
+            .unwrap_or_default();
+        let Ok(config) = TracciaConfig::resolved(&saved) else {
+            println!("Skipping: no TRACCIA_URL/TRACCIA_TOKEN and no providers.traccia");
+            return;
+        };
+        let check = test_connection(&config.base_url, &config.token).unwrap();
+        println!("{} (warning: {:?})", check.message, check.warning);
+        assert!(check.message.starts_with("Connected as you · token "));
+        assert_eq!(check.warning, None);
+    }
+
     #[test]
     fn the_result_shape_is_documented_json() {
         assert_eq!(

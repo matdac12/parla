@@ -38,6 +38,12 @@ const PROVIDER_FIELDS: Record<string, FieldSpec[]> = {
   ],
 };
 
+/** `providers.traccia`, edited in the Command mode card (PARLA-85). */
+const TRACCIA_FIELDS: FieldSpec[] = [
+  { key: "base_url", label: "Traccia URL", type: "text", placeholder: "https://<traccia-host>.<tailnet>.ts.net" },
+  { key: "token", label: "Traccia token", type: "password" },
+];
+
 /** Main keys the Windows listener accepts (mirrors hotkey.rs key_map!).
  *  Modifiers are handled separately; Escape stays reserved for cancelling. */
 function supportedKeyCodes(): Set<string> {
@@ -101,9 +107,7 @@ const els = {
   commandEffort: byId<HTMLSelectElement>("command-effort"),
   commandReminders: byId<HTMLInputElement>("command-reminders"),
   remindersNeeds: byId<HTMLParagraphElement>("command-reminders-needs"),
-  tracciaUrl: byId<HTMLInputElement>("traccia-url"),
-  tracciaToken: byId<HTMLInputElement>("traccia-token"),
-  tracciaTokenRow: byId<HTMLDivElement>("traccia-token-row"),
+  tracciaFields: byId<HTMLDivElement>("traccia-fields"),
   tracciaTest: byId<HTMLButtonElement>("traccia-test"),
   tracciaResult: byId<HTMLParagraphElement>("traccia-result"),
   tracciaWarning: byId<HTMLParagraphElement>("traccia-warning"),
@@ -173,8 +177,13 @@ function setStatus(text: string, kind: "success" | "warning" | "error" | "dirty"
 // The provider applies on click (select_provider), not on Save, so its
 // feedback sits in the provider card instead of next to the Save button.
 function setProviderStatus(text: string, kind: "success" | "error" | "" = ""): void {
-  els.providerStatus.textContent = text;
-  els.providerStatus.className = kind ? `status provider-status status-${kind}` : "status provider-status";
+  setStatusLine(els.providerStatus, text, kind);
+}
+
+/** A status line inside a card (the provider switch, Test connection). */
+function setStatusLine(element: HTMLElement, text: string, kind: "success" | "error" | ""): void {
+  element.textContent = text;
+  element.className = kind ? `status provider-status status-${kind}` : "status provider-status";
 }
 
 function updateDirty(): void {
@@ -601,7 +610,7 @@ let tracciaCheck = 0;
 
 /** Test connection with the URL and token as typed, saved or not. */
 async function testTraccia(): Promise<void> {
-  const token = ++tracciaCheck;
+  const run = ++tracciaCheck;
   els.tracciaTest.disabled = true;
   showTracciaResult("Testing…", "");
   try {
@@ -609,19 +618,18 @@ async function testTraccia(): Promise<void> {
       baseUrl: tracciaField("base_url"),
       token: tracciaField("token"),
     });
-    if (token !== tracciaCheck) return;
+    if (run !== tracciaCheck) return;
     showTracciaResult(result.message, "success", result.warning);
   } catch (error) {
-    if (token !== tracciaCheck) return;
+    if (run !== tracciaCheck) return;
     showTracciaResult(String(error), "error");
   } finally {
-    if (token === tracciaCheck) els.tracciaTest.disabled = false;
+    if (run === tracciaCheck) els.tracciaTest.disabled = false;
   }
 }
 
 function showTracciaResult(text: string, kind: "success" | "error" | "", warning: string | null = null): void {
-  els.tracciaResult.textContent = text;
-  els.tracciaResult.className = kind ? `status provider-status status-${kind}` : "status provider-status";
+  setStatusLine(els.tracciaResult, text, kind);
   els.tracciaWarning.textContent = warning ?? "";
   els.tracciaWarning.hidden = warning === null;
 }
@@ -863,7 +871,6 @@ async function onSettingsChanged(): Promise<void> {
   const texts = [
     [els.hotkey, "hotkey"], [els.delay, "restore_delay_ms"], [els.vocabulary, "vocabulary"],
     [els.commandHotkey, "command"], [els.commandModel, "command"],
-    [els.tracciaUrl, "providers"], [els.tracciaToken, "providers"],
   ] as const;
   const typed = texts.map(([input]) => input.value);
   fillForm(state.settings);
@@ -894,9 +901,6 @@ function fillForm(settings: Settings): void {
   els.commandModel.value = settings.command.model || DEFAULT_COMMAND_MODEL;
   els.commandEffort.value = settings.command.reasoning_effort;
   els.commandReminders.checked = settings.command.reminders;
-  const traccia = settings.providers.traccia;
-  els.tracciaUrl.value = typeof traccia?.base_url === "string" ? traccia.base_url : "";
-  els.tracciaToken.value = typeof traccia?.token === "string" ? traccia.token : "";
 }
 
 function wireForm(): void {
@@ -940,16 +944,8 @@ function wireForm(): void {
     state.settings.command.reminders = els.commandReminders.checked;
     updateDirty();
   });
-  // Stored as typed; save_settings trims the URL and drops a trailing slash.
-  for (const [input, key] of [[els.tracciaUrl, "base_url"], [els.tracciaToken, "token"]] as const) {
-    input.addEventListener("input", () => {
-      if (!state.settings) return;
-      providerSection(state.settings, "traccia")[key] = input.value;
-      clearTracciaResult();
-      updateDirty();
-    });
-  }
-  els.tracciaTokenRow.append(revealToggle(els.tracciaToken));
+  // The fields store what is typed; save_settings trims the URL.
+  els.tracciaFields.addEventListener("input", clearTracciaResult);
   els.tracciaTest.addEventListener("click", () => void testTraccia());
   els.delay.addEventListener("input", () => {
     if (!state.settings) return;
@@ -1015,6 +1011,7 @@ async function main(): Promise<void> {
     fillForm(settings);
     renderProviderRadios();
     renderProviderConfig();
+    els.tracciaFields.replaceChildren(...TRACCIA_FIELDS.map((spec) => buildField("traccia", spec)));
     // After the provider fields wrote their defaults, so a fresh install
     // (no provider sections yet) does not open with unsaved changes.
     state.baseline = JSON.stringify(settings);

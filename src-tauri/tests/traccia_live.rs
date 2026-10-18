@@ -34,7 +34,7 @@ fn test_connection_reports_the_actor_token_and_projects() {
     if let Some(warning) = connection.warning() {
         println!("warning: {warning}");
     }
-    assert_eq!(connection.actor, "you");
+    assert_eq!(connection.me.actor, "you");
 }
 
 #[test]
