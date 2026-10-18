@@ -554,7 +554,8 @@ cargo test --locked --test command_eval -- --ignored --nocapture
 About 350 calls, 8 minutes and about 4 cents. Without the key it skips.
 `PARLA_EVAL_REMINDERS=off` sends the requests as with the tool off (the
 request before PARLA-86) and skips the reminder cases;
-`PARLA_EVAL_PROJECTS=off` sends no Projects list, as before the first fetch.
+`PARLA_EVAL_PROJECTS=off` sends no Projects list, as before the first fetch,
+and then expects no `@KEY` in any title.
 To probe a flaky case, `PARLA_EVAL_CASES=10,17` picks cases by index and
 `PARLA_EVAL_RUNS=10` sets the repeats. Time it only on the machine lock turn
 (see `AGENTS.md`). The grading itself is tested offline by `cargo test`.

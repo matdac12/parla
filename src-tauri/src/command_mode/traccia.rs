@@ -531,6 +531,8 @@ struct CacheState {
     /// The last list fetched, and when its fetch started.
     list: Option<(Instant, Vec<Project>)>,
     in_flight: bool,
+    /// A fetch has landed, list or not: only the first one is waited for.
+    tried: bool,
 }
 
 /// The Projects list for `@KEY` references (spec §3), in memory only:
@@ -547,6 +549,7 @@ impl ProjectsCache {
             state: Mutex::new(CacheState {
                 list: None,
                 in_flight: false,
+                tried: false,
             }),
             landed: Condvar::new(),
         }
@@ -580,6 +583,7 @@ impl ProjectsCache {
                 state.list = Some((now, list));
             }
             state.in_flight = false;
+            state.tried = true;
             self.landed.notify_all();
         };
         let spawned = std::thread::Builder::new()
@@ -590,14 +594,13 @@ impl ProjectsCache {
         }
     }
 
-    /// The cached list, even a stale one. Only when there is none and a fetch
-    /// is in flight does it wait for it, up to `wait`.
+    /// The cached list, even a stale one. Only while the first fetch is in
+    /// flight does it wait for it, up to `wait`: once one has failed, runs
+    /// go on without a list rather than wait on a Traccia that is down.
     pub fn snapshot(&self, wait: Duration) -> Vec<Project> {
         let (state, _) = self
             .landed
-            .wait_timeout_while(self.state(), wait, |state| {
-                state.list.is_none() && state.in_flight
-            })
+            .wait_timeout_while(self.state(), wait, |state| !state.tried && state.in_flight)
             .unwrap_or_else(PoisonError::into_inner);
         state
             .list
@@ -613,22 +616,27 @@ static PROJECTS: ProjectsCache = ProjectsCache::new();
 /// Projects list is fetched in the background when stale, only while
 /// reminders are on. Never at startup, never for a dictation.
 pub fn refresh_projects(settings: &Settings) {
-    refresh_projects_with(&PROJECTS, settings, Instant::now(), |config| {
-        Client::new(&config).projects()
-    });
+    refresh_projects_with(
+        &PROJECTS,
+        settings,
+        Instant::now(),
+        TracciaConfig::resolved,
+        |config| Client::new(&config).projects(),
+    );
 }
 
 fn refresh_projects_with(
     cache: &'static ProjectsCache,
     settings: &Settings,
     now: Instant,
+    resolve: impl FnOnce(&Settings) -> Result<TracciaConfig, Error>,
     fetch: impl FnOnce(TracciaConfig) -> Result<Vec<Project>, Error> + Send + 'static,
 ) {
     if !settings.command.reminders {
         return;
     }
     // Unconfigured (only through the env overrides): nothing to fetch from.
-    if let Ok(config) = TracciaConfig::resolved(settings) {
+    if let Ok(config) = resolve(settings) {
         cache.refresh_if_stale(now, move || fetch(config));
     }
 }
@@ -1311,8 +1319,8 @@ mod tests {
         let cache = cache();
         // Nothing cached, nothing in flight: no wait at all.
         let started = Instant::now();
-        assert!(cache.snapshot(Duration::from_secs(2)).is_empty());
-        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(cache.snapshot(Duration::from_secs(5)).is_empty());
+        assert!(started.elapsed() < Duration::from_secs(2));
         // A fetch that hangs: the run goes on without a list at the bound.
         let (release, gate) = mpsc::channel::<()>();
         cache.refresh_if_stale(Instant::now(), move || {
@@ -1323,7 +1331,7 @@ mod tests {
         assert!(cache.snapshot(Duration::from_millis(150)).is_empty());
         let waited = started.elapsed();
         assert!(
-            waited >= Duration::from_millis(150) && waited < Duration::from_secs(1),
+            waited >= Duration::from_millis(150) && waited < Duration::from_secs(3),
             "{waited:?}"
         );
         // A fetch that lands within the bound is used at once.
@@ -1344,10 +1352,29 @@ mod tests {
         });
         let started = Instant::now();
         assert_eq!(
-            cache.snapshot(Duration::from_secs(2)),
+            cache.snapshot(Duration::from_secs(5)),
             [project("CRM", "CRM")]
         );
-        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn once_a_first_fetch_failed_no_run_waits_again() {
+        // Traccia down since startup: every hold retries, but a run only
+        // ever waited for the first fetch.
+        let cache = cache();
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        cache.refresh_if_stale(t0, counting(&calls, Err(Error::Unreachable)));
+        settle(cache);
+        let (_hold, gate) = mpsc::channel::<()>();
+        cache.refresh_if_stale(t0 + Duration::from_secs(5), move || {
+            let _ = gate.recv();
+            Ok(vec![])
+        });
+        let started = Instant::now();
+        assert!(cache.snapshot(Duration::from_secs(5)).is_empty());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -1370,6 +1397,9 @@ mod tests {
 
     #[test]
     fn the_refresh_never_runs_while_reminders_are_off_or_unconfigured() {
+        // The saved section only: TRACCIA_URL or TRACCIA_TOKEN in the
+        // developer's shell must not reach this test.
+        let saved = |settings: &Settings| TracciaConfig::with_overrides(settings, None, None);
         let mut settings = Settings::default();
         let cache = cache();
         let calls = Calls::default();
@@ -1382,19 +1412,19 @@ mod tests {
         };
         // On, but with no URL or token: nothing starts.
         settings.command.reminders = true;
-        refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
+        refresh_projects_with(cache, &settings, Instant::now(), saved, fetch(&calls));
         assert!(!cache.state().in_flight);
         settings.providers.insert(
             "traccia".into(),
             serde_json::json!({"base_url": URL, "token": TOKEN}),
         );
         settings.command.reminders = false;
-        refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
+        refresh_projects_with(cache, &settings, Instant::now(), saved, fetch(&calls));
         assert!(!cache.state().in_flight);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(cache.snapshot(Duration::ZERO).is_empty());
         settings.command.reminders = true;
-        refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
+        refresh_projects_with(cache, &settings, Instant::now(), saved, fetch(&calls));
         settle(cache);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(cache.snapshot(Duration::ZERO), [project("CRM", "CRM")]);

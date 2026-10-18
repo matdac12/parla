@@ -99,6 +99,26 @@ const fn reminds_in(
     }
 }
 
+/// `expect` as graded when no Projects list was sent: no key at all.
+fn without_list(expect: &Expect) -> Expect {
+    match *expect {
+        Expect::Remind {
+            now,
+            day,
+            time,
+            title,
+            ..
+        } => Expect::Remind {
+            now,
+            day,
+            time,
+            title,
+            project: None,
+        },
+        _ => unreachable!("only reminders reference Projects"),
+    }
+}
+
 /// The Projects list every request carries with reminders on, as the cache
 /// would (PARLA-87): fixed, so every eval sends the same requests.
 const PROJECTS: &[(&str, &str)] = &[("CRM", "CRM"), ("CIT", "Cittadellese"), ("PARLA", "Parla")];
@@ -735,10 +755,11 @@ fn grade_reminder(
             if dated {
                 problems.push(format!("a day or time in the title {title:?}"));
             }
-            // Traccia matches `@KEY` exactly but case-blind.
+            // Traccia matches `@KEY` exactly but case-blind; an `@` inside a
+            // word (an address) starts none.
             let keys: Vec<String> = title
-                .split('@')
-                .skip(1)
+                .split_whitespace()
+                .filter_map(|word| word.strip_prefix('@'))
                 .map(|rest| {
                     rest.chars()
                         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
@@ -1061,6 +1082,14 @@ fn the_eval_grades_every_case_at_each_effort() {
     for _ in 0..repeats {
         for &case in &cases {
             let (instruction, _, expect) = &CASES[case];
+            let unlisted;
+            let expect = match expect {
+                Expect::Remind { .. } if !listed => {
+                    unlisted = without_list(expect);
+                    &unlisted
+                }
+                _ => expect,
+            };
             for effort in EFFORTS {
                 let started = Instant::now();
                 let reply = send(&key, &request(effort, case));
@@ -1392,6 +1421,22 @@ mod grading {
         assert!(on_unlisted("Mandare le slide per Edilnord"));
         assert!(!on_unlisted("Mandare le slide @EDILNORD"));
         assert!(!on_unlisted("Mandare le slide @CRM"));
+        // An address is no key.
+        assert!(on_unlisted("Mandare le slide a luca@crm.it"));
+        // With no list sent, a listed Project's case expects no key either.
+        let unlisted_cit = without_list(&cit);
+        assert!(titled(
+            &unlisted_cit,
+            "Mandare il preventivo",
+            "2026-10-22",
+            "09:00"
+        ));
+        assert!(!titled(
+            &unlisted_cit,
+            "Mandare il preventivo @CIT",
+            "2026-10-22",
+            "09:00"
+        ));
     }
 
     #[test]
