@@ -190,12 +190,13 @@ The **Command mode** card holds the `command` section of `settings.json`
   [live eval](#the-command-mode-eval).
 - **Reminders in Traccia** (`command.reminders`, PARLA-82), off by default. It
   is greyed out, with a hint, until command mode is on and a Traccia URL and
-  token are set; Save refuses it on without them. The tool that creates the
+  token are set; Save refuses it on without them. Save checks only what it
+  changes, so a Traccia section already in the file never blocks another save. The tool that creates the
   To-do comes in a later release; for now this only stores the choice.
 - **Traccia URL** and **Traccia token**, stored in `providers.traccia`
   (`base_url`, `token`) next to the other keys. The URL is your Traccia on the
   tailnet (`https://<traccia-host>.<tailnet>.ts.net`); Save trims it and drops
-  a trailing slash, and accepts `http` or `https` only. Create the token on the
+  a trailing slash, and accepts `http` or `https` only, with no `?` or `#`. Create the token on the
   Traccia server with `traccia token create --name parla --actor you --scope todos`.
 - **Test connection** checks the URL and token as typed, saved or not: it
   calls `GET /v1/me` and `GET /v1/projects` (2 s each once connected) and shows
@@ -557,8 +558,9 @@ configurable per provider. The settings view prefills each model field with its
 default (`gpt-transcribe`, `grok-voice-transcribe-2.0`) and restores it if you
 clear the field. `TRACCIA_URL` and `TRACCIA_TOKEN` override
 `providers.traccia` for the live test only
-(`cargo test --locked --test traccia_live -- --ignored --nocapture`, which
-otherwise reads `providers.traccia` from settings.json without writing it).
+(`cargo test --locked --lib commands::traccia -- --ignored --nocapture`,
+which otherwise reads `providers.traccia` from settings.json without writing
+it).
 
 ### OpenAI
 

@@ -157,15 +157,18 @@ fn select_provider_with(
     save_with(shared, requested, persist, |_| Ok(())).map(|_| ())
 }
 
-/// The Settings form's save: also checks the Traccia connection, which only
-/// the form edits, so a provider or model switch never trips over it.
+/// `save_settings` (the Settings form and the tray flyout): also checks what
+/// the save changes in the Traccia connection.
 fn save_form_with(
     shared: &std::sync::RwLock<Settings>,
     mut requested: Settings,
     persist: impl FnOnce(&Settings) -> Result<(), String>,
     apply: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<SaveResult, String> {
-    crate::command_mode::traccia::validate_settings(&mut requested)?;
+    {
+        let previous = shared.read().map_err(|_| "Settings lock poisoned")?;
+        crate::command_mode::traccia::validate_settings(&mut requested, &previous)?;
+    }
     save_with(shared, requested, persist, apply)
 }
 
@@ -510,13 +513,27 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_switch_never_checks_the_traccia_section() {
-        // Hand-edited or written by another tool: only the form's save checks it.
+    fn only_a_save_that_changes_the_traccia_settings_checks_them() {
+        // Hand-edited or written by another tool, and already on disk.
         let stored = reminders("traccia.example.ts.net", "");
         let shared = RwLock::new(stored.clone());
         select_provider_with(&shared, "xai", |_| Ok(())).unwrap();
-        assert_eq!(shared.read().unwrap().active_provider, "xai");
-        assert!(save_form_with(&shared, stored, |_| Ok(()), |_| Ok(())).is_err());
+        // The tray flyout saves the whole settings with one toggle changed.
+        let mut flyout = shared.read().unwrap().clone();
+        flyout.auto_send = !flyout.auto_send;
+        save_form_with(&shared, flyout, |_| Ok(()), |_| Ok(())).unwrap();
+        let mut edited = shared.read().unwrap().clone();
+        edited.providers.insert(
+            "traccia".into(),
+            serde_json::json!({"base_url": "ftp://traccia.example.ts.net", "token": "test-token"}),
+        );
+        assert!(save_form_with(&shared, edited, |_| panic!("persisted"), |_| Ok(())).is_err());
+        let mut off = shared.read().unwrap().clone();
+        off.command.reminders = false;
+        save_form_with(&shared, off, |_| Ok(()), |_| Ok(())).unwrap();
+        let mut on = shared.read().unwrap().clone();
+        on.command.reminders = true;
+        assert!(save_form_with(&shared, on, |_| panic!("persisted"), |_| Ok(())).is_err());
     }
 
     #[test]

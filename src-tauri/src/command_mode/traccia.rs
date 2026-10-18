@@ -67,24 +67,35 @@ pub fn normalize_base_url(raw: &str) -> Result<String, Error> {
         return Err(Error::Missing);
     }
     match reqwest::Url::parse(trimmed) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host() => Ok(trimmed.into()),
+        // Request paths are appended, so no query or fragment.
+        Ok(url)
+            if matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.query().is_none()
+                && url.fragment().is_none() =>
+        {
+            Ok(trimmed.into())
+        }
         _ => Err(Error::BadUrl),
     }
 }
 
-/// Checked when the Settings form saves (PARLA-85): the stored URL is
-/// normalised, and reminders turn on only with a URL and a token.
-pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
+/// Checked by `save_settings` (PARLA-85), only for what this save changes, so
+/// a section already on disk never blocks an unrelated save: an edited URL is
+/// normalised, and reminders stay on only with a URL and a token.
+pub fn validate_settings(settings: &mut Settings, previous: &Settings) -> Result<(), String> {
+    let edited = settings.providers.get("traccia") != previous.providers.get("traccia");
     if let Some(serde_json::Value::String(url)) = settings
         .providers
         .get_mut("traccia")
         .and_then(|section| section.get_mut("base_url"))
+        .filter(|_| edited)
     {
         if !url.trim().is_empty() {
             *url = normalize_base_url(url).map_err(|e| e.to_string())?;
         }
     }
-    if settings.command.reminders {
+    if settings.command.reminders && (edited || !previous.command.reminders) {
         let saved: TracciaConfig = settings.provider_config("traccia");
         TracciaConfig::new(&saved.base_url, &saved.token).map_err(|e| e.to_string())?;
     }
@@ -120,7 +131,10 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Missing => write!(f, "Add the Traccia URL and token first."),
-            Self::BadUrl => write!(f, "The Traccia URL must start with http:// or https://."),
+            Self::BadUrl => write!(
+                f,
+                "The Traccia URL must start with http:// or https:// and have no ? or #."
+            ),
             Self::Unreachable => write!(f, "Traccia can't be reached. Is Tailscale on?"),
             Self::Timeout(budget) => {
                 write!(f, "Traccia didn't answer in {} s.", budget.as_secs())
@@ -131,7 +145,10 @@ impl std::fmt::Display for Error {
             Self::Refused { fields, .. } => {
                 write!(f, "Traccia refused the request ({}).", fields.join(", "))
             }
-            Self::Token => write!(f, "Traccia rejected the token. Check Settings → Reminders."),
+            Self::Token => write!(
+                f,
+                "Traccia rejected the token. Check it in Settings → Command mode."
+            ),
             Self::Scope => write!(
                 f,
                 "This Traccia token can't create To-dos (it needs the todos scope)."
@@ -349,6 +366,8 @@ mod tests {
             "https://",
             "file:///C:/traccia",
             "mailto:me@example.com",
+            "https://traccia.example.ts.net/?tab=1",
+            "https://traccia.example.ts.net/#/projects",
         ] {
             assert_eq!(normalize_base_url(raw), Err(Error::BadUrl), "{raw}");
         }
@@ -423,7 +442,7 @@ mod tests {
             (
                 401,
                 fixture("error_401"),
-                "Traccia rejected the token. Check Settings → Reminders.",
+                "Traccia rejected the token. Check it in Settings → Command mode.",
             ),
             (
                 403,

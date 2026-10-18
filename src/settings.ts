@@ -279,17 +279,17 @@ async function selectProvider(id: string): Promise<void> {
   }
 }
 
-function revealToggle(input: HTMLInputElement): HTMLButtonElement {
+function revealToggle(input: HTMLInputElement, label: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "secondary reveal";
   button.textContent = "Show";
-  button.setAttribute("aria-label", "Show API key");
+  button.setAttribute("aria-label", `Show ${label}`);
   button.addEventListener("click", () => {
     const reveal = input.type === "password";
     input.type = reveal ? "text" : "password";
     button.textContent = reveal ? "Hide" : "Show";
-    button.setAttribute("aria-label", reveal ? "Hide API key" : "Show API key");
+    button.setAttribute("aria-label", `${reveal ? "Hide" : "Show"} ${label}`);
   });
   return button;
 }
@@ -329,7 +329,7 @@ function buildField(providerId: string, spec: FieldSpec): HTMLElement {
   if (spec.type === "password") {
     const row = document.createElement("div");
     row.className = "password-row";
-    row.append(input, revealToggle(input));
+    row.append(input, revealToggle(input, spec.label));
     wrapper.append(row);
   } else {
     wrapper.append(input);
@@ -846,6 +846,7 @@ function discard(): void {
   state.settings = JSON.parse(state.baseline) as Settings;
   fillForm(state.settings);
   for (const sync of fieldSyncs) sync();
+  clearTracciaResult();
   setStatus("");
   updateDirty();
 }
@@ -877,7 +878,10 @@ async function onSettingsChanged(): Promise<void> {
   texts.forEach(([input, key], index) => {
     if (touched.has(key)) input.value = typed[index];
   });
-  if (!touched.has("providers")) for (const sync of fieldSyncs) sync();
+  if (!touched.has("providers")) {
+    for (const sync of fieldSyncs) sync();
+    clearTracciaResult();
+  }
   renderProviderRadios();
   updateDirty();
   await refreshProviders();

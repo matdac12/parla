@@ -38,29 +38,68 @@ mod tests {
         );
         assert_eq!(
             test_connection("traccia.example.ts.net", "test-token").unwrap_err(),
-            "The Traccia URL must start with http:// or https://."
+            "The Traccia URL must start with http:// or https:// and have no ? or #."
         );
     }
 
-    /// The Test connection command's path, minus the IPC, against the real
-    /// Traccia: `cargo test --locked --lib test_traccia_live -- --ignored --nocapture`.
-    /// The connection comes as in `tests/traccia_live.rs`; nothing is printed
-    /// but the result.
-    #[test]
-    #[ignore = "calls the real Traccia over the tailnet"]
-    fn test_traccia_live() {
+    // Live checks of the Test connection command's path, minus the IPC:
+    // `cargo test --locked --lib commands::traccia -- --ignored --nocapture`.
+    // The connection comes from `TRACCIA_URL` and `TRACCIA_TOKEN`, else from
+    // `providers.traccia` in Parla's settings.json, read only. Neither the
+    // URL nor the token is printed.
+
+    fn live_config() -> Option<TracciaConfig> {
         let saved = std::env::var_os("APPDATA")
             .map(|dir| std::path::Path::new(&dir).join("com.matdac6.parla/settings.json"))
             .and_then(|path| crate::settings::load(&path).ok())
             .unwrap_or_default();
-        let Ok(config) = TracciaConfig::resolved(&saved) else {
+        let config = TracciaConfig::resolved(&saved).ok();
+        if config.is_none() {
             println!("Skipping: no TRACCIA_URL/TRACCIA_TOKEN and no providers.traccia");
-            return;
-        };
+        }
+        config
+    }
+
+    #[test]
+    #[ignore = "calls the real Traccia over the tailnet"]
+    fn live_test_connection_reports_the_actor_token_and_projects() {
+        let Some(config) = live_config() else { return };
+        let started = std::time::Instant::now();
         let check = test_connection(&config.base_url, &config.token).unwrap();
-        println!("{} (warning: {:?})", check.message, check.warning);
+        let elapsed = started.elapsed().as_millis();
+        println!(
+            "{} ({elapsed} ms, warning: {:?})",
+            check.message, check.warning
+        );
         assert!(check.message.starts_with("Connected as you · token "));
         assert_eq!(check.warning, None);
+    }
+
+    #[test]
+    #[ignore = "calls the real Traccia over the tailnet"]
+    fn live_a_wrong_token_is_rejected() {
+        let Some(config) = live_config() else { return };
+        let error = test_connection(&config.base_url, "test-token").unwrap_err();
+        println!("wrong token: {error}");
+        assert_eq!(error, traccia::Error::Token.to_string());
+    }
+
+    #[test]
+    #[ignore = "waits on the network for up to 5 s"]
+    fn live_an_unreachable_traccia_fails_within_about_5_s() {
+        // A tailnet-style (CGNAT) address no machine uses, and a name that
+        // doesn't resolve (as with Tailscale off).
+        for base_url in [
+            "https://100.64.255.254",
+            "https://traccia-missing.example.ts.net",
+        ] {
+            let started = std::time::Instant::now();
+            let error = test_connection(base_url, "test-token").unwrap_err();
+            let elapsed = started.elapsed();
+            println!("{base_url}: \"{error}\" after {} ms", elapsed.as_millis());
+            assert_eq!(error, traccia::Error::Unreachable.to_string());
+            assert!(elapsed < std::time::Duration::from_secs(6), "{elapsed:?}");
+        }
     }
 
     #[test]
