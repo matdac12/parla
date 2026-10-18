@@ -10,8 +10,8 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    net::TcpStream,
-    sync::OnceLock,
+    net::{SocketAddr, TcpStream},
+    sync::{mpsc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -229,7 +229,8 @@ pub struct Project {
     pub name: String,
 }
 
-/// One page of `GET /v1/projects`, keeping the active and paused Projects.
+/// One page of `GET /v1/projects`, keeping the active and paused Projects. An
+/// item that doesn't read is skipped, not the whole page.
 fn parse_projects(body: &str) -> Result<Vec<Project>, Error> {
     #[derive(Deserialize)]
     struct Item {
@@ -239,12 +240,13 @@ fn parse_projects(body: &str) -> Result<Vec<Project>, Error> {
     }
     #[derive(Deserialize)]
     struct Page {
-        items: Vec<Item>,
+        items: Vec<serde_json::Value>,
     }
     let page: Page = serde_json::from_str(body).map_err(|_| Error::Unreadable)?;
     Ok(page
         .items
         .into_iter()
+        .filter_map(|item| serde_json::from_value::<Item>(item).ok())
         .filter(|item| matches!(item.status.as_str(), "active" | "paused"))
         .map(|item| item.project)
         .collect())
@@ -489,16 +491,30 @@ impl<'a> Client<'a> {
             .saturating_sub(self.timeout)
             .max(Duration::from_secs(1));
         let deadline = Instant::now() + budget;
-        let addresses = reqwest::Url::parse(&self.config.base_url)
-            .ok()
-            .and_then(|url| url.socket_addrs(|| None).ok())
-            .unwrap_or_default();
+        let url = reqwest::Url::parse(&self.config.base_url).ok();
+        let addresses = resolve_within(budget, move || {
+            url.and_then(|url| url.socket_addrs(|| None).ok())
+                .unwrap_or_default()
+        });
         // One budget for all the addresses (IPv4 and IPv6), not one each.
         addresses.iter().any(|address| {
             let left = deadline.saturating_duration_since(Instant::now());
             !left.is_zero() && TcpStream::connect_timeout(address, left).is_ok()
         })
     }
+}
+
+/// `resolve` on a thread of its own, given up after `budget`: a DNS lookup has
+/// no deadline of its own, and one that hangs must not outlast the probe.
+fn resolve_within(
+    budget: Duration,
+    resolve: impl FnOnce() -> Vec<SocketAddr> + Send + 'static,
+) -> Vec<SocketAddr> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(resolve());
+    });
+    receiver.recv_timeout(budget).unwrap_or_default()
 }
 
 /// What Test connection reports.
@@ -639,6 +655,45 @@ mod tests {
         assert_eq!(keys, ["CRM", "CIT", "PARLA"]);
         assert_eq!(projects[1].name, "Cittadellese");
         assert_eq!(parse_projects(r#"{"items":"no"}"#), Err(Error::Unreadable));
+    }
+
+    #[test]
+    fn a_malformed_project_is_skipped_not_the_whole_page() {
+        let body = r#"{"items":[
+            {"key":"CRM","name":"CRM","status":"active"},
+            {"name":"No key","status":"active"},
+            {"key":"NUM","name":42,"status":"active"},
+            {"key":"NOS","name":"No status"},
+            "not an object",
+            {"key":"CIT","name":"Cittadellese","status":"paused"}
+        ],"nextCursor":null}"#;
+        let keys: Vec<_> = parse_projects(body)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.key)
+            .collect();
+        assert_eq!(keys, ["CRM", "CIT"]);
+    }
+
+    #[test]
+    fn the_reachability_lookup_gives_up_at_its_deadline() {
+        let address: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert_eq!(
+            resolve_within(Duration::from_secs(1), move || vec![address]),
+            [address]
+        );
+        // A lookup that hangs (DNS with Tailscale half up) stops at the budget.
+        let started = Instant::now();
+        let hung = resolve_within(Duration::from_millis(100), || {
+            std::thread::sleep(Duration::from_secs(3));
+            vec![]
+        });
+        assert!(hung.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
