@@ -523,9 +523,9 @@ fn resolve_within(
 }
 
 /// A Projects list older than this is fetched again at the next hold.
-pub const PROJECTS_TTL: Duration = Duration::from_secs(10 * 60);
+const PROJECTS_TTL: Duration = Duration::from_secs(10 * 60);
 /// The longest a run waits for the first list, only while it is in flight.
-pub const PROJECTS_WAIT: Duration = Duration::from_millis(500);
+const PROJECTS_WAIT: Duration = Duration::from_millis(500);
 
 struct CacheState {
     /// The last list fetched, and when its fetch started.
@@ -536,7 +536,7 @@ struct CacheState {
 /// The Projects list for `@KEY` references (spec §3), in memory only:
 /// fetched in the background at the confirmed command hold, so a run reads it
 /// without waiting on Traccia. A failed fetch keeps the last list.
-pub struct ProjectsCache {
+pub(crate) struct ProjectsCache {
     state: Mutex<CacheState>,
     landed: Condvar,
 }
@@ -607,12 +607,6 @@ impl ProjectsCache {
     }
 }
 
-impl Default for ProjectsCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 static PROJECTS: ProjectsCache = ProjectsCache::new();
 
 /// At the confirmed command hold (`flow.rs`), next to the LLM pre-warm: the
@@ -630,9 +624,12 @@ fn refresh_projects_with(
     now: Instant,
     fetch: impl FnOnce(TracciaConfig) -> Result<Vec<Project>, Error> + Send + 'static,
 ) {
-    if settings.command.reminders {
-        let config = TracciaConfig::resolved(settings);
-        cache.refresh_if_stale(now, move || fetch(config?));
+    if !settings.command.reminders {
+        return;
+    }
+    // Unconfigured (only through the env overrides): nothing to fetch from.
+    if let Ok(config) = TracciaConfig::resolved(settings) {
+        cache.refresh_if_stale(now, move || fetch(config));
     }
 }
 
@@ -1244,11 +1241,13 @@ mod tests {
 
     /// Waits for the background fetch to land.
     fn settle(cache: &ProjectsCache) {
-        let started = Instant::now();
-        while cache.state.lock().unwrap().in_flight {
-            assert!(started.elapsed() < Duration::from_secs(5), "never settled");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let (state, _) = cache
+            .landed
+            .wait_timeout_while(cache.state(), Duration::from_secs(5), |state| {
+                state.in_flight
+            })
+            .unwrap();
+        assert!(!state.in_flight, "never settled");
     }
 
     /// A fetcher that counts its calls and answers `result`.
@@ -1370,25 +1369,28 @@ mod tests {
     }
 
     #[test]
-    fn the_refresh_never_runs_while_reminders_are_off() {
+    fn the_refresh_never_runs_while_reminders_are_off_or_unconfigured() {
         let mut settings = Settings::default();
+        let cache = cache();
+        let calls = Calls::default();
+        let fetch = |calls: &Calls| {
+            let fetch = counting(calls, Ok(vec![project("CRM", "CRM")]));
+            move |config: TracciaConfig| {
+                assert_eq!(config.token, TOKEN);
+                fetch()
+            }
+        };
+        // On, but with no URL or token: nothing starts.
+        settings.command.reminders = true;
+        refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
+        assert!(!cache.state().in_flight);
         settings.providers.insert(
             "traccia".into(),
             serde_json::json!({"base_url": URL, "token": TOKEN}),
         );
-        let cache = cache();
-        let calls = Calls::default();
-        let fetch = |calls: &Calls| {
-            let calls = calls.clone();
-            move |config: TracciaConfig| {
-                assert_eq!(config.token, TOKEN);
-                calls.fetch_add(1, Ordering::SeqCst);
-                Ok(vec![project("CRM", "CRM")])
-            }
-        };
-        assert!(!settings.command.reminders);
+        settings.command.reminders = false;
         refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
-        assert!(!cache.state.lock().unwrap().in_flight);
+        assert!(!cache.state().in_flight);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(cache.snapshot(Duration::ZERO).is_empty());
         settings.command.reminders = true;

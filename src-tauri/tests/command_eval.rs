@@ -746,12 +746,8 @@ fn grade_reminder(
                         .to_uppercase()
                 })
                 .collect();
-            if keys
-                != project
-                    .map(str::to_uppercase)
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            {
+            // PROJECTS keys are upper case.
+            if keys.iter().map(String::as_str).ne(project) {
                 problems.push(format!("keys {keys:?}, not {project:?}"));
             }
             problems
@@ -1015,7 +1011,15 @@ fn the_eval_grades_every_case_at_each_effort() {
     let knob = |name| std::env::var(name).ok();
     let reminders = knob("PARLA_EVAL_REMINDERS").as_deref() != Some("off");
     // As when Traccia couldn't be reached yet: no Projects list sent.
-    let projects = reminders && knob("PARLA_EVAL_PROJECTS").as_deref() != Some("off");
+    let listed = reminders && knob("PARLA_EVAL_PROJECTS").as_deref() != Some("off");
+    let projects: Vec<Project> = PROJECTS
+        .iter()
+        .filter(|_| listed)
+        .map(|(key, name)| Project {
+            key: (*key).into(),
+            name: (*name).into(),
+        })
+        .collect();
     let request = |effort: &str, case: usize| {
         let (instruction, selection, expect) = &CASES[case];
         Request {
@@ -1027,14 +1031,7 @@ fn the_eval_grades_every_case_at_each_effort() {
             // Fixed, so every eval sends the same requests.
             now: now_of(expect),
             reminders,
-            projects: PROJECTS
-                .iter()
-                .filter(|_| projects)
-                .map(|(key, name)| Project {
-                    key: (*key).into(),
-                    name: (*name).into(),
-                })
-                .collect(),
+            projects: projects.clone(),
         }
     };
     // Untimed: opens the connection, as the app's pre-warm at the hold does.

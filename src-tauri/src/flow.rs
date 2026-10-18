@@ -309,8 +309,9 @@ fn run_session(
     // stale Projects list in the background (PARLA-87).
     let selection = (command && held).then(|| {
         crate::provider::openai::prewarm(&settings);
+        let read = SelectionRead::start();
         command_mode::traccia::refresh_projects(&settings);
-        SelectionRead::start()
+        read
     });
     // After the mic started, so it never delays the first syllable.
     let dimmed = held.then(|| crate::dim::dim(&settings));
