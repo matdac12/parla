@@ -11,6 +11,7 @@
 pub mod responses;
 pub mod tools;
 pub mod traccia;
+pub mod when;
 
 pub use crate::inserter::Borrowed;
 use crate::{
@@ -460,15 +461,17 @@ fn run_tool(
     record: &mut DictationRecord,
     call: &responses::ToolCall,
 ) -> Outcome {
-    let tool = match tools::validate(call) {
+    let tool = match tools::validate(call, false) {
         Ok(tool) => tool,
         Err(reason) => return Outcome::Failed(Failure::Command(ProviderError::Other(reason))),
     };
-    match tool.run(ports.browser) {
+    let tools::Tool::OpenUrl(url) = tool else {
+        unreachable!("reminders are off")
+    };
+    match ports.browser.open(url.as_str()) {
         Ok(()) => {
             record.opened = Some(timing::elapsed_ms(run.key_up));
             record.tool = Some(call.name.clone());
-            let tools::Tool::OpenUrl(url) = tool;
             record.url = Some(url.to_string());
             Outcome::Opened {
                 host: url.host_str().unwrap_or_default().into(),

@@ -84,7 +84,7 @@ pub fn body(request: &Request) -> serde_json::Value {
                 "additionalProperties": false,
             },
         }},
-        "tools": tools::declarations(),
+        "tools": tools::declarations(false),
         "tool_choice": "auto",
         "parallel_tool_calls": false,
     })
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn the_request_offers_the_allowlist_strictly_one_call_at_most() {
         let body = body(&request());
-        assert_eq!(body["tools"], tools::declarations());
+        assert_eq!(body["tools"], tools::declarations(false));
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], false);
         let prompt = body["instructions"].as_str().unwrap();
