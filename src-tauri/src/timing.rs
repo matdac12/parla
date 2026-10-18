@@ -77,7 +77,8 @@ pub struct DictationRecord {
     /// The page an `opened` run opened, or the To-do a `created` run made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Key-up to the page handed to the browser, like `pasted` for a reply.
+    /// Key-up to the page handed to the browser, or the To-do created, like
+    /// `pasted` for a reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened: Option<u64>,
 }

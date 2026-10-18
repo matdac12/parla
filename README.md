@@ -447,7 +447,8 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
       rules, so DST is right and "at 3" means 3 wherever you are (a time said
       twice when the clocks go back is the first; one that doesn't exist when
       they go forward is the hour after);
-    - a day alone gets a 09:00 Reminder, or none if 09:00 has passed;
+    - a day alone gets a 09:00 Reminder, or none if it is today and 09:00
+      has passed (an earlier day fails as past);
     - neither is an Anytime To-do with no Reminder.
 
     With the tool on, the system prompt gets its rules (only the instruction
@@ -486,7 +487,7 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
   `selection_chars` (the selection's length, 0 for none; its text is never
   kept), `app` (the focused executable), and stage times from key-up
   (`provider_returned` for the transcript, `llm_returned` for the reply,
-  `opened` for a page). The Card's button goes to stderr only (`Parla card:
+  `opened` for a page or a To-do). The Card's button goes to stderr only (`Parla card:
   replaced`). A cancel while you are still holding leaves no row.
 - The dictation safeguards apply: a hold under 300 ms does nothing, any other
   key during the hold cancels it (so Ctrl+Shift+T, N, V or Esc reach your app

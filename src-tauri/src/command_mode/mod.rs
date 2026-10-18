@@ -489,6 +489,7 @@ fn run_tool(
             // ignored: a To-do created after Esc would surprise.
             match reminders.create(&title, &when) {
                 Ok(created) => {
+                    record.opened = Some(timing::elapsed_ms(run.key_up));
                     record.tool = Some(call.name.clone());
                     record.url = Some(created.url.clone());
                     record.reply = Some(created.summary());
@@ -1561,6 +1562,8 @@ mod tests {
         );
         assert_eq!((row.tokens_in, row.tokens_out), (Some(980), Some(38)));
         assert!(row.error.is_none() && row.reply_kind.is_none() && row.pasted.is_none());
+        // Key-up to the To-do created, as for a page opened.
+        assert!(row.llm_returned.unwrap() <= row.opened.unwrap());
         let json = serde_json::to_value(row).unwrap();
         assert_eq!(json["outcome"], "created");
         assert_eq!(json["tool"], "create_reminder");
@@ -1638,7 +1641,7 @@ mod tests {
             (
                 remind("Chiamare Luca", None, None),
                 traccia::Error::Timeout(traccia::WRITE_TIMEOUT),
-                "Traccia didn't answer in 5 s.",
+                "Traccia didn't answer in 5 s. The reminder may have been created.",
             ),
             (
                 remind("Chiamare Luca", None, None),

@@ -71,10 +71,10 @@ pub fn resolve(
     };
     match (day, time) {
         (Some(day), Some(time)) => at(day, time),
-        (Some(day), None) if (day, DEFAULT_REMINDER_TIME) > (now.date, now.time) => {
-            at(day, DEFAULT_REMINDER_TIME)
-        }
-        (Some(day), None) => When::Day(day),
+        // Today once 09:00 has passed. An earlier day goes at 09:00 too, so
+        // Traccia refuses it as past rather than plan a To-do for yesterday.
+        (Some(day), None) if day == now.date && DEFAULT_REMINDER_TIME <= now.time => When::Day(day),
+        (Some(day), None) => at(day, DEFAULT_REMINDER_TIME),
         // The prompt asks for the day; should it be missing, the same rule.
         (None, Some(time)) if time > now.time => at(now.date, time),
         (None, Some(time)) => at(now.date.next(), time),
@@ -435,6 +435,16 @@ mod tests {
         assert_eq!(
             resolved(Some("2026-10-17"), None, at("2026-10-17", "09:00")),
             When::Day(date("2026-10-17"))
+        );
+        // A day already gone is a moment already past: sent at 09:00 for
+        // Traccia to refuse, never a silent To-do planned for yesterday.
+        assert_eq!(
+            resolved(Some("2026-10-16"), None, saturday_evening),
+            When::At {
+                day: date("2026-10-16"),
+                time: DEFAULT_REMINDER_TIME,
+                utc: Some("2026-10-16T07:00:00Z".into()),
+            }
         );
         assert_eq!(
             resolved(Some("2026-10-17"), None, at("2026-10-17", "08:59")),

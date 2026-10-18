@@ -341,8 +341,10 @@ pub fn reminder_message(error: &Error, when: &When, today: Date) -> String {
         (Error::Refused { fields, .. }, _) => {
             format!("Traccia refused the reminder ({}).", fields.join(", "))
         }
-        // It may have been created: say so rather than invite a duplicate.
-        (Error::Dropped, _) => format!("{error} The reminder may have been created."),
+        // The POST may have gone through: say so rather than invite a duplicate.
+        (Error::Dropped | Error::Timeout(_), _) => {
+            format!("{error} The reminder may have been created.")
+        }
         (error, _) => error.to_string(),
     }
 }
@@ -926,7 +928,6 @@ mod tests {
         // Every other failure as for Test connection (spec §5).
         for error in [
             Error::Unreachable,
-            Error::Timeout(WRITE_TIMEOUT),
             Error::Token,
             Error::Scope,
             Error::Status(502),
@@ -938,9 +939,10 @@ mod tests {
                 error.to_string()
             );
         }
+        // The POST may have gone through: no invitation to a duplicate.
         assert_eq!(
-            Error::Timeout(WRITE_TIMEOUT).to_string(),
-            "Traccia didn't answer in 5 s."
+            reminder_message(&Error::Timeout(WRITE_TIMEOUT), &When::Anytime, today),
+            "Traccia didn't answer in 5 s. The reminder may have been created."
         );
         for name in ["error_400_remind_at", "error_400_title"] {
             let text = reminder_message(&parse_error(400, &fixture(name)), &When::Anytime, today);
