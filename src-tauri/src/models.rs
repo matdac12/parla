@@ -360,18 +360,7 @@ fn fetch_from(
     });
     install(target, |staging| {
         for file in files {
-            let response = tauri::async_runtime::block_on(async {
-                client
-                    .get(format!("{}/{}", file.source, file.name))
-                    .send()
-                    .await
-            })
-            .and_then(|r| r.error_for_status())
-            .map_err(transport_error)?;
-            let response = ResponseReader {
-                response,
-                pending: std::io::Cursor::new(Vec::new()),
-            };
+            let response = request(client, file)?;
             let mut output = File::create(staging.join(file.name)).map_err(|e| e.to_string())?;
             copy_verified(response, &mut output, file, |bytes| {
                 downloaded += bytes;
@@ -392,6 +381,21 @@ fn fetch_from(
             });
         }
         Ok(())
+    })
+}
+
+fn request(client: &Client, file: &ModelFile) -> Result<ResponseReader, String> {
+    let response = tauri::async_runtime::block_on(async {
+        client
+            .get(format!("{}/{}", file.source, file.name))
+            .send()
+            .await
+    })
+    .and_then(|r| r.error_for_status())
+    .map_err(transport_error)?;
+    Ok(ResponseReader {
+        response,
+        pending: std::io::Cursor::new(Vec::new()),
     })
 }
 
@@ -476,12 +480,15 @@ mod tests {
             source: Box::leak(source.into()),
         }
     }
-    // A local HTTP server exercises the real transport without downloading a model.
+    // A local HTTP server exercises the real transport without downloading a
+    // model. The returned `finish` joins it and gives the request headers.
     fn server(
         body: impl FnOnce(std::net::TcpStream) + Send + 'static,
-    ) -> (String, std::thread::JoinHandle<String>) {
+    ) -> (String, impl FnOnce() -> String) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
+        // Open until the join, so the wake-up connect below is never refused.
+        let open = listener.try_clone().unwrap();
         let worker = std::thread::spawn(move || {
             use std::io::BufRead;
             let (stream, _) = listener.accept().unwrap();
@@ -492,16 +499,24 @@ mod tests {
             let mut headers = String::new();
             loop {
                 let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                headers.push_str(&line);
-                if line == "\r\n" {
+                // EOF or an error: the client gave up (PARLA-90).
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
                     break;
                 }
+                headers.push_str(&line);
             }
             body(stream);
             headers
         });
-        (url, worker)
+        let finish = move || {
+            // A client that gave up before connecting left the server in
+            // `accept`: this connection ends it.
+            let _ = std::net::TcpStream::connect(address);
+            let headers = worker.join().unwrap();
+            drop(open);
+            headers
+        };
+        (format!("http://{address}"), finish)
     }
     #[test]
     fn ordinary_download_skips_hashes_but_explicit_repair_detects_corruption() {
@@ -518,16 +533,15 @@ mod tests {
     #[test]
     fn mid_body_stall_cleans_staging_and_releases_busy_flag() {
         let (release, wait) = std::sync::mpsc::channel();
-        let (source, worker) = server(move |mut stream| {
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na")
-                .unwrap();
+        let (source, finish) = server(move |mut stream| {
+            // Under load the client can give up before the headers are out.
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na");
             let _ = wait.recv_timeout(Duration::from_secs(3));
         });
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("model");
-        let started = Instant::now();
-        let client = model_client(Duration::from_millis(100)).unwrap();
+        let client = model_client(Duration::from_millis(500)).unwrap();
         let busy = AtomicU8::new(0);
         let result = {
             let _guard = DownloadGuard::acquire(&busy, 1).unwrap();
@@ -536,32 +550,66 @@ mod tests {
         assert_eq!(busy.load(Ordering::Acquire), 0);
         assert!(DownloadGuard::acquire(&busy, 2).is_ok());
         release.send(()).unwrap();
-        worker.join().unwrap();
+        finish();
+        // The server holds the connection until released, so only the stall
+        // timeout can end the download (PARLA-90: no wall-clock bound).
         assert!(result.unwrap_err().contains("stalled"));
-        assert!(started.elapsed() < Duration::from_secs(2));
         assert!(!target.exists());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
     #[test]
     fn read_timeout_resets_when_bytes_arrive_and_user_agent_is_sent() {
-        let (source, worker) = server(|mut stream| {
+        // reqwest times a read only while it waits (PARLA-90). Each byte is
+        // sent before the read that takes it, so no timed wait holds a sleep;
+        // idling past STALL between reads fails a total or a non-resetting
+        // deadline.
+        const STALL: Duration = Duration::from_secs(1);
+        let (ask, asked) = std::sync::mpsc::channel();
+        let (sent, written) = std::sync::mpsc::channel();
+        let (source, finish) = server(move |mut stream| {
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na")
                 .unwrap();
-            for byte in b"abc" {
-                stream.write_all(&[*byte]).unwrap();
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            asked.recv().unwrap();
+            stream.write_all(b"bc").unwrap();
+            sent.send(()).unwrap();
         });
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("model");
-        let client = model_client(Duration::from_millis(180)).unwrap();
-        let result = fetch_from(&client, &target, "test", &[small_file_at(&source)], |_| {});
-        let headers = worker.join().unwrap();
-        result.unwrap();
+        let file = small_file_at(&source);
+        let client = model_client(STALL).unwrap();
+        let response = request(&client, &file).unwrap();
+        let mut body = Vec::new();
+        let mut gate = Some((ask, written));
+        copy_verified(response, &mut body, &file, |_| {
+            if let Some((ask, written)) = gate.take() {
+                ask.send(()).unwrap();
+                written.recv().unwrap();
+                std::thread::sleep(STALL + Duration::from_millis(100));
+            }
+        })
+        .unwrap();
+        let headers = finish();
         assert!(headers
             .to_lowercase()
             .contains(&format!("user-agent: parla/{}", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(body, b"abc");
+    }
+    #[test]
+    fn download_publishes_the_verified_file() {
+        let (source, finish) = server(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc")
+                .unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("model");
+        let client = model_client(READ_STALL_TIMEOUT).unwrap();
+        let mut downloaded = 0;
+        fetch_from(&client, &target, "test", &[small_file_at(&source)], |p| {
+            downloaded = p.downloaded
+        })
+        .unwrap();
+        finish();
+        assert_eq!(downloaded, 3);
         assert_eq!(std::fs::read(target.join("small")).unwrap(), b"abc");
     }
     #[test]
