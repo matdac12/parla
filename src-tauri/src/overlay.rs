@@ -31,7 +31,8 @@ const LABELLED_HOLD: Duration = Duration::from_millis(1500);
 /// A failed dictation keeps its pill (Dismiss and Retry buttons) up for a while.
 const ERROR_HOLD: Duration = Duration::from_secs(10);
 /// A reminder Card's confirmation (PARLA-88): its ring fills over this long,
-/// then the Card fades out over `CARD_FADE` and closes.
+/// then the Card fades out over `CARD_FADE` and closes. `overlay.css` animates
+/// the same 5000 ms and 300 ms.
 const CARD_COUNTDOWN: Duration = Duration::from_secs(5);
 const CARD_FADE: Duration = Duration::from_millis(300);
 
@@ -402,27 +403,37 @@ fn closed(app: &tauri::AppHandle, generation: u64) {
     }
 }
 
-/// Undo's click: the Card of `generation`, left open and held. None if it is
-/// gone or already held.
-pub fn hold_card(generation: u64) -> Option<crate::card::Card> {
+/// The Card of `generation`, unless an Undo holds it.
+fn live(slot: &mut Option<ShownCard>, generation: u64) -> Option<&mut ShownCard> {
+    slot.as_mut()
+        .filter(|s| s.generation == generation && !s.held)
+}
+
+/// Undo's click: the To-do of the Card of `generation`, which stays open and
+/// is held. None if it is gone, already held, or has no To-do.
+pub fn hold_card(generation: u64) -> Option<crate::card::Todo> {
     hold(&mut shown_card(), generation)
 }
 
-fn hold(slot: &mut Option<ShownCard>, generation: u64) -> Option<crate::card::Card> {
-    let shown = slot
-        .as_mut()
-        .filter(|s| s.generation == generation && !s.held)?;
+fn hold(slot: &mut Option<ShownCard>, generation: u64) -> Option<crate::card::Todo> {
+    let shown = live(slot, generation)?;
+    let todo = shown.card.todo.clone()?;
     shown.held = true;
-    Some(shown.card.clone())
+    Some(todo)
 }
 
 /// After a failed Undo: the Card of `generation` again, its buttons back and
 /// no countdown. It waits for a click or the next session, like any Card.
 pub fn keep_card(app: &tauri::AppHandle, generation: u64) {
-    let mut slot = shown_card();
-    if let Some(shown) = slot.as_mut().filter(|s| s.generation == generation) {
-        shown.held = false;
-        let _ = app.emit_to(LABEL, "card", view(generation, &shown.card, false));
+    let view = shown_card()
+        .as_mut()
+        .filter(|s| s.generation == generation)
+        .map(|shown| {
+            shown.held = false;
+            view(generation, &shown.card, false)
+        });
+    if let Some(view) = view {
+        let _ = app.emit_to(LABEL, "card", view);
     }
 }
 
@@ -434,7 +445,8 @@ fn view(generation: u64, card: &crate::card::Card, countdown: bool) -> serde_jso
 /// The countdown's end: the Card of `generation`, unless an Undo holds it or
 /// it is gone (a click, or the next session, closed it first).
 fn expire(slot: &mut Option<ShownCard>, generation: u64) -> Option<ShownCard> {
-    slot.take_if(|shown| shown.generation == generation && !shown.held)
+    live(slot, generation)?;
+    slot.take()
 }
 
 /// A reminder Card's 5 s: the page fills the ring, then fades the Card when
@@ -446,11 +458,7 @@ fn count_down(app: &tauri::AppHandle, generation: u64) {
         .name("parla-card-countdown".into())
         .spawn(move || {
             std::thread::sleep(CARD_COUNTDOWN);
-            let running = |slot: &Option<ShownCard>| {
-                slot.as_ref()
-                    .is_some_and(|s| s.generation == generation && !s.held)
-            };
-            if !running(&shown_card()) {
+            if live(&mut shown_card(), generation).is_none() {
                 return;
             }
             let _ = app.emit_to(LABEL, "card-leave", generation);

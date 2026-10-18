@@ -140,57 +140,61 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     };
-    if action == Action::Undo {
-        let settings = settings();
-        let traccia = traccia::Remote(&settings);
-        let line = undo(
-            &OnScreen { app, generation },
-            |id| traccia.undo(id),
-            |message| {
-                crate::failure::notify_command_error(
-                    app,
-                    &crate::provider::ProviderError::Other(message.into()),
-                )
-            },
-        );
-        if let Some(line) = line {
-            log(&line);
-        }
-        return;
-    }
-    let Some(card) = crate::overlay::take_card(app, generation) else {
-        return;
+    // Every action but Undo closes the Card first.
+    let take = || crate::overlay::take_card(app, generation);
+    let outcome = |result: Result<&str, String>| match result {
+        Ok(done) => done.to_string(),
+        Err(error) => format!("{action:?} failed: {error}"),
     };
-    let result = match action {
-        Action::Copy => crate::inserter::copy_text(&card.text).map(|()| "copied"),
-        Action::Paste | Action::Replace => {
+    let line = match action {
+        Action::Undo => {
+            let settings = settings();
+            let traccia = traccia::Remote(&settings);
+            undo(
+                &OnScreen { app, generation },
+                |id| traccia.undo(id),
+                |message| {
+                    crate::failure::notify_command_error(
+                        app,
+                        &crate::provider::ProviderError::Other(message.into()),
+                    )
+                },
+            )
+        }
+        Action::Copy => {
+            take().map(|card| outcome(crate::inserter::copy_text(&card.text).map(|()| "copied")))
+        }
+        Action::Paste | Action::Replace => take().map(|card| {
             let done = if action == Action::Replace {
                 "replaced"
             } else {
                 "pasted"
             };
             let settings = settings();
-            crate::inserter::paste_text_with_options(
-                &card.text,
-                std::time::Duration::from_millis(settings.restore_delay_ms),
-                settings.paste_compatibility_mode,
-                false,
+            outcome(
+                crate::inserter::paste_text_with_options(
+                    &card.text,
+                    std::time::Duration::from_millis(settings.restore_delay_ms),
+                    settings.paste_compatibility_mode,
+                    false,
+                )
+                .map(|_| done),
             )
-            .map(|_| done)
-        }
-        Action::Open => {
+        }),
+        Action::Open => take().map(|card| {
             let base_url = traccia::TracciaConfig::resolved(&settings())
                 .ok()
                 .map(|config| config.base_url);
-            let browser = crate::command_mode::tools::DefaultBrowser;
-            return log(&open(&card, base_url.as_deref(), &browser));
-        }
-        Action::Dismiss => Ok("dismissed"),
-        Action::Undo => unreachable!("Undo returned above"),
+            open(
+                &card,
+                base_url.as_deref(),
+                &crate::command_mode::tools::DefaultBrowser,
+            )
+        }),
+        Action::Dismiss => take().map(|_| "dismissed".into()),
     };
-    match result {
-        Ok(done) => log(done),
-        Err(error) => log(&format!("{action:?} failed: {error}")),
+    if let Some(line) = line {
+        log(&line);
     }
 }
 
@@ -213,9 +217,9 @@ fn open(card: &Card, base_url: Option<&str>, browser: &dyn UrlOpener) -> String 
 
 /// The reminder Card on screen, as Undo sees it.
 trait Shown {
-    /// The Card, left open with its countdown stopped. None once it is gone,
-    /// or while an Undo is already running.
-    fn hold(&self) -> Option<Card>;
+    /// Its To-do, the Card left open with its countdown stopped. None once
+    /// it is gone, or while an Undo is already running.
+    fn hold(&self) -> Option<Todo>;
     fn close(&self);
     /// Gives it its buttons back after a failed Undo.
     fn keep(&self);
@@ -228,7 +232,7 @@ struct OnScreen<'a> {
 }
 
 impl Shown for OnScreen<'_> {
-    fn hold(&self) -> Option<Card> {
+    fn hold(&self) -> Option<Todo> {
         crate::overlay::hold_card(self.generation)
     }
     fn close(&self) {
@@ -248,12 +252,8 @@ fn undo(
     delete: impl FnOnce(&str) -> Result<(), traccia::Error>,
     notify: impl FnOnce(&str),
 ) -> Option<String> {
-    let card = shown.hold()?;
-    let result = match &card.todo {
-        Some(todo) => delete(&todo.id),
-        None => Err(traccia::Error::Unreadable),
-    };
-    Some(match result {
+    let todo = shown.hold()?;
+    Some(match delete(&todo.id) {
         Ok(()) => {
             shown.close();
             "reminder undone".into()
@@ -411,11 +411,11 @@ mod tests {
         }
     }
     impl Shown for Screen {
-        fn hold(&self) -> Option<Card> {
+        fn hold(&self) -> Option<Todo> {
             if self.held.replace(true) {
                 return None;
             }
-            self.card.borrow().clone()
+            self.card.borrow().as_ref()?.todo.clone()
         }
         fn close(&self) {
             *self.card.borrow_mut() = None;

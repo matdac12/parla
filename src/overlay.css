@@ -279,7 +279,8 @@ body {
   background: #ff9f43;
 }
 /* A reminder's 5 s countdown: one turn of a short arc, then the arc fills
-   its circle. Rust closes the Card when it is full. */
+   its circle. Rust closes the Card when it is full (CARD_COUNTDOWN and
+   CARD_FADE in overlay.rs: keep the 5000 ms and 300 ms in step). */
 .card-ring {
   display: none;
   flex: none;
