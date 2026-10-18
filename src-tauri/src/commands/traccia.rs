@@ -185,6 +185,7 @@ mod tests {
             [
                 traccia::Error::Redirect,
                 traccia::Error::Protocol,
+                traccia::Error::Dropped,
                 traccia::Error::Unreachable
             ]
             .iter()

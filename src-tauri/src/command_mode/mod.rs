@@ -510,7 +510,7 @@ mod tests {
         sync::{mpsc, Arc},
         time::SystemTime,
     };
-    use when::{Date, LocalNow, Time};
+    use when::test_support::{date, saturday_evening, time, RomeInOctober};
 
     #[test]
     fn the_buttons_follow_the_kind_the_selection_and_the_probe() {
@@ -1461,24 +1461,6 @@ mod tests {
         assert!(row.tool.is_none() && row.url.is_none());
     }
 
-    fn saturday_evening() -> LocalNow {
-        LocalNow {
-            date: Date::parse("2026-10-17").unwrap(),
-            time: Time::parse("21:14").unwrap(),
-        }
-    }
-
-    /// Rome before the clocks go back: UTC+2.
-    struct RomeInOctober;
-    impl LocalClock for RomeInOctober {
-        fn now(&self) -> LocalNow {
-            saturday_evening()
-        }
-        fn to_utc(&self, day: Date, time: Time) -> Option<String> {
-            Some(format!("{day}T{:02}:{:02}:00Z", time.hour - 2, time.minute))
-        }
-    }
-
     /// Traccia: answers every POST with `result`; with `esc`, Esc is
     /// pressed while the POST is on its way.
     struct FakeReminders {
@@ -1555,8 +1537,8 @@ mod tests {
             [(
                 "Chiamare Luca".to_string(),
                 When::At {
-                    day: Date::parse("2026-10-18").unwrap(),
-                    time: Time::parse("15:00").unwrap(),
+                    day: date("2026-10-18"),
+                    time: time("15:00"),
                     utc: Some("2026-10-18T13:00:00Z".into()),
                 }
             )]

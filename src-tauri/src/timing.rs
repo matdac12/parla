@@ -56,7 +56,8 @@ pub struct DictationRecord {
     /// Key-up to the LLM reply, like the other stage offsets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_returned: Option<u64>,
-    /// The LLM's text reply, kept for Copy (PARLA-66) even if the paste failed.
+    /// The LLM's text reply, kept for Copy (PARLA-66) even if the paste
+    /// failed; for a `created` run, the To-do as Traccia stored it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
     /// Whether a `shown` reply was an edit or an answer (PARLA-81). Not
@@ -70,10 +71,10 @@ pub struct DictationRecord {
     /// The focused app's executable name at the confirmed hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
-    /// The allowlisted tool an `opened` run called (PARLA-65).
+    /// The allowlisted tool an `opened` or `created` run called.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
-    /// The page an `opened` run opened.
+    /// The page an `opened` run opened, or the To-do a `created` run made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Key-up to the page handed to the browser, like `pasted` for a reply.

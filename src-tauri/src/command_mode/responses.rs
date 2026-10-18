@@ -359,7 +359,7 @@ impl super::Llm for OpenAi<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_mode::when::{Date, LocalNow, Time};
+    use crate::command_mode::when::test_support::saturday_evening;
 
     fn fixture(name: &str) -> String {
         let path = format!(
@@ -590,10 +590,7 @@ mod tests {
             instruction: "Scrivi un saluto breve".into(),
             selection: None,
             app: None,
-            now: LocalNow {
-                date: Date::parse("2026-10-17").unwrap(),
-                time: Time::parse("21:14").unwrap(),
-            },
+            now: saturday_evening(),
             reminders: false,
         }
     }

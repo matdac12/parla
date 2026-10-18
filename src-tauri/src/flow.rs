@@ -381,7 +381,7 @@ fn run_session(
         let run = command_mode::Run {
             settings: &settings.command,
             key_up,
-            now: command_mode::when::LocalClock::now(&command_mode::when::SystemClock),
+            now: command_mode::when::SystemClock.now(),
             cancelled: &cancelled,
             hold_error,
             focus: focus.as_ref(),

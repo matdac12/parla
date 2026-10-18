@@ -49,9 +49,8 @@ pub enum When {
     Anytime,
 }
 
-/// The local clock and its time zone.
+/// The local time zone.
 pub trait LocalClock {
-    fn now(&self) -> LocalNow;
     /// The local wall-clock time as a UTC `remindAt` (`…Z`). A time said
     /// twice when the clocks go back is the first; one skipped when they go
     /// forward is the hour after. None where Parla can't tell.
@@ -86,25 +85,18 @@ pub fn resolve(
 /// The machine's clock and time zone.
 pub struct SystemClock;
 
-#[cfg(windows)]
-impl LocalClock for SystemClock {
-    fn now(&self) -> LocalNow {
+impl SystemClock {
+    #[cfg(windows)]
+    pub fn now(&self) -> LocalNow {
         let mut now = Default::default();
         // SAFETY: GetLocalTime only fills the plain-data SYSTEMTIME.
         unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut now) };
         windows_zone::read(&now)
     }
 
-    fn to_utc(&self, day: Date, time: Time) -> Option<String> {
-        // Null: the zone Windows is set to, with its DST rules.
-        windows_zone::to_utc(std::ptr::null(), day, time)
-    }
-}
-
-/// Off Windows, where Parla does not run: UTC, and no conversion.
-#[cfg(not(windows))]
-impl LocalClock for SystemClock {
-    fn now(&self) -> LocalNow {
+    /// Off Windows, where Parla does not run: UTC.
+    #[cfg(not(windows))]
+    pub fn now(&self) -> LocalNow {
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -112,7 +104,17 @@ impl LocalClock for SystemClock {
         let (date, time) = from_minutes(seconds / 60);
         LocalNow { date, time }
     }
+}
 
+impl LocalClock for SystemClock {
+    #[cfg(windows)]
+    fn to_utc(&self, day: Date, time: Time) -> Option<String> {
+        // Null: the zone Windows is set to, with its DST rules.
+        windows_zone::to_utc(std::ptr::null(), day, time)
+    }
+
+    /// Off Windows: no conversion, the day and time go as said.
+    #[cfg(not(windows))]
     fn to_utc(&self, _day: Date, _time: Time) -> Option<String> {
         None
     }
@@ -120,7 +122,7 @@ impl LocalClock for SystemClock {
 
 #[cfg(windows)]
 mod windows_zone {
-    use super::{from_minutes, minutes, Date, LocalNow, Time};
+    use super::{from_minutes, Date, LocalNow, Time};
     use windows_sys::Win32::{
         Foundation::SYSTEMTIME,
         System::Time::{
@@ -174,6 +176,11 @@ mod windows_zone {
         Some(format!("{day}T{time}:00Z"))
     }
 
+    /// Minutes since 1970-01-01 00:00.
+    fn minutes(at: LocalNow) -> i64 {
+        at.date.days() * 1440 + i64::from(at.time.hour) * 60 + i64::from(at.time.minute)
+    }
+
     /// Local to UTC minutes, as Windows reads it.
     fn convert(zone: *const TIME_ZONE_INFORMATION, local: LocalNow) -> Option<i64> {
         let mut utc = SYSTEMTIME::default();
@@ -192,12 +199,6 @@ mod windows_zone {
         };
         (ok != 0).then(|| read(&local))
     }
-}
-
-/// Minutes since 1970-01-01 00:00.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn minutes(at: LocalNow) -> i64 {
-    at.date.days() * 1440 + i64::from(at.time.hour) * 60 + i64::from(at.time.minute)
 }
 
 fn from_minutes(minutes: i64) -> (Date, Time) {
@@ -341,41 +342,56 @@ impl fmt::Display for Time {
     }
 }
 
+/// Shared by the command-mode tests: Saturday evening in Rome in October.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use super::{Date, LocalClock, LocalNow, Time};
 
-    fn date(text: &str) -> Date {
+    pub(crate) fn date(text: &str) -> Date {
         Date::parse(text).unwrap()
     }
-    fn time(text: &str) -> Time {
+
+    pub(crate) fn time(text: &str) -> Time {
         Time::parse(text).unwrap()
     }
-    fn at(day: &str, hour: &str) -> LocalNow {
+
+    pub(crate) fn at(day: &str, hour: &str) -> LocalNow {
         LocalNow {
             date: date(day),
             time: time(hour),
         }
     }
 
-    /// Rome in October 2026 by a fixed offset, or a clock that can't convert.
-    struct FakeClock {
-        converts: bool,
+    pub(crate) fn saturday_evening() -> LocalNow {
+        at("2026-10-17", "21:14")
     }
-    impl LocalClock for FakeClock {
-        fn now(&self) -> LocalNow {
-            at("2026-10-17", "21:14")
-        }
+
+    /// Rome before the clocks go back: UTC+2.
+    pub(crate) struct RomeInOctober;
+    impl LocalClock for RomeInOctober {
         fn to_utc(&self, day: Date, time: Time) -> Option<String> {
             let hour = time.hour.checked_sub(2)?;
-            self.converts
-                .then(|| format!("{day}T{:02}:{:02}:00Z", hour, time.minute))
+            Some(format!("{day}T{hour:02}:{:02}:00Z", time.minute))
         }
     }
-    const ROME: FakeClock = FakeClock { converts: true };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::test_support::{at, date, time, RomeInOctober};
+
+    /// A zone Parla can't read.
+    struct NoZone;
+    impl LocalClock for NoZone {
+        fn to_utc(&self, _day: Date, _time: Time) -> Option<String> {
+            None
+        }
+    }
 
     fn resolved(day: Option<&str>, hour: Option<&str>, now: LocalNow) -> When {
-        resolve(day.map(date), hour.map(time), now, &ROME)
+        resolve(day.map(date), hour.map(time), now, &RomeInOctober)
     }
 
     #[test]
@@ -472,7 +488,7 @@ mod tests {
                 Some(date("2026-10-18")),
                 Some(time("15:00")),
                 at("2026-10-17", "21:14"),
-                &FakeClock { converts: false }
+                &NoZone
             ),
             When::At {
                 day: date("2026-10-18"),

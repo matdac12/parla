@@ -136,9 +136,12 @@ pub enum Error {
     /// token and would read as a token error (an http URL on an https
     /// server).
     Redirect,
-    /// Something answers at the address, but not over that protocol: an
-    /// https URL on a plain HTTP port, or the reverse.
+    /// Something answers at the address, but the connection failed while
+    /// opening: an https URL on a plain HTTP port, or a certificate refused.
     Protocol,
+    /// The connection broke once open, before an answer could be read: an
+    /// http URL on a TLS port, or a reset. A POST may have gone through.
+    Dropped,
 }
 
 impl std::fmt::Display for Error {
@@ -176,6 +179,10 @@ impl std::fmt::Display for Error {
             Self::Protocol => write!(
                 f,
                 "Something answers at the Traccia URL, but not as Traccia. Check it in Settings → Command mode (http or https, and the port)."
+            ),
+            Self::Dropped => write!(
+                f,
+                "The connection to Traccia broke before it answered. Check the Traccia URL in Settings → Command mode (http or https, and the port)."
             ),
         }
     }
@@ -261,15 +268,10 @@ pub struct Created {
 impl Created {
     /// `Chiamare Luca · 2026-10-18 15:00`, for the history row.
     pub fn summary(&self) -> String {
-        let when: Vec<&str> = [&self.day, &self.time]
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        if when.is_empty() {
-            self.title.clone()
-        } else {
-            format!("{} · {}", self.title, when.join(" "))
+        match (&self.day, &self.time) {
+            (Some(day), Some(time)) => format!("{} · {day} {time}", self.title),
+            (Some(day), None) => format!("{} · {day}", self.title),
+            _ => self.title.clone(),
         }
     }
 }
@@ -339,21 +341,21 @@ pub fn reminder_message(error: &Error, when: &When, today: Date) -> String {
         (Error::Refused { fields, .. }, _) => {
             format!("Traccia refused the reminder ({}).", fields.join(", "))
         }
+        // It may have been created: say so rather than invite a duplicate.
+        (Error::Dropped, _) => format!("{error} The reminder may have been created."),
         (error, _) => error.to_string(),
     }
 }
 
 /// The shared client's settings, but never following a redirect (see
-/// `Error::Redirect`). Built at the first Traccia call, in command mode only.
+/// `Error::Redirect`): reqwest sets that per client. Built at the first
+/// Traccia call, in command mode only.
 fn http() -> Result<&'static reqwest::blocking::Client, Error> {
     static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::blocking::Client::builder()
-                .connect_timeout(openai::CONNECT_TIMEOUT)
+            openai::client_builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .map_err(|error| eprintln!("Cannot build the Traccia client: {error}"))
                 .ok()
@@ -374,7 +376,6 @@ impl super::Reminders for Remote<'_> {
 }
 
 /// Blocking calls: run them off the UI thread.
-#[derive(Clone, Copy)]
 pub struct Client<'a> {
     config: &'a TracciaConfig,
     timeout: Duration,
@@ -474,8 +475,10 @@ impl<'a> Client<'a> {
             Error::Unreachable
         } else if error.is_timeout() {
             Error::Timeout(self.timeout)
-        } else {
+        } else if error.is_connect() {
             Error::Protocol
+        } else {
+            Error::Dropped
         }
     }
 
@@ -534,7 +537,7 @@ pub fn check(config: &TracciaConfig) -> Result<Connection, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_mode::when::{Date, Time};
+    use crate::command_mode::when::test_support::{date, time};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -830,12 +833,6 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         drop(listener);
     }
-    fn date(text: &str) -> Date {
-        Date::parse(text).unwrap()
-    }
-    fn time(text: &str) -> Time {
-        Time::parse(text).unwrap()
-    }
     fn at(day: &str, hour: &str, utc: Option<&str>) -> When {
         When::At {
             day: date(day),
@@ -974,7 +971,6 @@ mod tests {
             "{head}"
         );
         assert_eq!(Client::for_writes(&config).timeout, WRITE_TIMEOUT);
-        assert_eq!(WRITE_TIMEOUT, Duration::from_secs(5));
     }
 
     #[test]
@@ -1039,7 +1035,14 @@ mod tests {
         // http:// on a TLS port: the server sends a TLS alert, not HTTP.
         let tls = answer_at_once(b"\x15\x03\x03\x00\x02\x02\x46");
         let config = TracciaConfig::new(&format!("http://{tls}"), TOKEN).unwrap();
-        assert_eq!(Client::new(&config).me(), Err(Error::Protocol));
+        assert_eq!(Client::new(&config).me(), Err(Error::Dropped));
+        // A POST that broke may have gone through: the message says so.
+        let message = reminder_message(&Error::Dropped, &When::Anytime, date("2026-10-17"));
+        assert!(message.contains("http or https"), "{message}");
+        assert!(
+            message.ends_with("The reminder may have been created."),
+            "{message}"
+        );
         let message = Error::Protocol.to_string();
         assert!(message.contains("http or https"), "{message}");
     }

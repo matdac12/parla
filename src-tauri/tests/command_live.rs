@@ -3,7 +3,7 @@
 use parla_lib::{
     command_mode::{
         responses::{send, Content, Reply, Request},
-        when::{LocalClock, SystemClock},
+        when::SystemClock,
     },
     settings::CommandSettings,
 };

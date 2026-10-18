@@ -541,13 +541,11 @@ fn grade(expect: &Expect, reply: &Reply) -> Verdict {
             problems: vec!["replied with text instead of a reminder".into()],
             ..Verdict::default()
         },
-        (Expect::Open { .. } | Expect::Remind { .. }, Content::Call(call))
-            if call.name
-                != match expect {
-                    Expect::Open { .. } => tools::OPEN_URL,
-                    _ => tools::CREATE_REMINDER,
-                } =>
-        {
+        (Expect::Open { .. }, Content::Call(call)) if call.name != tools::OPEN_URL => Verdict {
+            problems: vec![format!("called {}", call.name)],
+            ..Verdict::default()
+        },
+        (Expect::Remind { .. }, Content::Call(call)) if call.name != tools::CREATE_REMINDER => {
             Verdict {
                 problems: vec![format!("called {}", call.name)],
                 ..Verdict::default()
@@ -649,7 +647,7 @@ fn grade_reminder(
             }
             problems
         }
-        Ok(other) => vec![format!("{other:?}")],
+        Ok(Tool::OpenUrl(_)) => unreachable!("graded as the wrong tool"),
     };
     Verdict {
         kind_ok: true,
@@ -734,7 +732,7 @@ fn grade_text(
 fn grade_page(hosts: &[&'static str], has: &[&'static str], call: &ToolCall) -> Verdict {
     let problems = match tools::validate(call, true) {
         Err(refused) => vec![refused],
-        Ok(Tool::CreateReminder { .. }) => vec!["a reminder".into()],
+        Ok(Tool::CreateReminder { .. }) => unreachable!("graded as the wrong tool"),
         Ok(Tool::OpenUrl(url)) => {
             let host = url.host_str().unwrap_or_default();
             let mut problems = Vec::new();
