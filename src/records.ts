@@ -16,7 +16,8 @@ export interface DictationRecord {
   /** Command runs, and dictations shown in the Card instead of pasted
    *  (`shown`, PARLA-80); absent on other rows. */
   outcome?: CommandOutcome;
-  /** The page an `opened` run opened (PARLA-65). */
+  /** The page an `opened` run opened (PARLA-65), or the To-do a `created`
+   *  run created (PARLA-86). */
   url?: string;
   llm_model?: string;
   tokens_in?: number;
@@ -29,9 +30,10 @@ export interface DictationRecord {
 }
 
 /** How a command run ended. `opened` is the open_url tool (PARLA-65);
+ *  `created` is a To-do the create_reminder tool made in Traccia (PARLA-86);
  *  `shown` is a reply in the Card (PARLA-81), or a dictation the Safety Net
  *  sent there (PARLA-80). `pasted` is a reply from before PARLA-81. */
-export type CommandOutcome = "pasted" | "opened" | "failed" | "cancelled" | "shown";
+export type CommandOutcome = "pasted" | "opened" | "created" | "failed" | "cancelled" | "shown";
 
 export function must<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);

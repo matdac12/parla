@@ -405,6 +405,29 @@ impl<'a> Client<'a> {
         parse_created(&self.send(request)?)
     }
 
+    /// `DELETE /v1/todos/{id}`, for the live tests until slice 4's Undo.
+    #[cfg(test)]
+    pub(crate) fn delete(&self, id: &str) -> Result<(), Error> {
+        self.send(http()?.delete(self.url(&format!("/v1/todos/{id}"))))
+            .map(drop)
+    }
+
+    /// The open To-dos' titles (the first 250), for the live tests.
+    #[cfg(test)]
+    pub(crate) fn open_titles(&self) -> Result<Vec<String>, Error> {
+        #[derive(Deserialize)]
+        struct Item {
+            title: String,
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            items: Vec<Item>,
+        }
+        let page: Page = serde_json::from_str(&self.get("/v1/todos?state=open&limit=250")?)
+            .map_err(|_| Error::Unreadable)?;
+        Ok(page.items.into_iter().map(|item| item.title).collect())
+    }
+
     pub fn me(&self) -> Result<Me, Error> {
         parse_me(&self.get("/v1/me")?)
     }
