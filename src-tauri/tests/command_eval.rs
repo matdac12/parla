@@ -5,7 +5,8 @@
 //! reminder's day, time and title against a fixed Now (PARLA-86), and its
 //! `@KEY` against a fixed Projects list (PARLA-87). It runs with
 //! reminders on; `PARLA_EVAL_REMINDERS=off` sends the requests as with the
-//! tool off and skips the reminder cases. Re-run it whenever the system
+//! tool off and skips the reminder cases; `PARLA_EVAL_PROJECTS=off` sends no
+//! Projects list. Re-run it whenever the system
 //! prompt, the request or a tool changes:
 //! `OPENAI_API_KEY=... cargo test --test command_eval -- --ignored --nocapture`
 //! (about 350 calls, about 4 cents). The grading itself runs offline in every
@@ -1013,6 +1014,8 @@ fn the_eval_grades_every_case_at_each_effort() {
     let defaults = CommandSettings::default();
     let knob = |name| std::env::var(name).ok();
     let reminders = knob("PARLA_EVAL_REMINDERS").as_deref() != Some("off");
+    // As when Traccia couldn't be reached yet: no Projects list sent.
+    let projects = reminders && knob("PARLA_EVAL_PROJECTS").as_deref() != Some("off");
     let request = |effort: &str, case: usize| {
         let (instruction, selection, expect) = &CASES[case];
         Request {
@@ -1026,7 +1029,7 @@ fn the_eval_grades_every_case_at_each_effort() {
             reminders,
             projects: PROJECTS
                 .iter()
-                .filter(|_| reminders)
+                .filter(|_| projects)
                 .map(|(key, name)| Project {
                     key: (*key).into(),
                     name: (*name).into(),
