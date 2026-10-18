@@ -1,7 +1,7 @@
 //! The OpenAI Responses API client for command mode (never Chat Completions).
 //! Pure request building and response parsing, plus one thin blocking call.
 
-use super::{tools, when::LocalNow, Kind};
+use super::{tools, traccia::Project, when::LocalNow, Kind};
 use crate::{
     provider::{openai, ProviderError},
     settings::Settings,
@@ -53,6 +53,8 @@ pub struct Request {
     /// `command.reminders`: offers `create_reminder`, with its rules and the
     /// time of day. Off, the request is the one before PARLA-86, byte for byte.
     pub reminders: bool,
+    /// The Projects a reminder's title may reference as `@KEY` (PARLA-87).
+    pub projects: Vec<Project>,
 }
 
 /// One non-streaming request. `store: false` because the Responses API
@@ -110,18 +112,26 @@ pub fn body(request: &Request) -> serde_json::Value {
 }
 
 /// The context, the selection as a delimited data block, and the instruction
-/// last. The time of day only while reminders are on.
+/// last. The time of day, and the Projects when there are any, only while
+/// reminders are on.
 fn user_text(request: &Request) -> String {
     use std::fmt::Write;
     let mut text = String::new();
     if let Some(app) = &request.app {
         let _ = writeln!(text, "App: {app}");
     }
-    let _ = if request.reminders {
-        write!(text, "Now: {}\n\n", request.now.line())
+    if request.reminders {
+        let _ = writeln!(text, "Now: {}", request.now.line());
+        if !request.projects.is_empty() {
+            text.push_str("Projects:\n");
+            for project in &request.projects {
+                let _ = writeln!(text, "{}: {}", project.key, project.name);
+            }
+        }
+        text.push('\n');
     } else {
-        write!(text, "Date: {}\n\n", request.now.date)
-    };
+        let _ = write!(text, "Date: {}\n\n", request.now.date);
+    }
     if let Some(selection) = &request.selection {
         let _ = write!(text, "<selection>\n{selection}\n</selection>\n\n");
     }
@@ -592,6 +602,7 @@ mod tests {
             app: None,
             now: saturday_evening(),
             reminders: false,
+            projects: Vec::new(),
         }
     }
 
@@ -712,5 +723,60 @@ Instruction: ricordami di chiamare Luca domani alle 15"
         ] {
             assert!(REMINDER_RULES.contains(rule), "{rule}");
         }
+    }
+
+    #[test]
+    fn the_projects_follow_now_one_key_and_name_a_line_only_when_listed() {
+        let projects = vec![
+            Project {
+                key: "CRM".into(),
+                name: "CRM".into(),
+            },
+            Project {
+                key: "CIT".into(),
+                name: "Cittadellese".into(),
+            },
+        ];
+        let on = Request {
+            reminders: true,
+            projects: projects.clone(),
+            selection: Some("ciao".into()),
+            instruction: "ricordami giovedì alle 9 di mandare il preventivo per Cittadellese"
+                .into(),
+            ..request()
+        };
+        let sent = body(&on);
+        assert_eq!(
+            sent["input"][0]["content"],
+            "Now: Saturday 2026-10-17 21:14
+Projects:
+CRM: CRM
+CIT: Cittadellese
+
+<selection>
+ciao
+</selection>
+
+Instruction: ricordami giovedì alle 9 di mandare il preventivo per Cittadellese"
+        );
+        // Never in the schema or the tools, which OpenAI caches (spec §3).
+        assert_eq!(sent["tools"], tools::declarations(true));
+        assert!(!sent["text"].to_string().contains("CIT"));
+        assert!(!sent["instructions"].as_str().unwrap().contains("CIT"));
+        // No list, no heading.
+        let none = body(&Request {
+            projects: Vec::new(),
+            ..on.clone()
+        });
+        assert!(!none["input"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Projects:"));
+        // With reminders off a list changes nothing.
+        let off = body(&Request {
+            projects,
+            ..request()
+        });
+        assert_eq!(off, body(&request()));
     }
 }

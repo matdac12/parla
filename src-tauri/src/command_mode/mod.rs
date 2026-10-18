@@ -69,6 +69,9 @@ pub trait HistorySink {
 pub trait Reminders {
     /// One blocking `POST`, never retried.
     fn create(&self, title: &str, when: &When) -> Result<traccia::Created, traccia::Error>;
+    /// The Projects a title may reference as `@KEY`: the cached list, which
+    /// may be empty.
+    fn projects(&self) -> Vec<traccia::Project>;
 }
 
 pub struct Ports<'a> {
@@ -418,6 +421,10 @@ fn reply_and_act(
         app: selection.app.clone(),
         now: run.now,
         reminders: ports.reminders.is_some(),
+        projects: ports
+            .reminders
+            .map(|reminders| reminders.projects())
+            .unwrap_or_default(),
     };
     record.llm_model = Some(request.model.clone());
     let reply = ports.llm.reply(&request, run.cancelled);
@@ -864,6 +871,7 @@ mod tests {
                 app: Some("notepad.exe".into()),
                 now: saturday_evening(),
                 reminders: false,
+                projects: Vec::new(),
             }]
         );
         let [row] = &h.rows()[..] else {
@@ -1468,6 +1476,7 @@ mod tests {
         result: Result<traccia::Created, traccia::Error>,
         created: RefCell<Vec<(String, When)>>,
         esc: Option<Arc<AtomicBool>>,
+        projects: Vec<traccia::Project>,
     }
     impl FakeReminders {
         fn answering(result: Result<traccia::Created, traccia::Error>) -> Self {
@@ -1475,6 +1484,7 @@ mod tests {
                 result,
                 created: RefCell::default(),
                 esc: None,
+                projects: Vec::new(),
             }
         }
     }
@@ -1485,6 +1495,9 @@ mod tests {
                 esc.store(true, Ordering::Release);
             }
             self.result.clone()
+        }
+        fn projects(&self) -> Vec<traccia::Project> {
+            self.projects.clone()
         }
     }
 
@@ -1711,5 +1724,24 @@ mod tests {
         );
         assert!(!h.llm.requests.borrow()[0].reminders);
         assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Failed));
+    }
+
+    #[test]
+    fn the_request_carries_the_cached_projects_only_while_reminders_are_on() {
+        let crm = traccia::Project {
+            key: "CRM".into(),
+            name: "CRM".into(),
+        };
+        let mut h = Harness::reminding(
+            remind("Riunione @CRM", Some("2026-11-03"), Some("15:00")),
+            Ok(stored()),
+        );
+        h.reminders.as_mut().unwrap().projects = vec![crm.clone()];
+        h.run("ricordami il 3 novembre alle 15 della riunione del progetto CRM");
+        assert_eq!(h.llm.requests.borrow()[0].projects, [crm]);
+        assert_eq!(h.created()[0].0, "Riunione @CRM");
+        let off = Harness::new(text("ok"));
+        off.run("ciao");
+        assert!(off.llm.requests.borrow()[0].projects.is_empty());
     }
 }

@@ -49,6 +49,7 @@ fn ask_at(effort: &str, instruction: &str, selection: Option<&str>) -> Option<Re
             app: Some("notepad.exe".into()),
             now: SystemClock.now(),
             reminders: false,
+            projects: Vec::new(),
         },
     )
     .expect("live reply");

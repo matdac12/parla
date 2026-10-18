@@ -916,6 +916,7 @@ fn the_eval_grades_every_case_at_each_effort() {
             // Fixed, so every eval sends the same requests.
             now: now_of(expect),
             reminders,
+            projects: Vec::new(),
         }
     };
     // Untimed: opens the connection, as the app's pre-warm at the hold does.

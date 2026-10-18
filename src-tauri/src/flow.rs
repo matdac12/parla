@@ -305,9 +305,11 @@ fn run_session(
     }
     // While the user is still speaking, never for a dictation or a quick
     // Ctrl+Shift shortcut: read the selection (PARLA-64) and open the
-    // connection the LLM request will use.
+    // connection the LLM request will use, and with reminders on, refresh a
+    // stale Projects list in the background (PARLA-87).
     let selection = (command && held).then(|| {
         crate::provider::openai::prewarm(&settings);
+        command_mode::traccia::refresh_projects(&settings);
         SelectionRead::start()
     });
     // After the mic started, so it never delays the first syllable.

@@ -11,7 +11,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use std::{
     net::{SocketAddr, TcpStream},
-    sync::{mpsc, OnceLock},
+    sync::{mpsc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -223,7 +223,7 @@ fn parse_me(body: &str) -> Result<Me, Error> {
 }
 
 /// A Project a reminder can reference as `@KEY`.
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Project {
     pub key: String,
     pub name: String,
@@ -377,6 +377,11 @@ impl super::Reminders for Remote<'_> {
         let config = TracciaConfig::resolved(self.0)?;
         Client::for_writes(&config).create(title, when)
     }
+
+    /// What the hold's refresh cached, waiting only for a first fetch.
+    fn projects(&self) -> Vec<Project> {
+        PROJECTS.snapshot(PROJECTS_WAIT)
+    }
 }
 
 /// Blocking calls: run them off the UI thread.
@@ -517,6 +522,120 @@ fn resolve_within(
     receiver.recv_timeout(budget).unwrap_or_default()
 }
 
+/// A Projects list older than this is fetched again at the next hold.
+pub const PROJECTS_TTL: Duration = Duration::from_secs(10 * 60);
+/// The longest a run waits for the first list, only while it is in flight.
+pub const PROJECTS_WAIT: Duration = Duration::from_millis(500);
+
+struct CacheState {
+    /// The last list fetched, and when its fetch started.
+    list: Option<(Instant, Vec<Project>)>,
+    in_flight: bool,
+}
+
+/// The Projects list for `@KEY` references (spec §3), in memory only:
+/// fetched in the background at the confirmed command hold, so a run reads it
+/// without waiting on Traccia. A failed fetch keeps the last list.
+pub struct ProjectsCache {
+    state: Mutex<CacheState>,
+    landed: Condvar,
+}
+
+impl ProjectsCache {
+    pub const fn new() -> Self {
+        Self {
+            state: Mutex::new(CacheState {
+                list: None,
+                in_flight: false,
+            }),
+            landed: Condvar::new(),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, CacheState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts `fetch` on a thread of its own when, at `now`, there is no list
+    /// or it is older than [`PROJECTS_TTL`], and no fetch is in flight.
+    pub fn refresh_if_stale(
+        &'static self,
+        now: Instant,
+        fetch: impl FnOnce() -> Result<Vec<Project>, Error> + Send + 'static,
+    ) {
+        {
+            let mut state = self.state();
+            let fresh = state
+                .list
+                .as_ref()
+                .is_some_and(|(at, _)| now.saturating_duration_since(*at) < PROJECTS_TTL);
+            if fresh || state.in_flight {
+                return;
+            }
+            state.in_flight = true;
+        }
+        let land = move |fetched: Result<Vec<Project>, Error>| {
+            let mut state = self.state();
+            if let Ok(list) = fetched {
+                state.list = Some((now, list));
+            }
+            state.in_flight = false;
+            self.landed.notify_all();
+        };
+        let spawned = std::thread::Builder::new()
+            .name("parla-traccia-projects".into())
+            .spawn(move || land(fetch()));
+        if spawned.is_err() {
+            land(Err(Error::Unreachable));
+        }
+    }
+
+    /// The cached list, even a stale one. Only when there is none and a fetch
+    /// is in flight does it wait for it, up to `wait`.
+    pub fn snapshot(&self, wait: Duration) -> Vec<Project> {
+        let (state, _) = self
+            .landed
+            .wait_timeout_while(self.state(), wait, |state| {
+                state.list.is_none() && state.in_flight
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        state
+            .list
+            .as_ref()
+            .map(|(_, list)| list.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Default for ProjectsCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static PROJECTS: ProjectsCache = ProjectsCache::new();
+
+/// At the confirmed command hold (`flow.rs`), next to the LLM pre-warm: the
+/// Projects list is fetched in the background when stale, only while
+/// reminders are on. Never at startup, never for a dictation.
+pub fn refresh_projects(settings: &Settings) {
+    refresh_projects_with(&PROJECTS, settings, Instant::now(), |config| {
+        Client::new(&config).projects()
+    });
+}
+
+fn refresh_projects_with(
+    cache: &'static ProjectsCache,
+    settings: &Settings,
+    now: Instant,
+    fetch: impl FnOnce(TracciaConfig) -> Result<Vec<Project>, Error> + Send + 'static,
+) {
+    if settings.command.reminders {
+        let config = TracciaConfig::resolved(settings);
+        cache.refresh_if_stale(now, move || fetch(config?));
+    }
+}
+
 /// What Test connection reports.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Connection {
@@ -559,7 +678,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
     };
 
     const URL: &str = "https://traccia.example.ts.net";
@@ -1102,5 +1224,177 @@ mod tests {
         );
         let message = Error::Protocol.to_string();
         assert!(message.contains("http or https"), "{message}");
+    }
+
+    // The Projects cache (spec §3), on a fake clock (the `now` passed in) and
+    // fake fetchers.
+
+    fn project(key: &str, name: &str) -> Project {
+        Project {
+            key: key.into(),
+            name: name.into(),
+        }
+    }
+
+    type Calls = std::sync::Arc<AtomicUsize>;
+
+    fn cache() -> &'static ProjectsCache {
+        Box::leak(Box::new(ProjectsCache::new()))
+    }
+
+    /// Waits for the background fetch to land.
+    fn settle(cache: &ProjectsCache) {
+        let started = Instant::now();
+        while cache.state.lock().unwrap().in_flight {
+            assert!(started.elapsed() < Duration::from_secs(5), "never settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A fetcher that counts its calls and answers `result`.
+    fn counting(
+        calls: &Calls,
+        result: Result<Vec<Project>, Error>,
+    ) -> impl FnOnce() -> Result<Vec<Project>, Error> + Send + 'static {
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            result
+        }
+    }
+
+    #[test]
+    fn a_missing_or_stale_list_is_fetched_and_a_fresh_one_is_not() {
+        let cache = cache();
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        cache.refresh_if_stale(t0, counting(&calls, Ok(vec![project("CRM", "CRM")])));
+        settle(cache);
+        assert_eq!(cache.snapshot(Duration::ZERO), [project("CRM", "CRM")]);
+        // Fresh for 10 minutes.
+        cache.refresh_if_stale(
+            t0 + Duration::from_secs(9 * 60),
+            counting(&calls, Ok(vec![])),
+        );
+        settle(cache);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Then stale: fetched again, and the new list replaces the old.
+        let t1 = t0 + PROJECTS_TTL + Duration::from_secs(1);
+        let cit = vec![project("CIT", "Cittadellese")];
+        cache.refresh_if_stale(t1, counting(&calls, Ok(cit.clone())));
+        settle(cache);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.snapshot(Duration::ZERO), cit);
+    }
+
+    #[test]
+    fn a_fetch_in_flight_is_not_started_twice() {
+        let cache = cache();
+        let calls = Calls::default();
+        let (release, gate) = mpsc::channel::<()>();
+        let first = calls.clone();
+        let t0 = Instant::now();
+        cache.refresh_if_stale(t0, move || {
+            first.fetch_add(1, Ordering::SeqCst);
+            let _ = gate.recv();
+            Ok(vec![project("CRM", "CRM")])
+        });
+        // A second hold while the first fetch hangs.
+        cache.refresh_if_stale(t0 + Duration::from_secs(1), counting(&calls, Ok(vec![])));
+        release.send(()).unwrap();
+        settle(cache);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.snapshot(Duration::ZERO), [project("CRM", "CRM")]);
+    }
+
+    #[test]
+    fn an_empty_cache_waits_at_most_the_bound_and_only_for_a_fetch_in_flight() {
+        let cache = cache();
+        // Nothing cached, nothing in flight: no wait at all.
+        let started = Instant::now();
+        assert!(cache.snapshot(Duration::from_secs(2)).is_empty());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        // A fetch that hangs: the run goes on without a list at the bound.
+        let (release, gate) = mpsc::channel::<()>();
+        cache.refresh_if_stale(Instant::now(), move || {
+            let _ = gate.recv();
+            Ok(vec![project("CRM", "CRM")])
+        });
+        let started = Instant::now();
+        assert!(cache.snapshot(Duration::from_millis(150)).is_empty());
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150) && waited < Duration::from_secs(1),
+            "{waited:?}"
+        );
+        // A fetch that lands within the bound is used at once.
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            (cache.snapshot(Duration::from_secs(3)), started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        release.send(()).unwrap();
+        let (list, waited) = waiter.join().unwrap();
+        assert_eq!(list, [project("CRM", "CRM")]);
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
+        // A list in hand, even stale, never waits for the next fetch.
+        let (_hold, gate) = mpsc::channel::<()>();
+        cache.refresh_if_stale(Instant::now() + PROJECTS_TTL * 2, move || {
+            let _ = gate.recv();
+            Ok(vec![])
+        });
+        let started = Instant::now();
+        assert_eq!(
+            cache.snapshot(Duration::from_secs(2)),
+            [project("CRM", "CRM")]
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_last_list_and_is_retried_at_the_next_hold() {
+        let cache = cache();
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let list = vec![project("CRM", "CRM"), project("CIT", "Cittadellese")];
+        cache.refresh_if_stale(t0, counting(&calls, Ok(list.clone())));
+        settle(cache);
+        let t1 = t0 + PROJECTS_TTL + Duration::from_secs(1);
+        cache.refresh_if_stale(t1, counting(&calls, Err(Error::Unreachable)));
+        settle(cache);
+        assert_eq!(cache.snapshot(Duration::ZERO), list);
+        // Still stale: the next hold tries again.
+        cache.refresh_if_stale(t1 + Duration::from_secs(5), counting(&calls, Ok(vec![])));
+        settle(cache);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn the_refresh_never_runs_while_reminders_are_off() {
+        let mut settings = Settings::default();
+        settings.providers.insert(
+            "traccia".into(),
+            serde_json::json!({"base_url": URL, "token": TOKEN}),
+        );
+        let cache = cache();
+        let calls = Calls::default();
+        let fetch = |calls: &Calls| {
+            let calls = calls.clone();
+            move |config: TracciaConfig| {
+                assert_eq!(config.token, TOKEN);
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![project("CRM", "CRM")])
+            }
+        };
+        assert!(!settings.command.reminders);
+        refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
+        assert!(!cache.state.lock().unwrap().in_flight);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(cache.snapshot(Duration::ZERO).is_empty());
+        settings.command.reminders = true;
+        refresh_projects_with(cache, &settings, Instant::now(), fetch(&calls));
+        settle(cache);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.snapshot(Duration::ZERO), [project("CRM", "CRM")]);
     }
 }
