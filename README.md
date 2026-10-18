@@ -451,6 +451,9 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
       has passed (an earlier day fails as past);
     - neither is an Anytime To-do with no Reminder.
 
+    Parla only stores the To-do; Traccia sends the Reminder (on Telegram)
+    at its minute. An undone To-do sends nothing.
+
     "…il preventivo per Cittadellese" or "…del progetto CRM" puts the
     Project's `@KEY` in the title (`Mandare il preventivo @CIT`), which
     Traccia turns into the Project's chip. Parla keeps your active and paused
@@ -462,7 +465,9 @@ OpenAI key: the same `providers.openai.api_key` dictation uses, with
     fetch is still going, waits for it, at most 500 ms. The request lists
     them under `Projects in Traccia (KEY: Name):`, one `KEY: Name` line each
     after `Now:`, never in the tool's schema, and the model may only use a
-    listed key. With no list yet, the To-do gets no `@KEY`.
+    listed key. With no list yet, the To-do gets no `@KEY`. The model doesn't
+    always add one even with the list in hand (at `low`, "sentire Zafferano"
+    got none on 19/10); Parla adds none of its own, by choice.
 
     With the tool on, the system prompt gets its rules (only the instruction
     line asks for a reminder, never a selection; a weekday means the next
