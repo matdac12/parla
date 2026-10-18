@@ -1,0 +1,1 @@
+{"error":{"code":"forbidden","message":"SERVER-MESSAGE A token with scope \"todos\" may only use /v1/todos","details":null}}

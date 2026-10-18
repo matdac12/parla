@@ -188,9 +188,28 @@ The **Command mode** card holds the `command` section of `settings.json`
 - **Model**, default `gpt-6-luna`; clearing the field restores it.
 - **Reasoning effort**, `low` (default) or `none`; see the
   [live eval](#the-command-mode-eval).
+- **Reminders in Traccia** (`command.reminders`, PARLA-82), off by default. It
+  is greyed out, with a hint, until command mode is on and a Traccia URL and
+  token are set; Save refuses it on without them. Save checks only what it
+  changes, so a Traccia section already in the file never blocks another save. The tool that creates the
+  To-do comes in a later release; for now this only stores the choice.
+- **Traccia URL** and **Traccia token**, stored in `providers.traccia`
+  (`base_url`, `token`) next to the other keys. The URL is your Traccia on the
+  tailnet (`https://<traccia-host>.<tailnet>.ts.net`); Save trims it and drops
+  a trailing slash, and accepts `http` or `https` only, with no `?` or `#`. Create the token on the
+  Traccia server with `traccia token create --name parla --actor you --scope todos`.
+- **Test connection** checks the URL and token as typed, saved or not: it
+  calls `GET /v1/me` and `GET /v1/projects` (2 s each once connected) and shows
+  "Connected as you · token parla · 11 projects", with a warning when the token
+  writes as an agent. Failures read "Traccia can't be reached. Is Tailscale
+  on?" (within about 5 s), "Traccia didn't answer in 2 s.", "Traccia rejected
+  the token…", "This Traccia token can't create To-dos…" or "Traccia error
+  (HTTP 502)." Only Traccia's error code and field names are kept, never its
+  message; the token is never logged.
 
 Saving arms or disarms the command chord and rebinds it at once, with no
-restart. Model and effort are read by each command run.
+restart. Model and effort are read by each command run. Nothing about Traccia
+runs at startup or while dictating.
 
 ### Tray icon
 
@@ -521,6 +540,10 @@ defaults. Example:
     },
     "parakeet": {
       "model_dir": null
+    },
+    "traccia": {
+      "base_url": "https://traccia.example.ts.net",
+      "token": "YOUR_TRACCIA_TODOS_TOKEN"
     }
   }
 }
@@ -533,7 +556,11 @@ environment value, even an empty one, wins over the file). `language` is `null`
 for automatic detection or an ISO code such as `"it"`. Model names are
 configurable per provider. The settings view prefills each model field with its
 default (`gpt-transcribe`, `grok-voice-transcribe-2.0`) and restores it if you
-clear the field.
+clear the field. `TRACCIA_URL` and `TRACCIA_TOKEN` override
+`providers.traccia` for the live test only
+(`cargo test --locked --lib commands::traccia -- --ignored --nocapture`,
+which otherwise reads `providers.traccia` from settings.json without writing
+it).
 
 ### OpenAI
 

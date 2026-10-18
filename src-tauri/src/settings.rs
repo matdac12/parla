@@ -47,6 +47,9 @@ pub struct CommandSettings {
     /// (`tests/command_eval.rs`, PARLA-68) it chose text vs `open_url` right
     /// under every prompt tried, where `none` was sensitive to wording.
     pub reasoning_effort: String,
+    /// The `create_reminder` tool (PARLA-82), off by default. It needs command
+    /// mode and a Traccia URL and token (`providers.traccia`).
+    pub reminders: bool,
 }
 
 pub const DEFAULT_COMMAND_HOTKEY: &str = "LCtrl+Shift";
@@ -58,6 +61,7 @@ impl Default for CommandSettings {
             hotkey: DEFAULT_COMMAND_HOTKEY.into(),
             model: "gpt-6-luna".into(),
             reasoning_effort: "low".into(),
+            reminders: false,
         }
     }
 }
@@ -232,11 +236,36 @@ mod vocabulary_tests {
                 "hotkey": "LCtrl+Shift",
                 "model": "gpt-6-luna",
                 "reasoning_effort": "low",
+                "reminders": false,
             })
         );
         let partial: Settings = serde_json::from_str(r#"{"command":{"enabled":true}}"#).unwrap();
         assert!(partial.command.enabled);
         assert_eq!(partial.command.model, "gpt-6-luna");
+    }
+    #[test]
+    fn old_settings_load_reminders_off_and_keep_the_traccia_section_through_a_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Written before PARLA-85: a `providers.traccia` block (by the Traccia
+        // thread) and a command section without `reminders`.
+        let traccia = serde_json::json!({
+            "base_url": "https://traccia.example.ts.net",
+            "token": "test-token",
+            "future_field": [1, 2],
+        });
+        let old = serde_json::json!({
+            "command": {"enabled": true},
+            "providers": {"traccia": traccia, "openai": {"api_key": "test"}},
+        });
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(!loaded.command.reminders);
+        save(&path, &loaded).unwrap();
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file["providers"]["traccia"], traccia);
+        assert_eq!(file["command"]["reminders"], false);
     }
     #[test]
     fn local_model_defaults_to_v3_and_round_trips() {

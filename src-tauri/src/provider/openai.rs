@@ -103,13 +103,16 @@ impl SttProvider for OpenAi {
     }
 }
 
+/// The shared client's connect timeout; Traccia's probe budget derives from it.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Shared with command mode's Responses call, which sets its own timeout.
 pub(crate) fn client() -> Result<&'static Client, ProviderError> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
             Client::builder()
-                .connect_timeout(Duration::from_secs(5))
+                .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(Duration::from_secs(30))
                 .pool_idle_timeout(Duration::from_secs(90))
                 .tcp_keepalive(Duration::from_secs(30))
