@@ -3,7 +3,8 @@ import { emit } from "@tauri-apps/api/event";
 
 const html = new DOMParser().parseFromString(await (await fetch("/overlay.html")).text(), "text/html");
 document.body.replaceChildren(...html.body.childNodes);
-mockIPC(() => {}, { shouldMockEvents: true });
+window.ipcCalls = [];
+mockIPC((cmd, args) => { window.ipcCalls.push({ cmd, args }); }, { shouldMockEvents: true });
 await import("/src/overlay.ts");
 const settle = () => new Promise(resolve => setTimeout(resolve, 280));
 await settle();
@@ -71,6 +72,98 @@ await check("captions remain during finalization and clear after paste, error or
     assert(document.getElementById("captions").hidden, `Captions survived ${ending}`);
   }
 });
+// The reminder Card (PARLA-88): Open and Undo, and a 5 s countdown ring.
+const card = document.getElementById("card");
+const root = document.querySelector(".overlay-root");
+const ring = card.querySelector(".card-ring");
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reminder = {
+  tag: "reminder",
+  header: "ricordami di chiamare Luca domani alle 15",
+  text: "Chiamare Luca @CRM",
+  detail: "Sun 18/10 · 15:00",
+  actions: ["open", "undo"],
+  primary: "open",
+};
+const buttons = () => [...card.querySelectorAll(".card-foot button")];
+const named = (element, name) => element.getAnimations({ subtree: true }).find(animation => animation.animationName === name);
+await check("a reminder card shows its title, day and time, Open filled, Undo, and no Copy", async () => {
+  await emit("card", { generation: 7, card: reminder, countdown: true });
+  await settle();
+  assert(!card.hidden, "The reminder Card did not open");
+  assert(card.querySelector(".card-tag span").textContent === "Reminder", "Not tagged Reminder");
+  assert(getComputedStyle(card.querySelector(".card-tag i")).backgroundColor === "rgb(255, 159, 67)", "The dot is not orange");
+  assert(card.querySelector(".card-header").textContent === "“ricordami di chiamare Luca domani alle 15”", "The header is not the instruction");
+  const body = card.querySelector(".card-body");
+  const detail = card.querySelector(".card-detail");
+  assert(body.textContent === "Chiamare Luca @CRM", "The body is not the title");
+  assert(!detail.hidden && detail.textContent === "Sun 18/10 · 15:00", "No second line");
+  assert(getComputedStyle(detail).color !== getComputedStyle(body).color, "The second line is not muted");
+  const labels = buttons().map(button => `${button.textContent}${button.classList.contains("primary") ? "*" : ""}`);
+  assert(JSON.stringify(labels) === JSON.stringify(["Open*", "Undo"]), `Buttons: ${labels}`);
+  assert(card.querySelector(".card-close") !== null, "No ✕");
+});
+await check("the ring counts down 5 s beside the tag, still under reduced motion only as a plain wait", async () => {
+  const countdown = named(ring, "ring-countdown");
+  if (reduced) {
+    assert(getComputedStyle(ring).display === "none" && countdown === undefined, "The ring animates under reduced motion");
+  } else {
+    assert(getComputedStyle(ring).display !== "none", "No ring");
+    assert(countdown !== undefined && countdown.effect.getTiming().duration === 5000, "The ring does not count 5 s");
+  }
+});
+await check("only its own generation's leave fades the card and the check", async () => {
+  await emit("card-leave", 6);
+  await settle();
+  assert(!root.hasAttribute("data-leaving"), "Another session's timer faded the Card");
+  await emit("card-leave", 7);
+  await settle();
+  assert(root.hasAttribute("data-leaving"), "The countdown's end did not start the leave");
+  const fading = named(card, "card-leave");
+  if (reduced) {
+    assert(fading === undefined && named(pill, "pill-leave") === undefined, "The leave animates under reduced motion");
+  } else {
+    assert(fading !== undefined && fading.effect.getTiming().duration === 300, "The Card does not fade over 300 ms");
+    assert(named(pill, "pill-leave") !== undefined, "The check does not go with the Card");
+  }
+  // A click can't race the close: the fading Card takes none.
+  assert(getComputedStyle(card).pointerEvents === "none", "The fading Card still takes clicks");
+  // Rust closes it, then hides the window: the faded check must not come back.
+  await emit("card", null);
+  await settle();
+  assert(card.hidden && root.hasAttribute("data-leaving"), "Closing brought the faded check back");
+  await emit("phase", "recording");
+  await settle();
+  assert(!root.hasAttribute("data-leaving"), "The next session's pill stayed faded");
+});
+await check("Undo stops the countdown, and a failed Undo gives the buttons back with no ring", async () => {
+  await emit("card", { generation: 8, card: reminder, countdown: true });
+  await settle();
+  window.ipcCalls.length = 0;
+  buttons()[1].click();
+  await settle();
+  const call = window.ipcCalls.find(c => c.cmd === "card_action");
+  assert(call && call.args.generation === 8 && call.args.action === "undo", `Undo sent ${JSON.stringify(window.ipcCalls)}`);
+  assert(buttons().every(button => button.disabled), "Buttons stayed live during the Undo");
+  assert(getComputedStyle(ring).display === "none", "The ring kept counting during the Undo");
+  // Rust's keep_card after a failure: the same Card, no countdown.
+  await emit("card", { generation: 8, card: reminder, countdown: false });
+  await settle();
+  assert(!card.hidden && buttons().every(button => !button.disabled), "The buttons did not come back");
+  assert(getComputedStyle(ring).display === "none", "The ring came back");
+  buttons()[0].click();
+  await settle();
+  assert(window.ipcCalls.some(c => c.cmd === "card_action" && c.args.action === "open"), "Open was not sent");
+  await emit("card", null);
+});
+await check("other cards have no ring and no second line", async () => {
+  await emit("card", { generation: 9, card: { tag: "command", header: "traduci", text: "Hello", actions: ["copy"], primary: "copy" }, countdown: false });
+  await settle();
+  assert(getComputedStyle(ring).display === "none", "A command Card has a ring");
+  assert(card.querySelector(".card-detail").hidden, "A command Card has a second line");
+  await emit("card", null);
+});
+window.overlayEmit = emit;
 window.overlayTestsDone = true;
 // Keep the final visual available for inspection, without adding test UI to the overlay.
 await emit("caption-session", { generation: 4, enabled: true });

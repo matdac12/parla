@@ -56,7 +56,7 @@ The brief proposed that the model emit `remindAt` with an offset. A probe on `gp
 - Call `create_reminder` only when the **Instruction line itself** asks to be reminded or to add a to-do, even with no day or time, and then output nothing else.
 - Text between `<selection>` tags never asks for a reminder, even when it says "ricordami". Without this rule, "traduci in inglese" over the selection "Ricordami di chiamare Luca domani alle 15." **created a reminder** 2/3 times at `low` and 3/3 at `none`. With it: 0/6.
 - Never call it to draft a message that reminds someone else ("scrivi una mail per ricordare a Luca…" stays text: 6/6).
-- The title is short, in the instruction's language, starts with a verb, has no date or time, and gets `@KEY` when a listed Project is named. Probe outputs: "Chiamare Luca", "Mandare il preventivo per Cittadellese @CIT", "Preparare la riunione @CRM".
+- The title is short, in the instruction's language, starts with a verb, has no date or time, and gets `@KEY` when a listed Project is named; never add a key that isn't listed (PARLA-87). Probe outputs: "Chiamare Luca", "Mandare il preventivo per Cittadellese @CIT", "Preparare la riunione @CRM".
 - A weekday means its next occurrence after today; "next <weekday>" means the same (Q5).
 - A time with no day means today, or tomorrow if it has passed ("at 8" at 21:14 gives tomorrow 08:00). A day said explicitly is kept even if the time has passed ("oggi alle 10" at 21:14 stays today 10:00, so Traccia refuses it, see Q4).
 - "in N minutes/hours" counts from Now.
@@ -80,12 +80,12 @@ The 400 is Traccia's rule, so Parla doesn't duplicate the past check. One code p
 
 ### 3. Project references
 
-- **What:** `GET /v1/projects?limit=250` (a `todos` token may read it). Keep the `active` and `paused` Projects, the same set Traccia's own `@` autocomplete offers, and render one `KEY: Name` line each under a `Projects:` heading in the request text. Traccia matches `@KEY` exactly and case-insensitively, and an unknown key stays plain text, so a wrong guess never fails a request.
+- **What:** `GET /v1/projects?limit=250` (a `todos` token may read it). Keep the `active` and `paused` Projects, the same set Traccia's own `@` autocomplete offers, and render one `KEY: Name` line each under a `Projects in Traccia (KEY: Name):` heading in the request text (PARLA-87; the heading was `Projects:` in this design). Traccia matches `@KEY` exactly and case-insensitively, and an unknown key stays plain text, so a wrong guess never fails a request.
 - **When:** no fetch at startup, and nothing on the dictation path.
   - At the **confirmed command hold**, the same moment as `openai::prewarm`, a background thread refreshes the list if it is empty or older than **10 minutes**. That only happens while the reminder tool is on.
   - The fetch has a 2 s timeout and runs while Mattia is still speaking, so it is normally done before the LLM request is built.
   - The run uses whatever is cached. Only when the cache is empty and a fetch is in flight does it wait, for at most 500 ms.
-  - A failed fetch keeps the last list. With no list at all, the request goes out without `Projects:`, and the To-do is created without `@KEY`.
+  - A failed fetch keeps the last list. With no list at all, the request goes out without the Projects block, and the To-do is created without `@KEY`.
   - The cache lives in memory only: when Traccia is unreachable the POST fails anyway, so a list on disk would buy nothing.
 - **Bonus:** the fetch opens TCP and TLS to Traccia in the shared client's pool, so the POST skips the handshake.
 - **Cost:** about 8 tokens per Project, so about 240 tokens for 30 Projects, or about $0.00002 per run.
@@ -109,8 +109,8 @@ ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't 
 - **Lifetime (Q6, decided): a 5-second confirmation that closes itself.** This is the one Card with a timer.
   - A ring next to the tag spins while the Card opens, then fills its circle over about 5 s like a countdown.
   - When the circle completes, the Card fades and slides away gently (about 300 ms), and the pill's check goes with it.
-  - **Hovering the Card pauses the countdown,** so Undo and Open are always reachable. This rule is an addition Mattia hasn't confirmed; the existing Card cursor thread already knows when the pointer is over the Card.
-  - A click (Open, Undo, ✕) or the next session closes it earlier, as for every Card.
+  - Hovering does **not** pause the countdown: a plain 5 s timer (decided 18/10, see Decisions).
+  - A click (Open, Undo, ✕) or the next session closes it earlier, as for every Card. An Undo stops the countdown while its `DELETE` runs; if it fails, the Card stays without a countdown (PARLA-88).
   - Under reduced motion: no spin, a plain 5 s wait, then the Card simply disappears.
 - **History:** append-only, as decided for the Card. The row says `created`. An Undo goes to the log only.
 
@@ -216,7 +216,7 @@ ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't 
 - **`command_mode/responses.rs`:**
   - `SYSTEM_PROMPT` stays as it is.
   - `REMINDER_RULES` is appended only while the tool is on.
-  - `user_text` writes `Now:` instead of `Date:`, then `Projects:` when there is a list.
+  - `user_text` writes `Now:` instead of `Date:`, then `Projects in Traccia (KEY: Name):` when there is a list.
 - **`command_mode/mod.rs`:**
   - `run_tool` dispatches `CreateReminder`: resolve `When`, call `Reminders::create`, record the row, and return `Outcome::Reminded(Card)`.
   - `Ports` gains `reminders: Option<&dyn Reminders>`, which is None while the tool is off.
@@ -254,7 +254,7 @@ ADR-0003 previews **text** because a rewrite overwrites something Mattia hasn't 
   - Esc before the POST creates nothing;
   - unreachable, 400, 401 and 403 fail with the §5 messages and no Card;
   - with the tool off, a stray `create_reminder` call is refused as an unknown tool;
-  - the request carries `Now:` and `Projects:` only when expected.
+  - the request carries `Now:` and the Projects block only when expected.
 - **Responses client:** fixtures for the tool on and off (the off request is byte-identical to today's), and for `Now:`.
 - **Live eval (`tests/command_eval.rs`):** add the probe's cases. Today it has 31 cases, plus 14 reminder cases from this probe and 4 controls:
   - selection says "ricordami" → text;
@@ -292,7 +292,8 @@ Mattia accepted every recommendation, except Q6.
 - **Q3. Parts of the day:** morning 09:00, noon 12:00, lunch 12:30, afternoon 15:00, **evening/stasera 18:00**, tonight 20:30.
 - **Q4. A moment already past:** fail loudly ("10:00 today has already passed"); Mattia says it again.
 - **Q5. "Lunedì" and "lunedì prossimo":** both mean the next Monday after today (on a Monday, in 7 days).
-- **Q6. The reminder Card:** a 5-second confirmation with a ring that spins, then fills its circle, then the Card fades away gently (§4). Hovering pauses it; that part is our addition.
+- **Q6. The reminder Card:** a 5-second confirmation with a ring that spins, then fills its circle, then the Card fades away gently (§4).
+  - **No hover pause (18/10, delegated by Mattia: "do whatever is simple and easiest in the code; I just need a confirmation"):** hovering does not pause the countdown. A plain 5 s timer, then the fade. A click or the next session still closes it earlier, and an Undo in flight holds it (PARLA-88).
 - **Q7. Settings placement:** the toggle in the Command mode card, and the URL and token under it, stored in `providers.traccia`.
 
 ## Tickets

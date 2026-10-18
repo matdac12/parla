@@ -48,12 +48,15 @@ mod tests {
     // `providers.traccia` in Parla's settings.json, read only. Neither the
     // URL nor the token is printed.
 
-    fn live_config() -> Option<TracciaConfig> {
-        let saved = std::env::var_os("APPDATA")
+    fn live_settings() -> crate::settings::Settings {
+        std::env::var_os("APPDATA")
             .map(|dir| std::path::Path::new(&dir).join("com.matdac6.parla/settings.json"))
             .and_then(|path| crate::settings::load(&path).ok())
-            .unwrap_or_default();
-        let config = TracciaConfig::resolved(&saved).ok();
+            .unwrap_or_default()
+    }
+
+    fn live_config() -> Option<TracciaConfig> {
+        let config = TracciaConfig::resolved(&live_settings()).ok();
         if config.is_none() {
             println!("Skipping: no TRACCIA_URL/TRACCIA_TOKEN and no providers.traccia");
         }
@@ -141,7 +144,7 @@ mod tests {
             let started = std::time::Instant::now();
             let created = client.create(title, when).unwrap();
             let elapsed = started.elapsed().as_millis();
-            let deleted = client.delete(&created.id);
+            let deleted = client.undo(&created.id);
             println!(
                 "created {} {:?} (day {:?}, time {:?}) in {elapsed} ms; deleted: {deleted:?}",
                 created.id, created.title, created.day, created.time
@@ -163,6 +166,34 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "creates a [parla-test] To-do in the real Traccia and undoes it"]
+    fn live_the_cards_undo_removes_the_to_do() {
+        use crate::command_mode::when::When;
+        let Some(config) = live_config() else { return };
+        let client = traccia::Client::for_writes(&config);
+        let title = "[parla-test] PARLA-88 undo";
+        // Anytime, no Reminder: nothing can ping.
+        let created = client.create(title, &When::Anytime).unwrap();
+        // The Card's own path: the saved connection, resolved at the click.
+        let settings = live_settings();
+        let started = std::time::Instant::now();
+        let undone = traccia::Remote(&settings).undo(&created.id);
+        let elapsed = started.elapsed().as_millis();
+        println!(
+            "created {} {:?}; undo in {elapsed} ms: {undone:?}",
+            created.id, created.title
+        );
+        if undone.is_err() {
+            println!("fallback delete: {:?}", client.undo(&created.id));
+        }
+        assert_eq!(undone, Ok(()));
+        let open = client.open_titles().unwrap();
+        assert!(!open.iter().any(|open| open == title), "left open");
+        // Undone already: Traccia's 404 counts as done.
+        assert_eq!(client.undo(&created.id), Ok(()));
+    }
+
+    #[test]
     #[ignore = "asks the real Traccia for a past reminder, which it refuses"]
     fn live_a_past_moment_is_refused_and_creates_nothing() {
         use crate::command_mode::when::{Date, LocalClock, SystemClock, Time, When};
@@ -181,7 +212,7 @@ mod tests {
         let error = match client.create(title, &when) {
             Err(error) => error,
             Ok(created) => {
-                let deleted = client.delete(&created.id);
+                let deleted = client.undo(&created.id);
                 panic!("created {} (deleted: {deleted:?})", created.id);
             }
         };

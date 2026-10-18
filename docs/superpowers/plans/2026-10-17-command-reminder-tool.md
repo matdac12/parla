@@ -149,13 +149,13 @@
 - **The 5-second confirmation (Q6):**
   - a ring beside the tag spins, then fills its circle over about 5 s;
   - when it completes, the Card fades and slides away (about 300 ms);
-  - hovering the Card pauses the countdown;
+  - hovering does not pause the countdown: a plain 5 s timer (18/10 amendment, spec Decisions Q6);
   - a generation-checked close, so a late timer can't close the next session's Card;
   - under reduced motion, no animation: a plain 5 s wait, then the Card disappears.
 
 **Tests:**
 - the Card construction and its buttons;
-- the auto-close only closes its own generation, and a hover pause defers it;
+- the auto-close only closes its own generation;
 - the Open url guard, which refuses another host;
 - Undo with a fake client, on success and on failure (the Card stays);
 - a history row is still written once, as `created`.

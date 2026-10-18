@@ -17,7 +17,7 @@ use std::{
 
 /// For `/v1/me` and the Projects list, once connected.
 const GET_TIMEOUT: Duration = Duration::from_secs(2);
-/// For creating a To-do (spec §5).
+/// For creating a To-do (spec §5) and for its Undo.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `providers.traccia`. The env overrides are for the live test only.
@@ -276,6 +276,40 @@ impl Created {
             _ => self.title.clone(),
         }
     }
+
+    /// The Card's second line (spec §4): `Sun 18/10 · 15:00`,
+    /// `Today · no reminder` or `Anytime · no reminder`. What Traccia stored,
+    /// so an hour lost to DST shows; a day it sent in another shape is shown
+    /// as sent.
+    pub fn when_line(&self, today: Date) -> String {
+        let day = match self.day.as_deref() {
+            None => "Anytime".to_string(),
+            Some(day) => match Date::parse(day) {
+                Some(day) if day == today => "Today".into(),
+                Some(day) => day.short(),
+                None => day.into(),
+            },
+        };
+        format!("{day} · {}", self.time.as_deref().unwrap_or("no reminder"))
+    }
+}
+
+/// Whether `url` is a page of the Traccia at `base_url`: the same scheme,
+/// host and port, parsed (so case and a default port don't matter), and
+/// under its path. Open goes nowhere else.
+pub fn on_base_url(url: &str, base_url: &str) -> bool {
+    let (Ok(url), Ok(base)) = (reqwest::Url::parse(url), reqwest::Url::parse(base_url)) else {
+        return false;
+    };
+    let prefix = base.path().trim_end_matches('/');
+    url.scheme() == base.scheme()
+        && url.host_str().is_some()
+        && url.host_str() == base.host_str()
+        && url.port_or_known_default() == base.port_or_known_default()
+        && url
+            .path()
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 fn parse_created(body: &str) -> Result<Created, Error> {
@@ -333,7 +367,7 @@ pub fn reminder_message(error: &Error, when: &When, today: Date) -> String {
             let day = if *day == today {
                 "today".to_string()
             } else {
-                format!("on {} {:02}/{:02}", &day.weekday()[..3], day.day, day.month)
+                format!("on {}", day.short())
             };
             format!("{time} {day} has already passed.")
         }
@@ -384,6 +418,14 @@ impl super::Reminders for Remote<'_> {
     }
 }
 
+impl Remote<'_> {
+    /// The reminder Card's Undo: `DELETE`, within 5 s.
+    pub fn undo(&self, id: &str) -> Result<(), Error> {
+        let config = TracciaConfig::resolved(self.0)?;
+        Client::for_writes(&config).undo(id)
+    }
+}
+
 /// Blocking calls: run them off the UI thread.
 pub struct Client<'a> {
     config: &'a TracciaConfig,
@@ -415,11 +457,19 @@ impl<'a> Client<'a> {
         parse_created(&self.send(request)?)
     }
 
-    /// `DELETE /v1/todos/{id}`, for the live tests until slice 4's Undo.
-    #[cfg(test)]
-    pub(crate) fn delete(&self, id: &str) -> Result<(), Error> {
-        self.send(http()?.delete(self.url(&format!("/v1/todos/{id}"))))
-            .map(drop)
+    /// `DELETE /v1/todos/{id}`: the Card's Undo, a soft delete Traccia can
+    /// restore from its Trash. A 404 means it is gone already (an Undo that
+    /// timed out after Traccia had it), so it counts as done. An id that isn't
+    /// a plain token (it came from Traccia's reply) is never put in the path.
+    pub fn undo(&self, id: &str) -> Result<(), Error> {
+        let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        if id.is_empty() || !id.chars().all(plain) {
+            return Err(Error::Unreadable);
+        }
+        match self.send(http()?.delete(self.url(&format!("/v1/todos/{id}")))) {
+            Ok(_) | Err(Error::Status(404)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// The open To-dos' titles (the first 250), for the live tests.
@@ -1075,6 +1125,99 @@ mod tests {
         };
         assert_eq!(day_only.summary(), "Chiamare Luca @CRM · 2026-10-18");
         assert_eq!(parse_created(r#"{"id":"x"}"#), Err(Error::Unreadable));
+    }
+
+    #[test]
+    fn the_cards_second_line_is_the_day_and_time_traccia_stored() {
+        let today = date("2026-10-17");
+        let stored = |day: Option<&str>, time: Option<&str>| Created {
+            id: "01K8TODO0000000000000000AB".into(),
+            url: format!("{URL}/personal?todo=01K8TODO0000000000000000AB"),
+            title: "Chiamare Luca".into(),
+            day: day.map(Into::into),
+            time: time.map(Into::into),
+        };
+        for (day, time, line) in [
+            (Some("2026-10-18"), Some("15:00"), "Sun 18/10 · 15:00"),
+            (Some("2026-10-19"), Some("09:00"), "Mon 19/10 · 09:00"),
+            (Some("2026-10-17"), Some("23:30"), "Today · 23:30"),
+            (Some("2026-10-17"), None, "Today · no reminder"),
+            (Some("2026-10-20"), None, "Tue 20/10 · no reminder"),
+            (None, None, "Anytime · no reminder"),
+            // Whatever Traccia sends is shown as sent.
+            (Some("someday"), Some("15:00"), "someday · 15:00"),
+        ] {
+            assert_eq!(stored(day, time).when_line(today), line, "{day:?} {time:?}");
+        }
+    }
+
+    #[test]
+    fn undo_deletes_the_to_do_with_the_bearer_token() {
+        let (base, heads) = serve(vec![
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".into(),
+            http(
+                "404 Not Found",
+                r#"{"error":{"code":"not_found","message":"x"}}"#,
+            ),
+        ]);
+        let config = TracciaConfig::new(&base, TOKEN).unwrap();
+        let client = Client::for_writes(&config);
+        assert_eq!(client.undo("01K8TODO0000000000000000AB"), Ok(()));
+        let head = heads.recv().unwrap();
+        assert!(
+            head.starts_with("DELETE /v1/todos/01K8TODO0000000000000000AB HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert!(head
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token\r\n"));
+        // Gone already (an Undo that timed out after Traccia got it): undone.
+        assert_eq!(client.undo("01K8TODO0000000000000000AB"), Ok(()));
+    }
+
+    #[test]
+    fn undo_sends_nothing_for_an_id_that_is_not_one() {
+        // No server: a request would fail as Unreachable, not Unreadable.
+        let config = TracciaConfig::new("http://127.0.0.1:9", TOKEN).unwrap();
+        let client = Client::for_writes(&config);
+        for id in ["", "../projects", "01K8?x=1", "a/b", "01K8 TODO"] {
+            assert_eq!(client.undo(id), Err(Error::Unreadable), "{id}");
+        }
+    }
+
+    #[test]
+    fn only_a_page_on_the_configured_traccia_opens() {
+        let todo = format!("{URL}/personal?todo=01K8TODO0000000000000000AB");
+        assert!(on_base_url(&todo, URL));
+        assert!(on_base_url(URL, URL));
+        // The same origin, written another way in Settings.
+        assert!(on_base_url(&todo, "https://Traccia.Example.ts.net"));
+        assert!(on_base_url(&todo, "https://traccia.example.ts.net:443"));
+        // Under a path prefix, and only under it.
+        assert!(on_base_url(
+            "https://host.example.ts.net/traccia/personal?todo=1",
+            "https://host.example.ts.net/traccia"
+        ));
+        assert!(!on_base_url(
+            "https://host.example.ts.net/tracciax/personal",
+            "https://host.example.ts.net/traccia"
+        ));
+        assert!(!on_base_url(
+            "https://host.example.ts.net/personal",
+            "https://host.example.ts.net/traccia"
+        ));
+        for other in [
+            "https://evil.example.com/personal?todo=1",
+            "https://traccia.example.ts.net.evil.com/personal",
+            "https://traccia.example.ts.netx/personal",
+            "http://traccia.example.ts.net/personal",
+            "https://traccia.example.ts.net@evil.com/",
+            "https://traccia.example.ts.net:8443/personal",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(!on_base_url(other, URL), "{other}");
+        }
     }
 
     fn passed_error() -> Error {

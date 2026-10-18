@@ -272,9 +272,72 @@ body {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.7);
 }
-/* A command reply (PARLA-81): the command pill's orange. */
-.card[data-tag="command"] .card-tag i {
+/* A command reply (PARLA-81) and a reminder (PARLA-88): the command pill's
+   orange. */
+.card[data-tag="command"] .card-tag i,
+.card[data-tag="reminder"] .card-tag i {
   background: #ff9f43;
+}
+/* A reminder's 5 s countdown: one turn of a short arc, then the arc fills
+   its circle. Rust closes the Card when it is full (CARD_COUNTDOWN and
+   CARD_FADE in overlay.rs: keep the 5000 ms and 300 ms in step). */
+.card-ring {
+  display: none;
+  flex: none;
+  margin-left: -2px;
+}
+.card[data-countdown] .card-ring {
+  display: block;
+}
+.card-ring circle {
+  fill: none;
+  stroke-width: 1.6;
+}
+.card-ring .track {
+  stroke: rgba(255, 159, 67, 0.22);
+}
+.card-ring .arc {
+  stroke: #ff9f43;
+  stroke-linecap: round;
+  stroke-dasharray: 31.42;
+  stroke-dashoffset: 24;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ring-countdown 5000ms linear forwards;
+}
+@keyframes ring-countdown {
+  0% {
+    transform: rotate(-90deg);
+    stroke-dashoffset: 24;
+  }
+  12% {
+    transform: rotate(270deg);
+    stroke-dashoffset: 24;
+  }
+  100% {
+    transform: rotate(270deg);
+    stroke-dashoffset: 0;
+  }
+}
+/* The countdown's end: the Card fades and slides down, and the check goes
+   with it. It takes no click now, so none can race Rust's close. */
+.overlay-root[data-leaving] .card {
+  pointer-events: none;
+  animation: card-leave 300ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.overlay-root[data-leaving] .pill {
+  animation: pill-leave 300ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+@keyframes card-leave {
+  to {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px) scale(0.98);
+  }
+}
+@keyframes pill-leave {
+  to {
+    opacity: 0;
+  }
 }
 .card-header {
   flex: 1;
@@ -292,6 +355,12 @@ body {
   user-select: text;
   cursor: text;
 }
+.card-detail {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 12px;
+}
+.card-detail[hidden] { display: none; }
 .card-body::-webkit-scrollbar { width: 6px; }
 .card-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
 .card-foot {
@@ -349,4 +418,8 @@ body {
   }
   .captions { animation: none; }
   .card { animation: none; }
+  /* A reminder's Card waits its 5 s still, then simply disappears. */
+  .card[data-countdown] .card-ring { display: none; }
+  .overlay-root[data-leaving] .card,
+  .overlay-root[data-leaving] .pill { animation: none; }
 }

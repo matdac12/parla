@@ -30,6 +30,11 @@ const DONE_HOLD: Duration = Duration::from_millis(750);
 const LABELLED_HOLD: Duration = Duration::from_millis(1500);
 /// A failed dictation keeps its pill (Dismiss and Retry buttons) up for a while.
 const ERROR_HOLD: Duration = Duration::from_secs(10);
+/// A reminder Card's confirmation (PARLA-88): its ring fills over this long,
+/// then the Card fades out over `CARD_FADE` and closes. `overlay.css` animates
+/// the same 5000 ms and 300 ms.
+const CARD_COUNTDOWN: Duration = Duration::from_secs(5);
+const CARD_FADE: Duration = Duration::from_millis(300);
 
 /// Creates the hidden, non-focusable, click-through overlay window.
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
@@ -327,6 +332,11 @@ fn hide(app: &tauri::AppHandle) {
 struct ShownCard {
     generation: u64,
     card: crate::card::Card,
+    /// An Undo is running: a second Undo is ignored.
+    held: bool,
+    /// A reminder's countdown will close it. An Undo stops it for good: a
+    /// Card whose Undo failed waits for a click, like any Card.
+    counting: bool,
     /// The window's position and scale, when it could be placed. Read by the
     /// Windows cursor thread only, like `bounds`.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -383,11 +393,86 @@ pub fn take_card(app: &tauri::AppHandle, generation: u64) -> Option<crate::card:
     let card = shown_card()
         .take_if(|shown| shown.generation == generation)?
         .card;
+    closed(app, generation);
+    Some(card)
+}
+
+/// Clears the page's Card, and hides the window unless a newer session has it.
+fn closed(app: &tauri::AppHandle, generation: u64) {
     let _ = app.emit_to(LABEL, "card", serde_json::Value::Null);
     if GENERATION.load(Ordering::Acquire) == generation {
         hide(app);
     }
-    Some(card)
+}
+
+/// The Card of `generation`, while its countdown runs.
+fn counting(slot: &mut Option<ShownCard>, generation: u64) -> Option<&mut ShownCard> {
+    slot.as_mut()
+        .filter(|s| s.generation == generation && s.counting)
+}
+
+/// Undo's click: the To-do of the Card of `generation`, which stays open and
+/// is held. None if it is gone, already held, or has no To-do.
+pub fn hold_card(generation: u64) -> Option<crate::card::Todo> {
+    hold(&mut shown_card(), generation)
+}
+
+fn hold(slot: &mut Option<ShownCard>, generation: u64) -> Option<crate::card::Todo> {
+    let shown = slot
+        .as_mut()
+        .filter(|s| s.generation == generation && !s.held)?;
+    let todo = shown.card.todo.clone()?;
+    shown.held = true;
+    shown.counting = false;
+    Some(todo)
+}
+
+/// After a failed Undo: the Card of `generation` again, its buttons back and
+/// no countdown. It waits for a click or the next session, like any Card.
+pub fn keep_card(app: &tauri::AppHandle, generation: u64) {
+    let view = release(&mut shown_card(), generation).map(|card| view(generation, card, false));
+    if let Some(view) = view {
+        let _ = app.emit_to(LABEL, "card", view);
+    }
+}
+
+fn release(slot: &mut Option<ShownCard>, generation: u64) -> Option<&crate::card::Card> {
+    let shown = slot.as_mut().filter(|s| s.generation == generation)?;
+    shown.held = false;
+    Some(&shown.card)
+}
+
+/// What the page renders: the Card, and whether its countdown ring runs.
+fn view(generation: u64, card: &crate::card::Card, countdown: bool) -> serde_json::Value {
+    serde_json::json!({"generation": generation, "card": card, "countdown": countdown})
+}
+
+/// The countdown's end: the Card of `generation`, unless an Undo stopped its
+/// countdown or it is gone (a click, or the next session, closed it first).
+fn expire(slot: &mut Option<ShownCard>, generation: u64) -> Option<ShownCard> {
+    counting(slot, generation)?;
+    slot.take()
+}
+
+/// A reminder Card's 5 s: the page fills the ring, then fades the Card when
+/// told; this closes it, checked against its generation so a late timer
+/// never closes the next session's Card.
+fn count_down(app: &tauri::AppHandle, generation: u64) {
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("parla-card-countdown".into())
+        .spawn(move || {
+            std::thread::sleep(CARD_COUNTDOWN);
+            if counting(&mut shown_card(), generation).is_none() {
+                return;
+            }
+            let _ = app.emit_to(LABEL, "card-leave", generation);
+            std::thread::sleep(CARD_FADE);
+            if expire(&mut shown_card(), generation).is_some() {
+                crate::card::log("closed by its countdown");
+                closed(&app, generation);
+            }
+        });
 }
 
 /// A new session closes the Card, and hides the window until its own pill
@@ -502,15 +587,18 @@ impl Overlay {
     }
 
     /// The check, with the Card above it until a button closes it or the
-    /// next session starts: no timer.
+    /// next session starts. A reminder's also closes after its countdown.
     fn show_card(self, card: crate::card::Card) {
         let (app, generation) = (self.app.clone(), self.generation);
         Size::Card.apply(&app);
-        let view = serde_json::json!({"generation": generation, "card": &card});
+        let countdown = card.closes_itself();
+        let view = view(generation, &card, countdown);
         // Before the page lays it out, so its box is never dropped.
         *shown_card() = Some(ShownCard {
             generation,
             card,
+            held: false,
+            counting: countdown,
             placed: None,
             bounds: None,
         });
@@ -520,6 +608,9 @@ impl Overlay {
             shown.placed = placed;
         }
         follow_cursor(&app, generation);
+        if countdown {
+            count_down(&app, generation);
+        }
     }
 
     /// The check with `label` beside it, held a little longer to be read.
@@ -571,8 +662,63 @@ impl Drop for Overlay {
 
 #[cfg(test)]
 mod tests {
-    use super::{dismissable, Bounds};
+    use super::{dismissable, expire, hold, release, Bounds, ShownCard};
+    use crate::card::Card;
     use tauri::PhysicalPosition;
+
+    fn shown(generation: u64) -> Option<ShownCard> {
+        Some(ShownCard {
+            generation,
+            card: Card::reminder(
+                "ricordami di chiamare Luca".into(),
+                "Chiamare Luca".into(),
+                "Sun 18/10 · 15:00".into(),
+                "01K8TODO0000000000000000AB".into(),
+                "https://traccia.example.ts.net/personal?todo=01K8TODO0000000000000000AB".into(),
+            ),
+            held: false,
+            counting: true,
+            placed: None,
+            bounds: None,
+        })
+    }
+
+    #[test]
+    fn a_failed_undo_leaves_the_card_up_with_no_countdown() {
+        // Traccia answered the Undo fast, well inside the 5 s.
+        let mut slot = shown(5);
+        assert!(hold(&mut slot, 5).is_some());
+        assert!(release(&mut slot, 5).is_some());
+        // The old timer runs out: the Card stays for a retry.
+        assert!(expire(&mut slot, 5).is_none());
+        assert!(slot.is_some());
+        assert!(hold(&mut slot, 5).is_some());
+        // Another session's Card is never released.
+        assert!(release(&mut slot, 4).is_none());
+    }
+
+    #[test]
+    fn the_countdown_closes_only_its_own_cards() {
+        // The next session's Card is up: a late timer leaves it.
+        let mut slot = shown(5);
+        assert!(expire(&mut slot, 4).is_none());
+        assert_eq!(slot.as_ref().map(|s| s.generation), Some(5));
+        // Its own Card closes, once.
+        assert!(expire(&mut slot, 5).is_some());
+        assert!(slot.is_none());
+        assert!(expire(&mut slot, 5).is_none());
+    }
+
+    #[test]
+    fn an_undo_in_flight_stops_the_countdown_and_a_second_undo() {
+        let mut slot = shown(5);
+        assert!(hold(&mut slot, 4).is_none());
+        assert!(hold(&mut slot, 5).is_some());
+        // Clicked twice, or the timer runs out while the DELETE is out.
+        assert!(hold(&mut slot, 5).is_none());
+        assert!(expire(&mut slot, 5).is_none());
+        assert!(slot.is_some());
+    }
 
     #[test]
     fn only_the_cards_own_box_takes_clicks() {
