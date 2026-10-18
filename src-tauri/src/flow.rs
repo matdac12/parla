@@ -392,11 +392,12 @@ fn run_session(
         let outcome = finish_command(app, audio, &settings, started_at, run, stream, selection);
         if let Some(overlay) = overlay {
             match outcome {
-                command_mode::Outcome::Shown(card) => overlay.finish(Ending::Card(card)),
+                command_mode::Outcome::Shown(card) | command_mode::Outcome::Reminded(card) => {
+                    overlay.finish(Ending::Card(card))
+                }
                 command_mode::Outcome::Opened { host } => {
                     overlay.finish_labelled(&format!("Opened {host}"))
                 }
-                command_mode::Outcome::Reminded(_) => overlay.finish_labelled("Reminder set"),
                 // A command run keeps no clip: Retry would re-run a dictation's.
                 command_mode::Outcome::Failed(_) => overlay.finish(Ending::Failed { retry: false }),
                 // Dropping the pill unfinished hides it.

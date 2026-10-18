@@ -141,7 +141,7 @@ mod tests {
             let started = std::time::Instant::now();
             let created = client.create(title, when).unwrap();
             let elapsed = started.elapsed().as_millis();
-            let deleted = client.delete(&created.id);
+            let deleted = client.undo(&created.id);
             println!(
                 "created {} {:?} (day {:?}, time {:?}) in {elapsed} ms; deleted: {deleted:?}",
                 created.id, created.title, created.day, created.time
@@ -181,7 +181,7 @@ mod tests {
         let error = match client.create(title, &when) {
             Err(error) => error,
             Ok(created) => {
-                let deleted = client.delete(&created.id);
+                let deleted = client.undo(&created.id);
                 panic!("created {} (deleted: {deleted:?})", created.id);
             }
         };

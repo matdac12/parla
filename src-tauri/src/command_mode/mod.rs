@@ -332,8 +332,9 @@ pub enum Outcome {
     Opened {
         host: String,
     },
-    /// `create_reminder` created this To-do: the pill says so.
-    Reminded(traccia::Created),
+    /// `create_reminder` created a To-do: the reminder Card confirms it, with
+    /// Open and Undo (PARLA-88).
+    Reminded(Card),
     Cancelled,
     Failed(Failure),
 }
@@ -500,7 +501,14 @@ fn run_tool(
                     record.tool = Some(call.name.clone());
                     record.url = Some(created.url.clone());
                     record.reply = Some(created.summary());
-                    Outcome::Reminded(created)
+                    let when_line = created.when_line(run.now.date);
+                    Outcome::Reminded(Card::reminder(
+                        record.text.trim().to_owned(),
+                        created.title,
+                        when_line,
+                        created.id,
+                        created.url,
+                    ))
                 }
                 Err(error) => failed(traccia::reminder_message(&error, &when, run.now.date)),
             }
@@ -1545,7 +1553,17 @@ mod tests {
             Ok(stored()),
         );
         let outcome = h.run("ricordami di chiamare Luca domani alle 15");
-        assert_eq!(outcome, Outcome::Reminded(stored()));
+        // The Card says what Traccia stored, the day as seen from Saturday.
+        assert_eq!(
+            outcome,
+            Outcome::Reminded(Card::reminder(
+                "ricordami di chiamare Luca domani alle 15".into(),
+                "Chiamare Luca".into(),
+                "Sun 18/10 · 15:00".into(),
+                stored().id,
+                stored().url,
+            ))
+        );
         assert_eq!(
             h.created(),
             [(
@@ -1591,10 +1609,11 @@ mod tests {
             ..stored()
         };
         let h = Harness::reminding(remind("Comprare il latte", None, None), Ok(anytime));
-        assert!(matches!(
-            h.run("ricordami di comprare il latte"),
-            Outcome::Reminded(_)
-        ));
+        let Outcome::Reminded(card) = h.run("ricordami di comprare il latte") else {
+            panic!("no reminder Card")
+        };
+        assert_eq!(card.text, "Comprare il latte");
+        assert_eq!(card.detail.as_deref(), Some("Anytime · no reminder"));
         assert_eq!(
             h.created(),
             [("Comprare il latte".to_string(), When::Anytime)]
@@ -1622,10 +1641,10 @@ mod tests {
             Ok(stored()),
         );
         h.reminders.as_mut().unwrap().esc = Some(h.cancelled.clone());
-        assert_eq!(
+        assert!(matches!(
             h.run("ricordami di chiamare Luca"),
-            Outcome::Reminded(stored())
-        );
+            Outcome::Reminded(_)
+        ));
         assert_eq!(h.rows()[0].outcome, Some(CommandOutcome::Created));
     }
 

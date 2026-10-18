@@ -232,6 +232,11 @@ impl Date {
         Self::from_days(self.days() + 1)
     }
 
+    /// `Sun 18/10`.
+    pub fn short(self) -> String {
+        format!("{} {:02}/{:02}", &self.weekday()[..3], self.day, self.month)
+    }
+
     pub fn weekday(self) -> &'static str {
         const WEEKDAYS: [&str; 7] = [
             "Monday",
