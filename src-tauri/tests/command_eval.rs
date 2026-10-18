@@ -2,18 +2,20 @@
 //! real request builder, parser and tool validators, 3x at each reasoning
 //! effort, graded and timed. It informed the default effort (`low`, Mattia's
 //! call), grades each text reply's `kind`, edit or answer (PARLA-81), and each
-//! reminder's day, time and title against a fixed Now (PARLA-86). It runs with
+//! reminder's day, time and title against a fixed Now (PARLA-86), and its
+//! `@KEY` against a fixed Projects list (PARLA-87). It runs with
 //! reminders on; `PARLA_EVAL_REMINDERS=off` sends the requests as with the
 //! tool off and skips the reminder cases. Re-run it whenever the system
 //! prompt, the request or a tool changes:
 //! `OPENAI_API_KEY=... cargo test --test command_eval -- --ignored --nocapture`
-//! (about 320 calls, about 2 cents). The grading itself runs offline in every
+//! (about 350 calls, about 4 cents). The grading itself runs offline in every
 //! `cargo test`.
 
 use parla_lib::{
     command_mode::{
         responses::{send, Content, Reply, Request, ToolCall},
         tools::{self, Tool},
+        traccia::Project,
         when::{Date, LocalNow, Time},
         Kind,
     },
@@ -48,12 +50,14 @@ enum Expect {
     },
     /// A `create_reminder` call that Parla's validator accepts, said at
     /// `now`, for exactly this local `day` and `time` (None: unsaid), whose
-    /// title has every `title` word and no day or time.
+    /// title has every `title` word and no day or time, and the `@KEY` of
+    /// `project` (one of [`PROJECTS`]) or, with None, no `@KEY` at all.
     Remind {
         now: &'static str,
         day: Option<&'static str>,
         time: Option<&'static str>,
         title: &'static [&'static str],
+        project: Option<&'static str>,
     },
 }
 
@@ -73,8 +77,30 @@ const fn reminds(
         day,
         time,
         title,
+        project: None,
     }
 }
+
+/// A reminder whose title references the listed Project `key` (PARLA-87).
+const fn reminds_in(
+    now: &'static str,
+    day: Option<&'static str>,
+    time: Option<&'static str>,
+    title: &'static [&'static str],
+    key: &'static str,
+) -> Expect {
+    Expect::Remind {
+        now,
+        day,
+        time,
+        title,
+        project: Some(key),
+    }
+}
+
+/// The Projects list every request carries with reminders on, as the cache
+/// would (PARLA-87): fixed, so every eval sends the same requests.
+const PROJECTS: &[(&str, &str)] = &[("CRM", "CRM"), ("CIT", "Cittadellese"), ("PARLA", "Parla")];
 
 const SEARCH_ENGINES: &[&str] = &["google.com", "google.it", "bing.com", "duckduckgo.com"];
 
@@ -319,7 +345,13 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
     (
         "ricordami giovedì prossimo alle 9 di mandare il preventivo per Cittadellese",
         None,
-        reminds(SATURDAY, Some("2026-10-22"), Some("09:00"), &["preventivo"]),
+        reminds_in(
+            SATURDAY,
+            Some("2026-10-22"),
+            Some("09:00"),
+            &["preventivo"],
+            "CIT",
+        ),
     ),
     (
         "remind me at 8 to take the pills",
@@ -329,7 +361,13 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
     (
         "ricordami il 3 novembre alle 15 della riunione del progetto CRM",
         None,
-        reminds(SATURDAY, Some("2026-11-03"), Some("15:00"), &["riunione"]),
+        reminds_in(
+            SATURDAY,
+            Some("2026-11-03"),
+            Some("15:00"),
+            &["riunione"],
+            "CRM",
+        ),
     ),
     (
         "ricordami fra 10 minuti di controllare la lavatrice",
@@ -403,6 +441,52 @@ const CASES: &[(&str, Option<&str>, Expect)] = &[
         "traduci in inglese",
         Some("Ciao, ci vediamo domani alle 15."),
         translates(En, &["tomorrow"], &["vediamo", "domani"]),
+    ),
+    // Project references (PARLA-87), against PROJECTS: a listed Project by
+    // name or key, IT and EN, and Projects that aren't listed, which get no
+    // `@KEY` (PARLA-86 saw a made-up `@CRM` with no list sent).
+    (
+        "ricordami giovedì alle 9 di mandare il preventivo per Cittadellese",
+        None,
+        reminds_in(
+            SATURDAY,
+            Some("2026-10-22"),
+            Some("09:00"),
+            &["preventivo"],
+            "CIT",
+        ),
+    ),
+    (
+        "remind me tomorrow at 4 pm to review the Parla release notes",
+        None,
+        reminds_in(
+            SATURDAY,
+            Some("2026-10-18"),
+            Some("16:00"),
+            &["release"],
+            "PARLA",
+        ),
+    ),
+    (
+        "ricordami lunedì alle 11 di aggiornare il preventivo del progetto CIT",
+        None,
+        reminds_in(
+            SATURDAY,
+            Some("2026-10-19"),
+            Some("11:00"),
+            &["preventivo"],
+            "CIT",
+        ),
+    ),
+    (
+        "ricordami domani alle 11 di mandare le slide per il progetto Edilnord",
+        None,
+        reminds(SATURDAY, Some("2026-10-18"), Some("11:00"), &["slide"]),
+    ),
+    (
+        "remind me tomorrow at 10 to send the mockups for the Bianchi project",
+        None,
+        reminds(SATURDAY, Some("2026-10-18"), Some("10:00"), &["mockup"]),
     ),
 ];
 
@@ -576,10 +660,14 @@ fn grade(expect: &Expect, reply: &Reply) -> Verdict {
         (Expect::Open { hosts, has }, Content::Call(call)) => grade_page(hosts, has, call),
         (
             Expect::Remind {
-                day, time, title, ..
+                day,
+                time,
+                title,
+                project,
+                ..
             },
             Content::Call(call),
-        ) => grade_reminder(*day, *time, title, call),
+        ) => grade_reminder(*day, *time, title, *project, call),
     }
 }
 
@@ -613,6 +701,7 @@ fn grade_reminder(
     day: Option<&str>,
     time: Option<&str>,
     keeps: &[&'static str],
+    project: Option<&str>,
     call: &ToolCall,
 ) -> Verdict {
     let problems = match tools::validate(call, true) {
@@ -644,6 +733,25 @@ fn grade_reminder(
                 });
             if dated {
                 problems.push(format!("a day or time in the title {title:?}"));
+            }
+            // Traccia matches `@KEY` exactly but case-blind.
+            let keys: Vec<String> = title
+                .split('@')
+                .skip(1)
+                .map(|rest| {
+                    rest.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                        .collect::<String>()
+                        .to_uppercase()
+                })
+                .collect();
+            if keys
+                != project
+                    .map(str::to_uppercase)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            {
+                problems.push(format!("keys {keys:?}, not {project:?}"));
             }
             problems
         }
@@ -893,7 +1001,7 @@ fn table(samples: &[Sample]) -> String {
 }
 
 #[test]
-#[ignore = "live: about 320 OpenAI Responses calls, about 2 cents"]
+#[ignore = "live: about 350 OpenAI Responses calls, about 4 cents"]
 fn the_eval_grades_every_case_at_each_effort() {
     let Some(key) = std::env::var("OPENAI_API_KEY")
         .ok()
@@ -916,7 +1024,14 @@ fn the_eval_grades_every_case_at_each_effort() {
             // Fixed, so every eval sends the same requests.
             now: now_of(expect),
             reminders,
-            projects: Vec::new(),
+            projects: PROJECTS
+                .iter()
+                .filter(|_| reminders)
+                .map(|(key, name)| Project {
+                    key: (*key).into(),
+                    name: (*name).into(),
+                })
+                .collect(),
         }
     };
     // Untimed: opens the connection, as the app's pre-warm at the hold does.
@@ -1250,6 +1365,33 @@ mod grading {
         assert!(!grade(&FORMAL, &reminder("Chiamare", None, None)).kind_ok);
         let wiki = opens_on(&["wikipedia.org"], &[]);
         assert!(!grade(&wiki, &reminder("Leggere Roma", None, None)).kind_ok);
+    }
+
+    #[test]
+    fn a_reminder_names_a_listed_project_by_its_key_and_nothing_else() {
+        let cit = reminds_in(
+            SATURDAY,
+            Some("2026-10-22"),
+            Some("09:00"),
+            &["preventivo"],
+            "CIT",
+        );
+        let titled = |expect: &Expect, title: &str, day, time| {
+            grade(expect, &reminder(title, Some(day), Some(time))).correct
+        };
+        let on_cit = |title: &str| titled(&cit, title, "2026-10-22", "09:00");
+        assert!(on_cit("Mandare il preventivo @CIT"));
+        // Traccia matches keys case-blind.
+        assert!(on_cit("Mandare il preventivo @cit"));
+        assert!(!on_cit("Mandare il preventivo per Cittadellese"));
+        assert!(!on_cit("Mandare il preventivo @CITTADELLESE"));
+        assert!(!on_cit("Mandare il preventivo @CIT @CRM"));
+        // A project that isn't listed gets no key at all.
+        let unlisted = reminds(SATURDAY, Some("2026-10-18"), Some("11:00"), &["slide"]);
+        let on_unlisted = |title: &str| titled(&unlisted, title, "2026-10-18", "11:00");
+        assert!(on_unlisted("Mandare le slide per Edilnord"));
+        assert!(!on_unlisted("Mandare le slide @EDILNORD"));
+        assert!(!on_unlisted("Mandare le slide @CRM"));
     }
 
     #[test]
