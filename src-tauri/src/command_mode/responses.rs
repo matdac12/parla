@@ -105,16 +105,22 @@ fn user_text(request: &Request) -> String {
     text + "Instruction: " + &request.instruction
 }
 
-/// The text to show or the tool to call, and the tokens billed (`usage`).
+/// What the model sent back, and the tokens billed (`usage`) whatever it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
-    pub text: String,
-    /// What the text is for; None when there is no text.
-    pub kind: Option<Kind>,
-    /// The model asked for a tool instead of (or besides) text.
-    pub call: Option<ToolCall>,
+    pub content: Content,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    /// The text to show, never blank, and what it is for.
+    Text { text: String, kind: Kind },
+    /// The model asked for a tool instead of (or besides) text.
+    Call(ToolCall),
+    /// Billed, but nothing to show: why, for the notification and the row.
+    Unusable(String),
 }
 
 /// A `function_call` output item, unchecked: the allowlist validates it.
@@ -142,13 +148,13 @@ struct OutputItem {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
-    content: Vec<Content>,
+    content: Vec<Part>,
     /// `function_call` items only.
     name: Option<String>,
     arguments: Option<String>,
 }
 #[derive(Deserialize)]
-struct Content {
+struct Part {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
@@ -178,69 +184,19 @@ struct ApiErrorBody {
 
 /// The reply's first `function_call` (parallel calls are off), or else its
 /// `output_text`, joined in order (one JSON document, possibly split).
-/// Reasoning items are skipped. The text's end is trimmed; a leaked chat
-/// token fails the reply; an empty text is the orchestrator's to reject. Error bodies are
-/// never kept, only their `code`: the message may echo a masked key or the
-/// request.
+/// Reasoning items are skipped. The text's end is trimmed. A cut-off,
+/// refused, unreadable, leaking or blank reply is still billed, so it comes
+/// back `Unusable` with its usage (PARLA-78), not as an error. Error bodies
+/// are never kept, only their `code`: the message may echo a masked key or
+/// the request.
 pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
-    let unreadable = || ProviderError::Other("the reply could not be read.".into());
     match status {
         200..=299 => {
-            let response: Response = serde_json::from_str(body).map_err(|_| unreadable())?;
-            if response.status.as_deref() != Some("completed") {
-                let reason = response
-                    .incomplete_details
-                    .and_then(|details| details.reason)
-                    .or(response.status)
-                    .unwrap_or_else(|| "no status".into());
-                return Err(ProviderError::Other(format!(
-                    "the reply was cut off ({reason})."
-                )));
-            }
-            let refused = response
-                .output
-                .iter()
-                .flat_map(|item| &item.content)
-                .any(|content| content.kind == "refusal");
-            if refused {
-                return Err(ProviderError::Other("the model refused.".into()));
-            }
-            let json: String = response
-                .output
-                .iter()
-                .filter(|item| item.kind == "message")
-                .flat_map(|item| &item.content)
-                .filter(|content| content.kind == "output_text")
-                .map(|content| content.text.as_str())
-                .collect();
-            let call = response
-                .output
-                .into_iter()
-                .find(|item| item.kind == "function_call")
-                .map(|item| ToolCall {
-                    name: item.name.unwrap_or_default(),
-                    arguments: item.arguments.unwrap_or_default(),
-                });
-            // A call wins, and any text beside it is dropped unread: once it
-            // was the call's URL run on into junk (PARLA-68).
-            let (text, kind) = if call.is_some() || json.is_empty() {
-                (String::new(), None)
-            } else {
-                let Formatted { mut text, kind } =
-                    serde_json::from_str(&json).map_err(|_| unreadable())?;
-                if leaks_chat_token(&text) {
-                    return Err(ProviderError::Other(
-                        "the reply leaked a chat token.".into(),
-                    ));
-                }
-                text.truncate(text.trim_end().len());
-                (text, Some(kind))
-            };
-            let usage = response.usage;
+            let mut response: Response =
+                serde_json::from_str(body).map_err(|_| ProviderError::Other(UNREADABLE.into()))?;
+            let usage = response.usage.take();
             Ok(Reply {
-                text,
-                kind,
-                call,
+                content: read_content(response).unwrap_or_else(Content::Unusable),
                 tokens_in: usage.as_ref().and_then(|usage| usage.input_tokens),
                 tokens_out: usage.and_then(|usage| usage.output_tokens),
             })
@@ -258,6 +214,62 @@ pub fn parse(status: u16, body: &str) -> Result<Reply, ProviderError> {
                 .unwrap_or_default(),
         }),
     }
+}
+
+const UNREADABLE: &str = "the reply could not be read.";
+const EMPTY: &str = "the reply was empty.";
+
+/// What a 2xx response holds, or why it has nothing to show.
+fn read_content(response: Response) -> Result<Content, String> {
+    if response.status.as_deref() != Some("completed") {
+        let reason = response
+            .incomplete_details
+            .and_then(|details| details.reason)
+            .or(response.status)
+            .unwrap_or_else(|| "no status".into());
+        return Err(format!("the reply was cut off ({reason})."));
+    }
+    let refused = response
+        .output
+        .iter()
+        .flat_map(|item| &item.content)
+        .any(|content| content.kind == "refusal");
+    if refused {
+        return Err("the model refused.".into());
+    }
+    let json: String = response
+        .output
+        .iter()
+        .filter(|item| item.kind == "message")
+        .flat_map(|item| &item.content)
+        .filter(|content| content.kind == "output_text")
+        .map(|content| content.text.as_str())
+        .collect();
+    // A call wins, and any text beside it is dropped unread: once it was the
+    // call's URL run on into junk (PARLA-68).
+    if let Some(item) = response
+        .output
+        .into_iter()
+        .find(|item| item.kind == "function_call")
+    {
+        return Ok(Content::Call(ToolCall {
+            name: item.name.unwrap_or_default(),
+            arguments: item.arguments.unwrap_or_default(),
+        }));
+    }
+    if json.is_empty() {
+        return Err(EMPTY.into());
+    }
+    let Formatted { mut text, kind } =
+        serde_json::from_str(&json).map_err(|_| UNREADABLE.to_owned())?;
+    if leaks_chat_token(&text) {
+        return Err("the reply leaked a chat token.".into());
+    }
+    text.truncate(text.trim_end().len());
+    if text.trim().is_empty() {
+        return Err(EMPTY.into());
+    }
+    Ok(Content::Text { text, kind })
 }
 
 /// A chat-template token spelled out in the text, as derailed replies did
@@ -342,9 +354,10 @@ mod tests {
             parse(200, &fixture("text_reply")),
             Ok(Reply {
                 // `{"text":"Gentile Cliente,\n"}`: the trailing line break goes.
-                text: "Gentile Cliente,".into(),
-                kind: Some(Kind::Edit),
-                call: None,
+                content: Content::Text {
+                    text: "Gentile Cliente,".into(),
+                    kind: Kind::Edit,
+                },
                 tokens_in: Some(358),
                 tokens_out: Some(16),
             })
@@ -353,9 +366,10 @@ mod tests {
         assert_eq!(
             parse(200, &fixture("multi_part_reply")),
             Ok(Reply {
-                text: "Ciao a tutti, buona giornata!".into(),
-                kind: Some(Kind::Edit),
-                call: None,
+                content: Content::Text {
+                    text: "Ciao a tutti, buona giornata!".into(),
+                    kind: Kind::Edit,
+                },
                 tokens_in: Some(92),
                 tokens_out: Some(18),
             })
@@ -367,7 +381,13 @@ mod tests {
         let edit = fixture("text_reply");
         let answer = edit.replace(r#"\"kind\":\"edit\""#, r#"\"kind\":\"answer\""#);
         assert_ne!(answer, edit);
-        assert_eq!(parse(200, &answer).unwrap().kind, Some(Kind::Answer));
+        assert!(matches!(
+            parse(200, &answer).unwrap().content,
+            Content::Text {
+                kind: Kind::Answer,
+                ..
+            }
+        ));
         // Strict JSON makes `kind` required: without it, or with another
         // label, the reply is unreadable rather than guessed.
         for broken in [
@@ -377,8 +397,8 @@ mod tests {
         ] {
             assert_ne!(broken, edit);
             assert_eq!(
-                parse(200, &broken),
-                Err(ProviderError::Other("the reply could not be read.".into())),
+                parse(200, &broken).unwrap().content,
+                Content::Unusable("the reply could not be read.".into()),
                 "{broken}"
             );
         }
@@ -388,9 +408,14 @@ mod tests {
     fn a_derailed_reply_is_never_pasted() {
         // Free text, as before PARLA-68's fix: "Buongiorno,\n</|assistant|>\n".
         let derailed = fixture("derailed_text_reply");
+        // Billed all the same: its tokens are kept (PARLA-78).
         assert_eq!(
             parse(200, &derailed),
-            Err(ProviderError::Other("the reply could not be read.".into()))
+            Ok(Reply {
+                content: Content::Unusable("the reply could not be read.".into()),
+                tokens_in: Some(337),
+                tokens_out: Some(14),
+            })
         );
         // The same leak inside the JSON text fails the reply too.
         let leaked = derailed.replace(
@@ -399,10 +424,8 @@ mod tests {
         );
         assert_ne!(leaked, derailed);
         assert_eq!(
-            parse(200, &leaked),
-            Err(ProviderError::Other(
-                "the reply leaked a chat token.".into()
-            ))
+            parse(200, &leaked).unwrap().content,
+            Content::Unusable("the reply leaked a chat token.".into())
         );
     }
 
@@ -414,9 +437,7 @@ mod tests {
         assert_eq!(
             parse(200, &fixture("call_with_junk_text")),
             Ok(Reply {
-                text: String::new(),
-                kind: None,
-                call: Some(ToolCall {
+                content: Content::Call(ToolCall {
                     name: "open_url".into(),
                     arguments: r#"{"url":"https://www.google.com/search?q=ristoranti+a+Milano"}"#
                         .into(),
@@ -435,8 +456,8 @@ mod tests {
             r#""type": "refusal", "refusal": "I can't help with that.","#,
         );
         assert_eq!(
-            parse(200, &refusal),
-            Err(ProviderError::Other("the model refused.".into()))
+            parse(200, &refusal).unwrap().content,
+            Content::Unusable("the model refused.".into())
         );
     }
 
@@ -474,9 +495,7 @@ mod tests {
         assert_eq!(
             parse(200, &fixture("function_call")),
             Ok(Reply {
-                text: String::new(),
-                kind: None,
-                call: Some(ToolCall {
+                content: Content::Call(ToolCall {
                     name: "open_url".into(),
                     arguments: r#"{"url":"https://it.wikipedia.org/wiki/Roma"}"#.into(),
                 }),
@@ -487,12 +506,25 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_cut_off_by_the_output_cap_is_an_error_not_half_a_paste() {
+    fn a_reply_cut_off_by_the_output_cap_is_unusable_but_billed() {
         assert_eq!(
             parse(200, &fixture("incomplete")),
-            Err(ProviderError::Other(
-                "the reply was cut off (max_output_tokens).".into()
-            ))
+            Ok(Reply {
+                content: Content::Unusable("the reply was cut off (max_output_tokens).".into()),
+                tokens_in: Some(11),
+                tokens_out: Some(40),
+            })
+        );
+    }
+
+    #[test]
+    fn a_blank_text_is_unusable() {
+        let reply = fixture("text_reply");
+        let blank = reply.replace("Gentile Cliente,", " ");
+        assert_ne!(blank, reply);
+        assert_eq!(
+            parse(200, &blank).unwrap().content,
+            Content::Unusable("the reply was empty.".into())
         );
     }
 

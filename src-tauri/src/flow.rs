@@ -282,6 +282,12 @@ fn run_session(
     let confirm_after = if command { MIN_HOLD } else { Duration::ZERO };
     let early_release = command_pressed_at.and_then(|pressed_at| {
         match released.recv_timeout(MIN_HOLD.saturating_sub(pressed_at.elapsed())) {
+            // Ctrl+Shift held through a click-drag is a mouse gesture: the
+            // hold ends here unconfirmed (PARLA-78).
+            Err(mpsc::RecvTimeoutError::Timeout) if inserter::mouse_button_down() => {
+                cancelled.store(true, Ordering::Release);
+                Some((Instant::now(), None))
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Ok(key_up) => Some((key_up, None)),
             Err(mpsc::RecvTimeoutError::Disconnected) => Some((
@@ -662,7 +668,8 @@ fn finish_command(
         browser: &command_mode::tools::DefaultBrowser,
         history: &AppHistory(app),
     };
-    // Joined once the instruction is in: the read finished long before.
+    // Joined once the instruction is in: the read has finished, or stops
+    // watching for a slow copy.
     let selection = || selection.map(SelectionRead::join).unwrap_or_default();
     let outcome = command_mode::run(&ports, run, record, selection, |record| {
         let clip = match audio {
@@ -689,7 +696,7 @@ fn finish_command(
             crate::failure::on_success(app)
         }
         command_mode::Outcome::Failed(command_mode::Failure::Transcription(error)) => {
-            crate::failure::notify_error(app, &settings.active_provider, error)
+            crate::failure::notify_instruction_error(app, &settings.active_provider, error)
         }
         command_mode::Outcome::Failed(command_mode::Failure::Command(error)) => {
             crate::failure::notify_command_error(app, error)
@@ -717,8 +724,8 @@ impl command_mode::Desktop for CommandDesktop {
     fn clipboard_sequence(&self) -> u32 {
         inserter::clipboard_sequence()
     }
-    fn send_copy(&self) -> Result<(), String> {
-        inserter::send_copy()
+    fn send_copy(&self, key: command_mode::CopyKey) -> Result<(), String> {
+        inserter::send_copy(key)
     }
     fn copied_empty_selection(&self) -> bool {
         inserter::copied_empty_selection()
@@ -726,8 +733,15 @@ impl command_mode::Desktop for CommandDesktop {
     fn foreground_app(&self) -> Option<String> {
         inserter::foreground_app()
     }
+    fn foreground_class(&self) -> Option<String> {
+        inserter::foreground_class()
+    }
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    /// The join unparks it, so the run never waits out a poll.
     fn wait(&self, delay: Duration) {
-        std::thread::sleep(delay);
+        std::thread::park_timeout(delay);
     }
     fn give_back(&self, borrowed: &command_mode::Borrowed) {
         inserter::give_back(borrowed);
@@ -736,19 +750,33 @@ impl command_mode::Desktop for CommandDesktop {
 
 /// The selection read on its own thread, from the confirmed hold until the
 /// run joins it (PARLA-64).
-struct SelectionRead(Option<std::thread::JoinHandle<command_mode::Selection>>);
+struct SelectionRead {
+    read: Option<std::thread::JoinHandle<command_mode::Selection>>,
+    joined: Arc<AtomicBool>,
+}
 impl SelectionRead {
     fn start() -> Self {
+        let joined = Arc::new(AtomicBool::new(false));
+        let flag = joined.clone();
         let read = std::thread::Builder::new()
             .name("parla-selection".into())
-            .spawn(|| command_mode::read_selection(&CommandDesktop));
-        Self(
-            read.map_err(|error| eprintln!("Cannot read the selection: {error}"))
+            .spawn(move || command_mode::read_selection(&CommandDesktop, &flag));
+        Self {
+            read: read
+                .map_err(|error| eprintln!("Cannot read the selection: {error}"))
                 .ok(),
-        )
+            joined,
+        }
     }
+    /// Stops a read still watching for a slow app's copy.
     fn join(self) -> command_mode::Selection {
-        self.0.and_then(|read| read.join().ok()).unwrap_or_default()
+        self.joined.store(true, Ordering::Release);
+        self.read
+            .and_then(|read| {
+                read.thread().unpark();
+                read.join().ok()
+            })
+            .unwrap_or_default()
     }
 }
 
