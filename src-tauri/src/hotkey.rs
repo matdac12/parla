@@ -64,7 +64,8 @@ enum Tick {
     Reconcile,
     /// Idle timer fired: full resync, and refresh the hook.
     Resync,
-    /// Fast timer found the state quiet again: back to the idle cadence.
+    /// Fast timer found the state quiet again: back to the idle cadence, and
+    /// the resync runs now (each disarm restarts the idle period).
     Disarm,
 }
 
@@ -1557,16 +1558,17 @@ mod windows_hook {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .tick_plan(FAST.get());
+                // Disarming restarts the 5 s period, so a busy session would never
+                // reach an idle tick: the disarm tick does the resync itself.
                 if plan == Tick::Disarm {
                     set_cadence(false);
-                    continue;
                 }
                 // Pending state seen by a slow tick (set outside the hook):
                 // speed up so a missed release is caught within 100 ms.
                 if plan == Tick::Reconcile && !FAST.get() {
                     set_cadence(true);
                 }
-                let refresh_due = plan == Tick::Resync;
+                let refresh_due = plan != Tick::Reconcile;
                 let Some(snapshot) = modifier_snapshot() else {
                     continue;
                 };
