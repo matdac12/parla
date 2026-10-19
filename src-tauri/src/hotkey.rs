@@ -64,9 +64,21 @@ enum Tick {
     Reconcile,
     /// Idle timer fired: full resync, and refresh the hook.
     Resync,
-    /// Fast timer found the state quiet again: back to the idle cadence, and
-    /// the resync runs now (each disarm restarts the idle period).
+    /// Fast timer found the state quiet again: back to the idle cadence. The
+    /// resync runs only if one is overdue (see `refresh_due`).
     Disarm,
+}
+
+/// Whether a tick does the full modifier resync and hook refresh. A typed
+/// main key (Space) arms and disarms within ~100 ms, so a disarm must not
+/// refresh unless the last one is 5 s old; the idle timer always does.
+#[cfg(any(windows, test))]
+fn refresh_due(plan: &Tick, since_last: std::time::Duration) -> bool {
+    match plan {
+        Tick::Reconcile => false,
+        Tick::Resync => true,
+        Tick::Disarm => since_last >= std::time::Duration::from_millis(WATCHDOG_IDLE_MS.into()),
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -1151,6 +1163,21 @@ mod tests {
     }
 
     #[test]
+    fn refresh_is_by_elapsed_time_so_a_typed_space_never_reinstalls_the_hook() {
+        use std::time::Duration;
+        let secs = Duration::from_secs;
+        // Space typed: arm, then disarm ~100 ms later, 1 s after the last refresh.
+        assert!(!refresh_due(&Tick::Disarm, Duration::from_millis(100)));
+        assert!(!refresh_due(&Tick::Disarm, secs(4)));
+        // A busy session: the disarm tick still refreshes once it is overdue.
+        assert!(refresh_due(&Tick::Disarm, secs(5)));
+        assert!(refresh_due(&Tick::Disarm, secs(60)));
+        // The idle timer always refreshes; a fast reconcile tick never does.
+        assert!(refresh_due(&Tick::Resync, Duration::ZERO));
+        assert!(!refresh_due(&Tick::Reconcile, secs(60)));
+    }
+
+    #[test]
     fn watchdog_stays_armed_while_the_main_key_press_is_cached() {
         let mut state = registration();
         state.key_event(Code::Space, true, false, false, Some(&[]));
@@ -1358,6 +1385,7 @@ mod windows_hook {
     use std::{
         cell::{Cell, RefCell},
         ptr::null_mut,
+        time::Instant,
     };
     use windows_sys::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
@@ -1484,8 +1512,9 @@ mod windows_hook {
                     for event in [recovered, raw, dictation, command].into_iter().flatten() {
                         let _ = context.events.send(event);
                     }
-                    // Only a state check per tracked key; SetTimer runs once
-                    // when a hold starts, never per keystroke.
+                    // A state check per tracked key. SetTimer (one cheap syscall)
+                    // runs each time the state turns pending: once per hold, and
+                    // once per typed main key (Space) since that arms briefly.
                     if !FAST.get() && !state.quiet() {
                         set_cadence(true);
                     }
@@ -1541,6 +1570,7 @@ mod windows_hook {
                 .sync_modifiers(&snapshot);
         }
         let _ = ready.send(Ok(()));
+        let mut last_refresh = Instant::now();
         loop {
             // SAFETY: initialized output storage; no HWND filter means all
             // messages for this dedicated thread, including keyboard hooks.
@@ -1559,16 +1589,23 @@ mod windows_hook {
                     .unwrap_or_else(|e| e.into_inner())
                     .tick_plan(FAST.get());
                 // Disarming restarts the 5 s period, so a busy session would never
-                // reach an idle tick: the disarm tick does the resync itself.
+                // reach an idle tick: a disarm tick resyncs when one is overdue.
+                let refresh_due = refresh_due(&plan, last_refresh.elapsed());
                 if plan == Tick::Disarm {
                     set_cadence(false);
+                    if !refresh_due {
+                        // Quiet: nothing to reconcile or sample.
+                        continue;
+                    }
                 }
                 // Pending state seen by a slow tick (set outside the hook):
                 // speed up so a missed release is caught within 100 ms.
                 if plan == Tick::Reconcile && !FAST.get() {
                     set_cadence(true);
                 }
-                let refresh_due = plan != Tick::Reconcile;
+                if refresh_due {
+                    last_refresh = Instant::now();
+                }
                 let Some(snapshot) = modifier_snapshot() else {
                     continue;
                 };
