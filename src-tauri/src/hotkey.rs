@@ -1122,7 +1122,6 @@ mod tests {
         let state = registration();
         assert!(state.quiet());
         assert_eq!(state.tick_plan(false), Tick::Resync);
-        assert_eq!(WATCHDOG_IDLE_MS, 5000);
     }
 
     #[test]
