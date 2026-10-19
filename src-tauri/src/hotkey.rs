@@ -49,6 +49,25 @@ fn physical_snapshot<T>(sample: impl FnOnce() -> T) -> Option<T> {
     Some(sample())
 }
 
+/// Watchdog cadence. The hook arms `WATCHDOG_FAST_MS` only while a hold, chord
+/// or cached main-key press is pending; otherwise the timer runs at
+/// `WATCHDOG_IDLE_MS`, which is the periodic modifier resync and hook refresh.
+#[cfg(any(windows, test))]
+const WATCHDOG_FAST_MS: u32 = 100;
+#[cfg(any(windows, test))]
+const WATCHDOG_IDLE_MS: u32 = 5000;
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum Tick {
+    /// Something is pending: sample and reconcile at the fast cadence.
+    Reconcile,
+    /// Idle timer fired: full resync, and refresh the hook.
+    Resync,
+    /// Fast timer found the state quiet again: back to the idle cadence.
+    Disarm,
+}
+
 #[cfg(any(windows, test))]
 const MODIFIER_KEYS: [Code; 8] = [
     Code::ControlLeft,
@@ -277,6 +296,16 @@ impl Registration {
             && !self
                 .shortcut
                 .is_some_and(|shortcut| self.keys.contains(&shortcut.key))
+    }
+
+    /// What a watchdog tick does, given the timer's cadence and the state.
+    #[cfg(any(windows, test))]
+    fn tick_plan(&self, fast: bool) -> Tick {
+        match (fast, self.quiet()) {
+            (_, false) => Tick::Reconcile,
+            (false, true) => Tick::Resync,
+            (true, true) => Tick::Disarm,
+        }
     }
 
     fn reconcile_main_key(
@@ -1089,6 +1118,50 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_stays_idle_and_resyncs_while_nothing_is_pending() {
+        let state = registration();
+        assert!(state.quiet());
+        assert_eq!(state.tick_plan(false), Tick::Resync);
+        assert_eq!(WATCHDOG_IDLE_MS, 5000);
+    }
+
+    #[test]
+    fn watchdog_arms_on_a_hold_and_disarms_once_it_ends() {
+        let mut state = registration();
+        state.key_event(
+            Code::ControlLeft,
+            true,
+            false,
+            false,
+            Some(&[Code::ControlLeft]),
+        );
+        // Ctrl alone is not a hold: still idle.
+        assert!(state.quiet());
+        state.key_event(Code::Space, true, false, false, Some(&[Code::ControlLeft]));
+        // The hook arms the fast timer here; its ticks reconcile.
+        assert!(!state.quiet());
+        assert_eq!(state.tick_plan(true), Tick::Reconcile);
+        assert_eq!(state.tick_plan(false), Tick::Reconcile);
+        // A missed release is still recovered by the fast tick, then it disarms.
+        assert_eq!(
+            state.reconcile_main_key(false, Some(&[Code::ControlLeft])),
+            Some(HotkeyEvent::Released)
+        );
+        assert_eq!(state.tick_plan(true), Tick::Disarm);
+    }
+
+    #[test]
+    fn watchdog_stays_armed_while_the_main_key_press_is_cached() {
+        let mut state = registration();
+        state.key_event(Code::Space, true, false, false, Some(&[]));
+        // No chord, so no hold, but the cached press needs its release cleared.
+        assert!(!state.quiet());
+        assert_eq!(state.tick_plan(true), Tick::Reconcile);
+        state.reconcile_main_key(false, Some(&[]));
+        assert_eq!(state.tick_plan(true), Tick::Disarm);
+    }
+
+    #[test]
     fn fresh_press_reconciles_a_missed_release_before_next_press() {
         let mut state = registration();
         state.key_event(
@@ -1282,7 +1355,10 @@ mod tests {
 #[cfg(windows)]
 mod windows_hook {
     use super::*;
-    use std::{cell::RefCell, ptr::null_mut};
+    use std::{
+        cell::{Cell, RefCell},
+        ptr::null_mut,
+    };
     use windows_sys::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
@@ -1300,6 +1376,26 @@ mod windows_hook {
     thread_local! {
         // Windows calls a low-level hook on its installing message-loop thread.
         static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) };
+        // The watchdog timer's id and whether it runs at the fast cadence;
+        // only this thread's hook and message loop touch them.
+        static TIMER: Cell<usize> = const { Cell::new(0) };
+        static FAST: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Switch the thread timer between the fast and idle cadence. Passing the
+    /// existing id makes `SetTimer` replace it, so there is never a second one.
+    fn set_cadence(fast: bool) {
+        let ms = if fast {
+            WATCHDOG_FAST_MS
+        } else {
+            WATCHDOG_IDLE_MS
+        };
+        // SAFETY: a thread-owned timer posts WM_TIMER to this message queue.
+        let id = unsafe { SetTimer(null_mut(), TIMER.get(), ms, None) };
+        if id != 0 {
+            TIMER.set(id);
+            FAST.set(fast);
+        }
     }
 
     fn modifier_snapshot() -> Option<Vec<Code>> {
@@ -1388,6 +1484,11 @@ mod windows_hook {
                     for event in [recovered, raw, dictation, command].into_iter().flatten() {
                         let _ = context.events.send(event);
                     }
+                    // Only a state check per tracked key; SetTimer runs once
+                    // when a hold starts, never per keystroke.
+                    if !FAST.get() && !state.quiet() {
+                        set_cadence(true);
+                    }
                 }
             });
         }
@@ -1426,8 +1527,8 @@ mod windows_hook {
                 return Err(error);
             }
         };
-        // SAFETY: a thread-owned timer posts WM_TIMER to this message queue.
-        let timer = unsafe { SetTimer(null_mut(), 0, 100, None) };
+        set_cadence(false);
+        let timer = TIMER.get();
         if timer == 0 {
             let error = std::io::Error::last_os_error().to_string();
             let _ = ready.send(Err(error.clone()));
@@ -1440,7 +1541,6 @@ mod windows_hook {
                 .sync_modifiers(&snapshot);
         }
         let _ = ready.send(Ok(()));
-        let mut ticks = 0_u32;
         loop {
             // SAFETY: initialized output storage; no HWND filter means all
             // messages for this dedicated thread, including keyboard hooks.
@@ -1450,14 +1550,24 @@ mod windows_hook {
                 break;
             }
             if message.message == WM_TIMER && message.wParam == timer {
-                ticks = ticks.wrapping_add(1);
-                let refresh_due = ticks.is_multiple_of(50);
-                // A quiet tick would sample nine keys to change nothing. Hook
-                // callbacks run on this thread, so the state cannot change
-                // between this check and a full pass.
-                if !refresh_due && state.lock().unwrap_or_else(|e| e.into_inner()).quiet() {
+                // A quiet fast tick would sample nine keys to change nothing:
+                // drop to the idle cadence instead. Hook callbacks run on this
+                // thread, so the state cannot change between this check and a
+                // full pass.
+                let plan = state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .tick_plan(FAST.get());
+                if plan == Tick::Disarm {
+                    set_cadence(false);
                     continue;
                 }
+                // Pending state seen by a slow tick (set outside the hook):
+                // speed up so a missed release is caught within 100 ms.
+                if plan == Tick::Reconcile && !FAST.get() {
+                    set_cadence(true);
+                }
+                let refresh_due = plan == Tick::Resync;
                 let Some(snapshot) = modifier_snapshot() else {
                     continue;
                 };
