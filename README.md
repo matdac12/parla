@@ -11,7 +11,7 @@ history so providers can be compared on your own voice and network. See the [v0 
 ## Quick start on Windows
 
 1. Open the latest green **CI** run on `main` under
-   [Actions](https://github.com/matdac6/parla/actions) and download the
+   [Actions](https://github.com/matdac12/parla/actions) and download the
    `parla-windows-x64` artifact.
 2. Extract the whole folder. `parla.exe` and the ONNX Runtime `.dll` files
    (including `DirectML.dll`) must stay in the same folder; copying only the
@@ -79,7 +79,7 @@ See also [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/).
 In PowerShell:
 
 ```powershell
-git clone https://github.com/matdac6/parla
+git clone https://github.com/matdac12/parla
 cd parla
 npm ci
 npm run tauri dev
