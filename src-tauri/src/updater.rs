@@ -15,13 +15,13 @@ use crate::flow::{DictationGuard, DictationState};
 use crate::log::log_error;
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_updater::{Update, UpdaterExt, VersionComparator};
 
 use crate::command_mode::UrlOpener;
 
@@ -313,11 +313,32 @@ async fn background(app: AppHandle) {
     }
 }
 
+/// Which announced releases count as an update: strictly newer than the
+/// running version, by semver precedence with build metadata ignored, and never
+/// a pre-release for a stable install. The plugin's own default is
+/// `remote > current`, which treats `0.2.0+1` as newer than `0.2.0` and moves a
+/// stable install to `0.3.0-rc.1`. This only judges the number in `latest.json`;
+/// that the installer really is that version is `requireSignedVersion`'s job
+/// (see `docs/development.md`, Releasing > Updates).
+fn newer_stable_only() -> VersionComparator {
+    Arc::new(|current, release| {
+        let (mut current, mut remote) = (current, release.version);
+        if current.pre.is_empty() && !remote.pre.is_empty() {
+            return false;
+        }
+        current.build = Default::default();
+        remote.build = Default::default();
+        remote > current
+    })
+}
+
 /// An updater whose installer step first saves what Parla saves on exit: on
 /// Windows the plugin ends the process itself, so `RunEvent::Exit` never runs.
 fn updater(app: &AppHandle) -> tauri_plugin_updater::Result<tauri_plugin_updater::Updater> {
     let exiting = app.clone();
+    let newer = newer_stable_only();
     app.updater_builder()
+        .version_comparator(move |current, release| newer(current, release))
         .on_before_exit(move || {
             exiting.cleanup_before_exit();
             crate::flush_on_exit(&exiting);
@@ -760,6 +781,85 @@ mod tests {
             .unwrap()
             .as_str()
             .ends_with("/v0.1.4/Parla_0.1.4_x64-setup.exe"));
+    }
+
+    fn release(version: &str) -> tauri_plugin_updater::RemoteRelease {
+        serde_json::from_value(serde_json::json!({
+            "version": version,
+            "platforms": {
+                "windows-x86_64": { "signature": "c2ln", "url": "https://example.invalid/setup.exe" }
+            }
+        }))
+        .unwrap()
+    }
+
+    /// Whether `from` (the running version) is offered `to`.
+    fn offered(from: &str, to: &str) -> bool {
+        newer_stable_only()(release(from).version, release(to))
+    }
+
+    #[test]
+    fn only_a_strictly_newer_version_is_an_update() {
+        assert!(offered("0.1.3", "0.1.4"));
+        assert!(offered("0.1.9", "0.2.0"));
+        assert!(offered("0.9.0", "1.0.0"));
+        assert!(offered("0.1.10", "0.1.11"), "numeric, not textual");
+        assert!(offered("0.1.3", "v0.1.4"), "the tag's v prefix is fine");
+        // The same version, or an older one: nothing to install.
+        assert!(!offered("0.1.3", "0.1.3"));
+        assert!(!offered("0.1.4", "0.1.3"));
+        assert!(!offered("0.2.0", "0.1.99"));
+        assert!(!offered("1.0.0", "0.9.9"));
+    }
+
+    #[test]
+    fn build_metadata_never_makes_an_update() {
+        // semver ordering alone would rank `0.1.3+1` above `0.1.3`.
+        assert!(release("0.1.3+1").version > release("0.1.3").version);
+        assert!(!offered("0.1.3", "0.1.3+1"));
+        assert!(!offered("0.1.3+2", "0.1.3+1"));
+        assert!(!offered("0.1.3+1", "0.1.3"));
+        // A real step still counts with metadata on either side.
+        assert!(offered("0.1.3+1", "0.1.4"));
+        assert!(offered("0.1.3", "0.1.4+7"));
+    }
+
+    #[test]
+    fn a_stable_install_is_never_moved_to_a_pre_release() {
+        // semver ordering alone would rank `0.2.0-rc.1` above `0.1.3`.
+        assert!(release("0.2.0-rc.1").version > release("0.1.3").version);
+        assert!(!offered("0.1.3", "0.2.0-rc.1"));
+        assert!(!offered("0.1.3", "0.1.4-beta.1"));
+        assert!(!offered("0.1.3", "0.1.4-0"));
+        // A pre-release does not stand in for its own release either way.
+        assert!(!offered("0.1.3", "0.1.3-rc.1"));
+    }
+
+    #[test]
+    fn a_pre_release_install_follows_pre_releases_and_the_stable_release() {
+        assert!(offered("0.2.0-rc.1", "0.2.0-rc.2"));
+        assert!(offered("0.2.0-rc.2", "0.2.0-rc.10"), "numeric identifiers");
+        assert!(offered("0.2.0-beta.1", "0.2.0-rc.1"));
+        assert!(offered("0.2.0-rc.1", "0.2.0"));
+        assert!(offered("0.2.0-rc.1", "0.3.0-beta.1"));
+        assert!(!offered("0.2.0-rc.1", "0.2.0-rc.1"));
+        assert!(!offered("0.2.0-rc.2", "0.2.0-rc.1"));
+        assert!(!offered("0.2.0-rc.1", "0.2.0-beta.9"));
+        assert!(!offered("0.2.0", "0.2.0-rc.1"));
+    }
+
+    /// Not a protection by itself: this is the key `tauri.conf.json` would carry,
+    /// checked against the plugin so a typo cannot silently turn it off.
+    #[test]
+    fn the_plugin_reads_require_signed_version_from_its_config() {
+        let config = |extra: &str| -> tauri_plugin_updater::Config {
+            serde_json::from_str(&format!(
+                r#"{{"pubkey":"k","endpoints":["https://example.invalid/latest.json"]{extra}}}"#
+            ))
+            .unwrap()
+        };
+        assert!(!config("").require_signed_version);
+        assert!(config(r#","requireSignedVersion":true"#).require_signed_version);
     }
 
     /// The plugin refuses to start, and so would Parla, if this does not parse.
