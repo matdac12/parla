@@ -280,7 +280,7 @@ async function applyEngine(): Promise<boolean> {
       // One backend save of the key and the provider choice, under the same
       // lock as every other settings save.
       if (key !== "" || current.active_provider !== cloudId) {
-        await invoke("set_cloud_key", { id: cloudId, apiKey: key === "" ? null : key });
+        await invoke("set_cloud_key", { id: cloudId, apiKey: key });
       }
     } catch (error) {
       say(engineResult, String(error), "error");

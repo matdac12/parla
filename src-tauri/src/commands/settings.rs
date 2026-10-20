@@ -196,10 +196,22 @@ fn select_provider_with(
     id: &str,
     persist: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<(), String> {
+    choose_provider(shared, id, |_| {}, persist)
+}
+
+// Caller holds SaveLock. `edit` changes the copy that is saved along with the
+// provider choice.
+fn choose_provider(
+    shared: &std::sync::RwLock<Settings>,
+    id: &str,
+    edit: impl FnOnce(&mut Settings),
+    persist: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<(), String> {
     if crate::provider::registry::get(id).is_none() {
         return Err("Unknown transcription provider".into());
     }
     let mut requested = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
+    edit(&mut requested);
     requested.active_provider = id.into();
     save_with(shared, requested, persist, |_| Ok(())).map(|_| ())
 }
@@ -213,22 +225,26 @@ fn set_cloud_key_with(
     persist: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<(), String> {
     // "parakeet" is the local engine: it has no key.
-    if id == "parakeet" || crate::provider::registry::get(id).is_none() {
-        return Err("Unknown cloud provider".into());
+    if id == "parakeet" {
+        return Err("The local engine has no API key".into());
     }
-    let mut requested = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
-    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
-        let section = requested
-            .providers
-            .entry(id.into())
-            .or_insert_with(|| serde_json::json!({}));
-        if !section.is_object() {
-            *section = serde_json::json!({});
-        }
-        section["api_key"] = key.into();
-    }
-    requested.active_provider = id.into();
-    save_with(shared, requested, persist, |_| Ok(())).map(|_| ())
+    let key = api_key.map(str::trim).filter(|key| !key.is_empty());
+    choose_provider(
+        shared,
+        id,
+        |requested| {
+            let Some(key) = key else { return };
+            let section = requested
+                .providers
+                .entry(id.into())
+                .or_insert_with(|| serde_json::json!({}));
+            if !section.is_object() {
+                *section = serde_json::json!({});
+            }
+            section["api_key"] = key.into();
+        },
+        persist,
+    )
 }
 
 /// `save_settings` (the Settings form and the tray flyout): also checks what
