@@ -25,6 +25,7 @@ pub mod stats;
 pub mod streaming;
 pub mod timing;
 mod tray;
+mod updater;
 
 /// Windows 11 runs background processes under EcoQoS, which favours E-cores and
 /// low clocks. Parla is always in the background while dictating (the target
@@ -61,6 +62,7 @@ pub fn run() {
     opt_out_of_power_throttling();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Webviews can invoke commands as soon as they load, so all state
             // must be managed before anything that creates or shows a window.
@@ -94,6 +96,7 @@ pub fn run() {
             tray::setup(app)?;
             overlay::setup(app)?;
             flow::setup(app)?;
+            updater::setup(app);
             if first_run {
                 tray::open_setup(app.handle(), true);
             }
@@ -136,22 +139,34 @@ pub fn run() {
             commands::setup::mic_meter_start,
             commands::setup::mic_meter_stop,
             commands::setup::finish_setup,
+            updater::update_status,
+            updater::check_for_update,
+            updater::set_auto_update,
+            updater::dismiss_update,
+            updater::install_update,
+            updater::open_release_page,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Parla")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
-                dim::shutdown();
-                if let Some(history) = app.try_state::<history::History>() {
-                    if let Err(error) = history.drain(std::time::Duration::from_secs(1)) {
-                        eprintln!("History shutdown drain failed: {error}");
-                    }
-                }
-                if let Some(stats) = app.try_state::<stats::StatsStore>() {
-                    if let Err(error) = stats.flush() {
-                        eprintln!("Stats shutdown flush failed: {error}");
-                    }
-                }
+                flush_on_exit(app);
             }
         });
+}
+
+/// What Parla saves on the way out. The updater calls it too: the installer
+/// ends the process without a `RunEvent::Exit`.
+fn flush_on_exit(app: &tauri::AppHandle) {
+    dim::shutdown();
+    if let Some(history) = app.try_state::<history::History>() {
+        if let Err(error) = history.drain(std::time::Duration::from_secs(1)) {
+            eprintln!("History shutdown drain failed: {error}");
+        }
+    }
+    if let Some(stats) = app.try_state::<stats::StatsStore>() {
+        if let Err(error) = stats.flush() {
+            eprintln!("Stats shutdown flush failed: {error}");
+        }
+    }
 }

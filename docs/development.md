@@ -132,6 +132,68 @@ Run it from the Actions tab (**Release → Run workflow**) on any branch for a d
 run: it builds and uploads the `parla-release` artifact but publishes nothing.
 Builds are unsigned, so SmartScreen warns on first run.
 
+### Updates
+
+Installed copies update themselves (`src-tauri/src/updater.rs`, `src/updates.ts`).
+The release workflow signs the installer with an updater key and publishes
+`Parla_<version>_x64-setup.exe.sig` and `latest.json` next to it. The app reads
+`https://github.com/matdac12/parla/releases/latest/download/latest.json` and
+verifies the signature with the public key in `src-tauri/tauri.conf.json`
+(`plugins.updater.pubkey`). That key is empty in the repo, and while it is empty
+Parla builds and runs with the updater off: no check, no notice, no controls.
+This is the updater key, not a Windows code-signing certificate.
+
+One-time setup, in a PowerShell window. The private key never goes into the
+repo or into a chat.
+
+1. Generate the keypair outside the repo. It asks for a password:
+
+   ```powershell
+   npx tauri signer generate -w "$env:USERPROFILE\.tauri\parla-updater.key"
+   ```
+
+   It writes the private key to that path and the public key to
+   `parla-updater.key.pub`. Back both up and keep the password in your password
+   manager: a release signed with another key cannot update installed copies,
+   which would then need a manual reinstall.
+2. Paste the **contents of `parla-updater.key.pub`** (one line of base64) between
+   the quotes of `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` and
+   commit it. Only releases built from this commit on can update, and only to
+   a newer release: copies installed before it have no key and need one manual
+   install.
+3. Store the private key and its password as GitHub secrets:
+
+   ```powershell
+   Get-Content -Raw "$env:USERPROFILE\.tauri\parla-updater.key" | gh secret set TAURI_SIGNING_PRIVATE_KEY --repo matdac12/parla
+   gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo matdac12/parla
+   ```
+
+   The second command prompts for the password. Without the first secret the
+   workflow builds as before and publishes no `latest.json`. A **tag** build
+   fails if the public key is set but the secret is missing, and any build
+   fails if the secret is set but the public key is empty.
+4. Test with two releases that both carry the key, say 0.1.3 and then 0.1.4
+   (0.1.3 cannot update to anything yet). Install 0.1.3, then cut 0.1.4:
+
+   ```powershell
+   node scripts/set-version.mjs 0.1.4
+   git commit -am "Release v0.1.4"
+   git tag v0.1.4
+   git push origin main v0.1.4
+   ```
+
+   When the workflow is green, check that the release lists `latest.json` and
+   `Parla_0.1.4_x64-setup.exe.sig`, and that `latest.json` has version `0.1.4`
+   and a `signature`. In the installed 0.1.3 open **Settings → Updates**, click
+   **Check for updates now** (the background check waits two minutes after
+   start and a day between checks), then **Install and restart**. Parla should
+   come back as 0.1.4 with its settings and history unchanged. A portable 0.1.3
+   shows "new version available" and a release-page button instead of Install.
+
+A dry run (**Release → Run workflow**) with the secrets set builds the signed
+`.sig` and `latest.json` into the `parla-release` artifact and publishes
+nothing.
+
 ## Developing on Windows
 
 - `rust-lld` is pinned as the linker in `src-tauri/.cargo/config.toml`. Never

@@ -21,7 +21,7 @@ interface Stats {
 const PAGE = 200;
 const MAX = 2000;
 
-const PAGES = ["home", "history", "timings", "transcription", "dictation", "audio", "vocabulary", "clipboard"] as const;
+const PAGES = ["home", "history", "timings", "transcription", "dictation", "audio", "vocabulary", "clipboard", "updates"] as const;
 type Page = (typeof PAGES)[number];
 /** Pages that show history rows; the others are settings pages. */
 const RECORD_PAGES: ReadonlySet<Page> = new Set(["home", "history", "timings"]);
