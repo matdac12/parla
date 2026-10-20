@@ -17,12 +17,14 @@ and data paths, `docs/development.md` builds, live tests and releasing.
   dependencies. A new model goes in as a drop-in on that engine; any engine or
   native-dependency swap waits for Mattia's decision.
 
-## Checks (CI runs all of them)
+## Checks (CI runs them on Windows)
 
 From `src-tauri/`: `cargo fmt --check`,
 `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`.
-From the root: `npm ci && npm run build` (UI type-check and bundle);
-`npx tauri build --no-bundle` builds `src-tauri/target/release/parla.exe`.
+From the root: `npm ci && npm run build` (UI type-check and bundle).
+CI builds no exe: `npx tauri build --no-bundle` builds
+`src-tauri/target/release/parla.exe` locally, and the release workflow builds
+the installer.
 
 ## Builds
 
@@ -32,7 +34,6 @@ From the root: `npm ci && npm run build` (UI type-check and bundle);
   is for a human dictating, not for agents.
 - sccache caches dependencies machine-wide (user `~/.cargo/config.toml`). Never
   set `CARGO_TARGET_DIR` as an env var (0 % hits); use `--target-dir` if you must.
-- Put Windows-only code behind `cfg(windows)`; CI lints and tests on Linux too.
 
 ## Shared machine
 

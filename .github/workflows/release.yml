@@ -49,11 +49,14 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
-      # Restores the CI windows job's cache from main; never saves its own.
+      # Release-profile cache, apart from CI's (which builds no release). Saved
+      # only by runs on main (Run workflow, or a merge touching the release
+      # files); tag runs restore it, since tag-saved caches serve no other tag.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          save-if: false
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/cache@v4
         with:
           path: ~/AppData/Local/ort.pyke.io

@@ -87,10 +87,11 @@ running, run from `src-tauri/`:
 cargo test --locked --features native-smoke --lib secondary_windows_are_lazy_and_can_be_destroyed_and_reopened -- --ignored --nocapture
 ```
 
-Linux can compile, format, lint, and unit-test the app, but text insertion is a
-no-op that returns an unsupported error (Windows is the target), and the global
-shortcut backend needs a supported desktop (Wayland is not supported). Live
-tests are gated by environment variables and skip when absent:
+Windows is the target, and the only platform CI checks. Parla may still compile
+on Linux, but nothing checks that it does; there, text insertion is a no-op that
+returns an unsupported error, and the global shortcut backend needs a supported
+desktop (Wayland is not supported). Live tests are gated by environment
+variables and skip when absent:
 
 - `OPENAI_API_KEY` — `cargo test --test openai_live`
 - `XAI_API_KEY` — `cargo test --test xai_live`
@@ -98,12 +99,14 @@ tests are gated by environment variables and skip when absent:
 - `PARLA_PARAKEET_DOWNLOAD_DIR` / `PARLA_PARAKEET_ULTRA_DOWNLOAD_DIR` — `cargo test models::tests::live_download_only_when_explicitly_requested`
 - `PARLA_PARAKEET_MODEL_DIR` + `PARLA_LIVE_CLIPS` — `cargo test --release --lib live_clips -- --nocapture`
 
-CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
-`npx tauri build --no-bundle`, stages `parla.exe` and the ONNX Runtime DLLs
-(failing if a real `DirectML.dll` larger than 1 MB is missing), and uploads the
-`parla-windows-x64` artifact. The `linux` job runs `cargo fmt --check`,
-`cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and
-`npm ci && npm run build`.
+CI runs on GitHub Actions in a single `windows` job, on every branch push except
+docs-only ones (`**.md`, `docs/**`, `LICENSE`), and by hand (**CI → Run
+workflow**). It runs `cargo fmt --check`, `npm ci && npm run build`,
+`cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked` on
+the runner's preinstalled stable Rust, without debuginfo. It builds no exe and
+uploads no artifact; only the release workflow does. A new push cancels the
+branch's running CI; runs on main are never cancelled. Branch runs restore main's
+Rust cache, and only main saves it.
 
 ## Releasing
 
