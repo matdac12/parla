@@ -85,6 +85,8 @@ struct Inner {
     prefs: Prefs,
     available: Option<Update>,
     error: Option<String>,
+    /// Edits made so far; orders the writes of `updater.json`.
+    edits: u64,
 }
 
 pub struct UpdaterState {
@@ -94,8 +96,9 @@ pub struct UpdaterState {
     portable: bool,
     path: Option<PathBuf>,
     inner: Mutex<Inner>,
-    /// Serialises the writes of `updater.json`; see `edit_with`.
-    file: Mutex<()>,
+    /// The last edit written to `updater.json` (and the lock for writing it);
+    /// see `edit_with`.
+    file: Mutex<u64>,
     /// One check or install at a time.
     busy: tokio::sync::Mutex<()>,
 }
@@ -119,16 +122,20 @@ impl UpdaterState {
     }
 
     /// The disk write runs after the state lock is released, so a slow disk
-    /// never stalls `status` or the background tick. The write lock is taken
-    /// before the state lock is let go, so two edits still write the file in
-    /// the order they were made.
+    /// never stalls `status` or the background tick, whoever else is writing.
+    /// Each edit is numbered under the state lock; a write that finds a newer
+    /// edit already on disk is skipped, so the file never goes back in time.
     fn edit_with<R>(&self, change: impl FnOnce(&mut Inner) -> R, write: impl FnOnce(&Prefs)) -> R {
         let mut inner = self.lock();
         let result = change(&mut inner);
-        let prefs = inner.prefs.clone();
-        let _writing = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        inner.edits += 1;
+        let (edit, prefs) = (inner.edits, inner.prefs.clone());
         drop(inner);
-        write(&prefs);
+        let mut written = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        if edit > *written {
+            write(&prefs);
+            *written = edit;
+        }
         result
     }
 }
@@ -225,11 +232,19 @@ fn is_portable() -> bool {
     else {
         return true;
     };
+    // Resolved on both sides, so a junction, a subst drive or an 8.3 name for
+    // the same folder is not taken for another folder.
+    let resolved = |path: &str| {
+        std::fs::canonicalize(path.trim().trim_matches('"'))
+            .map_or_else(|_| path.to_string(), |path| path.display().to_string())
+    };
     let recorded = Registry::new(UNINSTALL_KEY)
         .get("InstallLocation")
         .ok()
         .flatten()
-        .filter(|location| !location.trim().is_empty());
+        .filter(|location| !location.trim().is_empty())
+        .map(|location| resolved(&location));
+    let dir = PathBuf::from(resolved(&dir.display().to_string()));
     portable_given(&dir, recorded.as_deref(), || {
         dir.join("uninstall.exe").is_file()
     })
@@ -274,8 +289,9 @@ pub fn setup(app: &tauri::App) {
             prefs,
             available: None,
             error: None,
+            edits: 0,
         }),
-        file: Mutex::new(()),
+        file: Mutex::new(0),
         busy: tokio::sync::Mutex::new(()),
     });
     if enabled {
@@ -536,8 +552,9 @@ mod tests {
                 prefs: Prefs::default(),
                 available: None,
                 error: None,
+                edits: 0,
             }),
-            file: Mutex::new(()),
+            file: Mutex::new(0),
             busy: tokio::sync::Mutex::new(()),
         }
     }
