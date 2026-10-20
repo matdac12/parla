@@ -6,6 +6,8 @@ cloud (OpenAI or xAI Grok) while you speak, or fully on your machine with
 NVIDIA's Parakeet model. Parla pastes exactly what you said and adds no LLM
 rewrite step, so the time from letting go to the paste stays short.
 
+![Parla dictating into a prompt box: hold Ctrl+Alt, speak, release, and the text is pasted](docs/media/parla-demo.gif)
+
 ## Install
 
 **[Download the latest release](https://github.com/matdac12/parla/releases/latest)**
