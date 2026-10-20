@@ -1,8 +1,8 @@
 # AGENTS.md
 
 Parla is a Windows tray dictation app: Tauri v2, Rust backend in `src-tauri/src`,
-vanilla TypeScript + Vite frontend in `src/`, npm. `README.md` covers behaviour,
-data paths and live tests.
+vanilla TypeScript + Vite frontend in `src/`, npm. `docs/guide.md` covers behaviour
+and data paths, `docs/development.md` builds, live tests and releasing.
 
 ## Product rules (only Mattia changes these)
 
@@ -28,7 +28,7 @@ From the root: `npm ci && npm run build` (UI type-check and bundle);
 
 - `rust-lld` is pinned in `src-tauri/.cargo/config.toml`. Keep it: overriding
   the linker per command (`-C linker=`) forces a near-clean rebuild.
-- Run builds at normal priority with full jobs. The README's below-normal tip
+- Run builds at normal priority with full jobs. The below-normal tip in `docs/development.md`
   is for a human dictating, not for agents.
 - sccache caches dependencies machine-wide (user `~/.cargo/config.toml`). Never
   set `CARGO_TARGET_DIR` as an env var (0 % hits); use `--target-dir` if you must.

@@ -1,0 +1,118 @@
+name: Release
+
+# A v* tag builds the installer and the portable zip and publishes them as a
+# GitHub Release. Anything else is a dry run: same build, uploaded as the
+# parla-release artifact, nothing published. Dry runs start by hand (Actions ->
+# Release -> Run workflow) or on a branch push that touches the release files.
+on:
+  push:
+    tags: ['v*']
+    branches: ['**']
+    # Tag pushes ignore this filter.
+    paths:
+      - .github/workflows/release.yml
+      - .github/release-notes.md
+      - src-tauri/tauri.release.conf.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version matches the tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $versions = [ordered]@{
+            'src-tauri/tauri.conf.json' = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+            'package.json' = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            'src-tauri/Cargo.toml' = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          }
+          $version = $versions['src-tauri/tauri.conf.json']
+          $versions.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" }
+          if (@($versions.Values | Select-Object -Unique).Count -ne 1) {
+            throw 'Versions differ. Run: node scripts/set-version.mjs <version>'
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match version $version"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      # Restores the CI windows job's cache from main; never saves its own.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          save-if: false
+      - uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+      - name: Relink ort's DLLs pruned by rust-cache
+        shell: pwsh
+        run: ./.github/scripts/relink-ort-dylibs.ps1
+      - run: npm ci
+      - run: npx tauri build --no-bundle
+      - name: Stage parla.exe and DirectML.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'src-tauri/target/release'
+          $stage = 'src-tauri/target/release-stage'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          foreach ($name in 'parla.exe', 'DirectML.dll') {
+            $file = Get-Item (Join-Path $release $name)
+            # ort may create symlinks on admin runners. Ship actual bytes.
+            $source = $file.FullName
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+              $source = $file.ResolveLinkTarget($true).FullName
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name) -Force
+          }
+          if ((Get-Item (Join-Path $stage 'DirectML.dll')).Length -le 1MB) {
+            throw 'DirectML.dll must be a real file larger than 1 MB'
+          }
+      # Bundles the parla.exe built above; tauri.release.conf.json adds the
+      # NSIS target and installs DirectML.dll next to the executable.
+      - run: npx tauri bundle --bundles nsis --config src-tauri/tauri.release.conf.json
+      - name: Collect the installer, the portable zip and checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'parla-release'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $setup = "Parla_${env:VERSION}_x64-setup.exe"
+          Copy-Item "src-tauri/target/release/bundle/nsis/$setup" (Join-Path $out $setup)
+          $zip = "Parla_${env:VERSION}_x64-portable.zip"
+          Compress-Archive -Path 'src-tauri/target/release-stage/*' -DestinationPath (Join-Path $out $zip)
+          Get-ChildItem $out -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Path (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+          Get-ChildItem $out | Format-Table Name, Length
+          "OUT=$out" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parla-release
+          path: ${{ env.OUT }}
+          if-no-files-found: error
+      - name: Publish the GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem $env:OUT -File).FullName `
+            --verify-tag --title "Parla $env:VERSION" `
+            --notes-file .github/release-notes.md --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }

@@ -1,0 +1,166 @@
+# Developing Parla
+
+Building, testing and contributing. Using the app is covered in the
+[user guide](guide.md).
+
+## Windows prerequisites
+
+Building needs:
+
+- [Rust via rustup](https://rustup.rs/) with the stable MSVC toolchain
+  `x86_64-pc-windows-msvc`.
+- [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+  with **Desktop development with C++**, which includes the MSVC compiler and
+  the Windows SDK.
+- [Node.js LTS](https://nodejs.org/en/download) with npm (CI uses Node 24).
+- The [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section).
+  It is preinstalled on Windows 11 and required on Windows 10.
+- **Internet during the first build.** Cargo fetches `transcribe-rs` from its
+  GitHub revision, and `ort-sys` (via the `ort` crate's default
+  `download-binaries` feature) downloads a prebuilt ONNX Runtime archive from
+  `cdn.pyke.io` and copies its companion DLLs next to the executable. `npm ci`
+  also fetches packages. A later offline rebuild works from the cargo/npm caches.
+
+See also [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+## Build and run
+
+In PowerShell:
+
+```powershell
+git clone https://github.com/matdac12/parla
+cd parla
+npm ci
+npm run tauri dev
+```
+
+The dev app starts in the tray. Choose **Open Parla** or **Settings…** in the tray to open its
+window. Closing a secondary window destroys it; choose **Quit Parla** to exit.
+The main and benchmark windows are created only when opened: the main window
+from the tray, the benchmark window from the main window's sidebar. Only the
+recording pill stays loaded at startup.
+All windows are created after their app state is registered.
+
+For a standalone executable, from the repository root:
+
+```powershell
+npm run tauri build -- --no-bundle
+.\src-tauri\target\release\parla.exe
+```
+
+The build leaves `parla.exe` and the ONNX Runtime companion DLLs (including
+`DirectML.dll`) in `src-tauri\target\release\`. Keep them in the same folder;
+copying only the executable will prevent startup. The installer and the portable
+zip come from the release workflow; see [Releasing](#releasing).
+
+The first build compiles the whole Rust dependency tree and downloads ONNX
+Runtime, so expect several minutes; incremental rebuilds are much faster.
+For frontend-only work, `npm run dev` serves the pages, and `npm run build`
+type-checks and bundles them.
+
+## Development
+
+From `src-tauri/`, with Rust on `PATH`:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+and from the repository root, `npm ci && npm run build` if you touched the
+frontend.
+
+Frontend regression checks use the real DOM/modules with Tauri's official IPC
+mocks: run `npm run dev`, then open
+`http://localhost:1420/tests/frontend.html` and the same URL with `?settings`.
+The page reports results for row reuse, hidden rendering, 2,000-row updates,
+history-read races, cross-window history clearing, and compatibility settings.
+These test pages are not included in the production bundle.
+
+An opt-in native Windows/WebView2 lifecycle smoke test verifies lazy creation,
+initial Settings navigation, destruction and reopening. With the dev server
+running, run from `src-tauri/`:
+
+```powershell
+cargo test --locked --features native-smoke --lib secondary_windows_are_lazy_and_can_be_destroyed_and_reopened -- --ignored --nocapture
+```
+
+Linux can compile, format, lint, and unit-test the app, but text insertion is a
+no-op that returns an unsupported error (Windows is the target), and the global
+shortcut backend needs a supported desktop (Wayland is not supported). Live
+tests are gated by environment variables and skip when absent:
+
+- `OPENAI_API_KEY` — `cargo test --test openai_live`
+- `XAI_API_KEY` — `cargo test --test xai_live`
+- `PARLA_PARAKEET_MODEL_DIR` / `PARLA_PARAKEET_ULTRA_MODEL_DIR` — `cargo test provider::parakeet::tests::live_fixture`
+- `PARLA_PARAKEET_DOWNLOAD_DIR` / `PARLA_PARAKEET_ULTRA_DOWNLOAD_DIR` — `cargo test models::tests::live_download_only_when_explicitly_requested`
+- `PARLA_PARAKEET_MODEL_DIR` + `PARLA_LIVE_CLIPS` — `cargo test --release --lib live_clips -- --nocapture`
+
+CI runs on GitHub Actions. The `windows` job runs `cargo test --locked` and
+`npx tauri build --no-bundle`, stages `parla.exe` and the ONNX Runtime DLLs
+(failing if a real `DirectML.dll` larger than 1 MB is missing), and uploads the
+`parla-windows-x64` artifact. The `linux` job runs `cargo fmt --check`,
+`cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and
+`npm ci && npm run build`.
+
+## Releasing
+
+Releases come from `.github/workflows/release.yml`. It builds `parla.exe`, packs
+it with `DirectML.dll` into an NSIS installer (`tauri bundle` with
+`src-tauri/tauri.release.conf.json`) and a portable zip, writes `SHA256SUMS.txt`,
+and, for a `v*` tag, publishes them as a GitHub Release. The release notes are
+`.github/release-notes.md` plus GitHub's generated changelog.
+
+```powershell
+node scripts/set-version.mjs 0.2.0   # package.json, package-lock.json, tauri.conf.json, Cargo.toml, Cargo.lock
+git commit -am "Release v0.2.0"
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+The workflow fails if the tag does not match the version in all of those files.
+Run it from the Actions tab (**Release → Run workflow**) on any branch for a dry
+run: it builds and uploads the `parla-release` artifact but publishes nothing.
+Builds are unsigned, so SmartScreen warns on first run.
+
+## Developing on Windows
+
+- `rust-lld` is pinned as the linker in `src-tauri/.cargo/config.toml`. Never
+  override the linker per command (for example `-C linker=`): switching it
+  re-links every build script and forces a near-clean rebuild.
+- Expected times on the maintainer's machine: a dev incremental rebuild takes
+  about 5–9 s, a `cargo test --lib` run about 5 s, and a clean dev build about
+  3 minutes.
+- [sccache](https://github.com/mozilla/sccache) caches dependency builds across
+  worktrees. Set it up per user, never in the repo: put the prebuilt `sccache.exe`
+  in a user folder and add `[build] rustc-wrapper = '<path to sccache.exe>'` to
+  `%USERPROFILE%\.cargo\config.toml`. Pick a target dir with `--target-dir`, not
+  the `CARGO_TARGET_DIR` variable: sccache hashes every `CARGO_*` variable, so
+  setting it causes cache misses.
+- Add Microsoft Defender exclusions for `%USERPROFILE%\.cargo`,
+  `%USERPROFILE%\.rustup`, the `target` folders (`src-tauri\target` in each
+  checkout) and `%USERPROFILE%\.t3\worktrees`, and exclude code folders from
+  Windows Search indexing. Before the exclusions, Defender used about 344 CPU-seconds
+  during a single clean build.
+- Builds are what slow Parla's local transcription. If you dictate while a long
+  build runs, start it at below-normal priority (rustc and the linker inherit it),
+  for example in PowerShell:
+
+  ```powershell
+  cmd /c start "" /belownormal /b /wait cargo test --locked
+  ```
+
+
+## Live streaming smoke test
+
+Provider smoke tests upload only the bundled `hello.wav` fixture:
+
+```powershell
+cd src-tauri
+$env:PARLA_LIVE_STREAM_SETTINGS = "$env:APPDATA/com.matdac6.parla/settings.json"
+$env:PARLA_LIVE_STREAM_PROVIDER = 'openai' # or xai
+cargo test --locked --lib streaming::transport::tests::live_fixture -- --ignored --nocapture
+```
+
