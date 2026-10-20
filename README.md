@@ -11,8 +11,8 @@ rewrite step, so the time from letting go to the paste stays short.
 **[Download the latest release](https://github.com/matdac12/parla/releases/latest)**
 (Windows 10/11, x64), then run `Parla_<version>_x64-setup.exe`. It installs
 for your user only, without an admin prompt, and adds Parla to the Start menu.
-If you don't want an installer, use the portable `.zip`: extract the whole folder
-and run `parla.exe`, keeping `DirectML.dll` next to it.
+If you don't want an installer, use the portable `.zip`: extract it, keep the
+folder together and run `parla.exe`.
 
 Parla isn't code-signed yet, so Windows SmartScreen will say *"Windows
 protected your PC"*. Click **More info → Run anyway**. Every release includes
