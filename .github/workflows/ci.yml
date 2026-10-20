@@ -47,7 +47,7 @@ jobs:
         with:
           workspaces: src-tauri
           # Branch runs restore main's cache but skip the upload.
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/parla-94-windows-only-ci' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # ort-sys downloads ONNX Runtime here and watches DLL links into target/.
       # rust-cache neither caches this dir nor keeps the links, so without these
       # two steps every run reruns ort-sys and rebuilds ort -> transcribe-rs.
