@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parla setup</title>
+    <script type="module" src="./setup.ts"></script>
+  </head>
+  <body>
+    <div class="wiz">
+      <header class="wiz-head">
+        <div class="brand"><span class="logo" aria-hidden="true"></span>Parla setup</div>
+        <span class="wiz-step" id="step-label" role="status"></span>
+      </header>
+      <div class="progress wiz-progress" aria-hidden="true"><div class="progress-fill" id="wiz-fill"></div></div>
+
+      <main class="wiz-main">
+        <section id="step-welcome" hidden>
+          <h1>Welcome to Parla</h1>
+          <p class="lede">Hold a shortcut, speak, let go. Parla pastes what you said into whatever you were typing in.</p>
+          <div class="hero"><dl class="how" id="how"></dl></div>
+          <p class="hint">This takes about a minute. Every step can be skipped, and you can run it again from Settings.</p>
+        </section>
+
+        <section id="step-mic" hidden>
+          <h1>Microphone</h1>
+          <p class="lede">Parla records from your Windows default microphone.</p>
+          <div class="card">
+            <h2>Default microphone</h2>
+            <p class="mic-name" id="mic-name">Checking…</p>
+            <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-fill"></div></div>
+            <p class="status provider-status" id="mic-status" role="status" aria-live="polite"></p>
+            <div class="hotkey-row">
+              <button type="button" class="secondary small" id="mic-sound">Windows sound settings</button>
+              <button type="button" class="secondary small" id="mic-again" hidden>Listen again</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="step-engine" hidden>
+          <h1>Speech engine</h1>
+          <p class="lede">Where your voice is turned into text. You can change it any time in Settings.</p>
+          <div class="provider-list" role="radiogroup" aria-label="Speech engine">
+            <label class="provider-option">
+              <input type="radio" name="engine" value="cloud" />
+              <span class="provider-option-body">
+                <span class="provider-name">Cloud</span>
+                <span class="model-meta">Fastest, with live captions. Needs an API key, and your audio goes to the provider.</span>
+              </span>
+            </label>
+            <label class="provider-option">
+              <input type="radio" name="engine" value="local" />
+              <span class="provider-option-body">
+                <span class="provider-name">Local</span>
+                <span class="model-meta">Parakeet runs on this PC: no key, nothing leaves it. One download, <span id="local-size">640 MB</span>.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="card engine-panel" id="engine-cloud" hidden>
+            <h2>Cloud provider</h2>
+            <div class="provider-list" id="cloud-providers" role="radiogroup" aria-label="Cloud provider"></div>
+            <div class="field engine-key">
+              <label for="cloud-key" id="cloud-key-label">API key</label>
+              <div class="password-row">
+                <input id="cloud-key" type="password" autocomplete="off" spellcheck="false" />
+                <button type="button" class="secondary reveal" id="cloud-reveal" aria-label="Show API key">Show</button>
+              </div>
+              <p class="hint" id="cloud-key-hint"></p>
+            </div>
+          </div>
+
+          <div class="card engine-panel" id="engine-local" hidden>
+            <h2>Local model</h2>
+            <p class="model-status" id="local-status"></p>
+            <div class="progress" id="local-bar" hidden><div class="progress-fill" id="local-fill"></div></div>
+            <p class="hint" id="local-hint"></p>
+          </div>
+
+          <p class="status provider-status" id="engine-result" role="status" aria-live="polite"></p>
+        </section>
+
+        <section id="step-try" hidden>
+          <h1>Try it</h1>
+          <p class="lede" id="try-lede"></p>
+          <div class="field">
+            <textarea id="try-box" rows="5" placeholder="Your words appear here" spellcheck="false" aria-label="Test dictation"></textarea>
+          </div>
+          <p class="status provider-status" id="try-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section id="step-start" hidden>
+          <h1>Start with Windows</h1>
+          <p class="lede">Have Parla ready in the tray whenever you sign in.</p>
+          <div class="card">
+            <div class="field">
+              <label><input id="autostart" type="checkbox" aria-describedby="autostart-note" /> Start Parla with Windows</label>
+              <p id="autostart-note" class="hint"></p>
+              <div class="hotkey-row">
+                <button type="button" id="autostart-folder" class="secondary small" hidden>Open Startup folder</button>
+                <button type="button" id="autostart-repair" class="secondary small" hidden>Use this copy</button>
+              </div>
+            </div>
+          </div>
+          <p class="status provider-status" id="start-result" role="status" aria-live="polite"></p>
+        </section>
+
+        <section id="step-done" hidden>
+          <h1>You're all set</h1>
+          <p class="lede">Parla now lives in the system tray, next to the clock. If you can't see its icon, look under the ^ arrow.</p>
+          <div class="hero"><dl class="how" id="summary"></dl></div>
+          <p class="hint">Click the tray icon for quick switches and your latest dictations. Right-click it for Settings. To run this guide again: Settings, Dictation &amp; hotkey, Run setup again.</p>
+        </section>
+      </main>
+
+      <footer class="wiz-foot">
+        <button type="button" class="link" id="skip-all">Skip setup</button>
+        <span class="sp"></span>
+        <button type="button" id="back">Back</button>
+        <button type="button" id="skip">Skip</button>
+        <button type="button" id="open-app" hidden>Open Parla</button>
+        <button type="button" class="primary" id="next">Continue</button>
+      </footer>
+    </div>
+  </body>
+</html>

@@ -14,11 +14,14 @@ let selectedProvider = "openai";
 let rejectProviderSelection = false;
 let holdHistory = false;
 let finishHistory;
+let autostart = { supported: true, enabled: false, stale: false, command: null, shortcut: null };
+const ipcCalls = [];
 async function emit(name, payload) {
   if (name === "dictation://recorded") records.unshift(payload);
   await emitEvent(name, payload);
 }
 mockIPC((command, args) => {
+  ipcCalls.push({ command, args });
   switch (command) {
     case "get_settings": return {
       active_provider: "openai", hotkey: "Ctrl+Alt+Space", restore_delay_ms: 250, paste_compatibility_mode: false,
@@ -42,6 +45,12 @@ mockIPC((command, args) => {
     case "check_command_hotkey": return null;
     case "get_stats": return { total_words: 100, dictations: 10, audio_ms: (4 * 60 + 12) * 60_000, first_used_at: Date.now() - 30 * 86_400_000, cost_usd: 0.84, unpriced_audio_ms: 0, unpriced_llm_tokens: 0 };
     case "save_settings": savedSettings = structuredClone(args.settings); return { warning: null };
+    case "autostart_status": return structuredClone(autostart);
+    case "set_autostart":
+      if (args.enabled && autostart.shortcut) throw new Error("Parla.lnk in your Startup folder already starts Parla at login.");
+      autostart = { ...autostart, enabled: args.enabled };
+      return structuredClone(autostart);
+    case "open_window": return null;
     default: throw new Error(`Unexpected IPC: ${command}`);
   }
 }, { shouldMockEvents: true });
@@ -228,6 +237,43 @@ await check("vocabulary edits save and unsafe entries are rejected", async () =>
   await settle();
   assert(savedSettings.vocabulary[0] === "Example product", "Unsafe vocabulary was submitted");
   assert(document.getElementById("status").classList.contains("status-error"), "Validation error missing");
+});
+// Start with Windows (PARLA-52) and Run setup again (PARLA-100).
+await check("Start with Windows applies at once and a Startup shortcut locks it", async () => {
+  go("dictation");
+  ipcCalls.length = 0;
+  const box = document.getElementById("autostart");
+  const note = document.getElementById("autostart-note");
+  assert(!box.checked && !box.disabled, "The toggle did not load off and usable");
+  box.checked = true;
+  box.dispatchEvent(new Event("change"));
+  await settle();
+  assert(autostart.enabled && box.checked, "Turning it on did not reach set_autostart");
+  assert(!ipcCalls.some((entry) => entry.command === "save_settings"), "Start with Windows went through Save");
+  box.checked = false;
+  box.dispatchEvent(new Event("change"));
+  await settle();
+  assert(!autostart.enabled, "Turning it off did not reach set_autostart");
+  // Mattia's case: a Parla.lnk in the Startup folder.
+  autostart = { ...autostart, shortcut: "Parla.lnk" };
+  window.dispatchEvent(new Event("focus"));
+  await settle();
+  assert(box.disabled && !box.checked, "A Startup shortcut did not lock the toggle");
+  assert(note.textContent.includes("Parla.lnk"), "The note does not name the shortcut");
+  assert(!document.getElementById("autostart-folder").hidden, "No Open Startup folder button");
+  // Both set: the toggle stays usable so it can be turned off, with a warning.
+  autostart = { ...autostart, enabled: true };
+  window.dispatchEvent(new Event("focus"));
+  await settle();
+  assert(!box.disabled && box.checked && note.textContent.includes("twice"), "Both-at-once was not reported");
+  autostart = { ...autostart, enabled: false, shortcut: null };
+});
+await check("Run setup again opens the wizard", async () => {
+  ipcCalls.length = 0;
+  document.getElementById("run-setup").click();
+  await settle();
+  const call = ipcCalls.find((entry) => entry.command === "open_window");
+  assert(call?.args.name === "setup", "Run setup again did not open the setup window");
 });
 const report = document.createElement("pre");
 report.id = "test-results";

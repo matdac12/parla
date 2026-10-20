@@ -250,6 +250,24 @@
                 <p class="hint">A discreet two-line preview. Your text box stays untouched until the final paste. With the local model, captions update phrase by phrase.</p>
               </div>
             </section>
+            <section class="card" id="startup-card">
+              <h2>Startup and setup</h2>
+              <div class="field">
+                <label><input id="autostart" type="checkbox" aria-describedby="autostart-note" /> Start Parla with Windows</label>
+                <p id="autostart-note" class="hint"></p>
+                <div class="hotkey-row" id="autostart-actions">
+                  <button type="button" id="autostart-folder" class="secondary small" hidden>Open Startup folder</button>
+                  <button type="button" id="autostart-repair" class="secondary small" hidden>Use this copy</button>
+                </div>
+                <p id="autostart-result" class="status provider-status" role="status" aria-live="polite"></p>
+              </div>
+              <div class="field">
+                <div class="hotkey-row">
+                  <button type="button" id="run-setup" class="secondary">Run setup again</button>
+                </div>
+                <p class="hint">Opens the first-run guide: microphone, engine, a test dictation and Start with Windows. It changes only what you change in it.</p>
+              </div>
+            </section>
           </section>
 
           <section class="page" id="page-audio" aria-labelledby="audio-title" hidden>

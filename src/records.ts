@@ -202,3 +202,15 @@ export function copyButton(text: string, label = "Copy transcript"): HTMLButtonE
   });
   return button;
 }
+
+/** "670 MB": a download's size, in the decimal units the model sizes use. */
+export function formatSize(bytes: number): string {
+  return `${Math.round(bytes / 1_000_000)} MB`;
+}
+
+/** A status line inside a card (the provider switch, Test connection, the
+ *  wizard's steps). */
+export function setStatusLine(element: HTMLElement, text: string, kind: "success" | "error" | "" = ""): void {
+  element.textContent = text;
+  element.className = kind ? `status provider-status status-${kind}` : "status provider-status";
+}
