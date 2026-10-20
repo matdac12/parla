@@ -207,10 +207,14 @@ fn same_folder(recorded: &str, dir: &Path) -> bool {
 /// Installed when the installer's record names this folder. With no record,
 /// the old test: `uninstall.exe` beside the exe. A zip run from another
 /// folder, or a build run from `target/`, has neither.
-fn portable_given(dir: &Path, recorded: Option<&str>, uninstaller_beside: bool) -> bool {
+fn portable_given(
+    dir: &Path,
+    recorded: Option<&str>,
+    uninstaller_beside: impl FnOnce() -> bool,
+) -> bool {
     match recorded {
         Some(location) => !same_folder(location, dir),
-        None => !uninstaller_beside,
+        None => !uninstaller_beside(),
     }
 }
 
@@ -226,11 +230,9 @@ fn is_portable() -> bool {
         .ok()
         .flatten()
         .filter(|location| !location.trim().is_empty());
-    portable_given(
-        &dir,
-        recorded.as_deref(),
-        dir.join("uninstall.exe").is_file(),
-    )
+    portable_given(&dir, recorded.as_deref(), || {
+        dir.join("uninstall.exe").is_file()
+    })
 }
 
 fn release_page(version: &str) -> String {
@@ -470,14 +472,6 @@ pub async fn install_update(app: AppHandle, state: State<'_, UpdaterState>) -> R
         IDLE_LIMIT,
     )
     .await?;
-    // The clipboard is put back a moment after a paste; the exit would skip it.
-    let restore = app
-        .state::<crate::settings::SharedSettings>()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .restore_delay_ms
-        .min(2_000);
-    tokio::time::sleep(Duration::from_millis(restore + 100)).await;
     update.install(bytes).map_err(fail)
 }
 
@@ -638,15 +632,15 @@ mod tests {
         let here = Some(r#""C:\Users\me\AppData\Local\Parla""#);
         let elsewhere = Some(r"D:\Apps\Parla");
         // The record names this folder: installed, with or without the uninstaller.
-        assert!(!portable_given(dir, here, true));
-        assert!(!portable_given(dir, here, false));
+        assert!(!portable_given(dir, here, || true));
+        assert!(!portable_given(dir, here, || false));
         // The record names another folder: a zip beside an installed copy, even
         // when a stale uninstall.exe sits next to it.
-        assert!(portable_given(dir, elsewhere, false));
-        assert!(portable_given(dir, elsewhere, true));
+        assert!(portable_given(dir, elsewhere, || false));
+        assert!(portable_given(dir, elsewhere, || true));
         // No record: the old test.
-        assert!(!portable_given(dir, None, true));
-        assert!(portable_given(dir, None, false));
+        assert!(!portable_given(dir, None, || true));
+        assert!(portable_given(dir, None, || false));
     }
 
     /// The installer writes `Uninstall\<productName>`; read from the config so

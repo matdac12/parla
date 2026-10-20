@@ -274,6 +274,21 @@ fn pending_restore() -> std::sync::MutexGuard<'static, Option<PendingRestore>> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Puts the user's clipboard back now if a paste still owes it. For the exit
+/// path: the timer thread would not get to it.
+#[cfg(windows)]
+pub fn flush_pending_restore() {
+    let mut pending = pending_restore();
+    if pending.is_some() {
+        if let Ok(mut desktop) = WindowsDesktop::new() {
+            restore_pending(&mut desktop, &mut pending);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn flush_pending_restore() {}
+
 /// Wakes the long-lived restore thread at `due`. A restore it cannot run stays
 /// pending, and the next paste carries the user's text forward.
 #[cfg(windows)]

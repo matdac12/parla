@@ -172,6 +172,7 @@ pub fn run() {
 /// What Parla saves on the way out. The updater calls it too: the installer
 /// ends the process without a `RunEvent::Exit`.
 fn flush_on_exit(app: &tauri::AppHandle) {
+    inserter::flush_pending_restore();
     dim::shutdown();
     if let Some(history) = app.try_state::<history::History>() {
         if let Err(error) = history.drain(std::time::Duration::from_secs(1)) {
