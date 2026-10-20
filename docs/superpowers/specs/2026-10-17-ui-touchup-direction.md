@@ -2,8 +2,8 @@
 
 Picked by Mattia in the PARLA-57 thread on 2026-10-17. Design only: nothing here
 is implemented yet. Prototype (throwaway, mock data, not bundled):
-`prototypes/ui/parla-ui.prototype.html?variant=mix&accent=blue`. Open the file
-directly or serve the folder (`npx vite prototypes/ui`).
+`docs/prototypes/ui/parla-ui.prototype.html?variant=mix&accent=blue`. Open the file
+directly or serve the folder (`npx vite docs/prototypes/ui`).
 
 ## Decision
 

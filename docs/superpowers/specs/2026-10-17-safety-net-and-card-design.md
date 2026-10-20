@@ -1,11 +1,11 @@
 # Safety Net and the Card (PARLA-54)
 
-Design settled with Mattia on 2026-10-17 in a grill-with-docs session. Vocabulary: `GLOSSARY.md` (Card, Safety Net, Edit and Answer). ADRs:
+Design settled with Mattia on 2026-10-17 in a grill-with-docs session. Vocabulary: `docs/GLOSSARY.md` (Card, Safety Net, Edit and Answer). ADRs:
 - ADR-0001: dictation stays raw; command mode is the only LLM path.
 - ADR-0002: one LLM agent with allowlisted tools.
 - ADR-0003 (new): command replies open in the Card; nothing is pasted without a click.
 
-Look: `prototypes/ui/card.prototype.html`, **variant A** (Mattia's pick).
+Look: `docs/prototypes/ui/card.prototype.html`, **variant A** (Mattia's pick).
 
 ## Problem Statement
 

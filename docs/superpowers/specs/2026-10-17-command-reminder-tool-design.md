@@ -2,7 +2,7 @@
 
 Design and research, 2026-10-17. **Not built.** Mattia answered the open questions the same evening: see **Decisions** at the end. Tickets: sub-issues of PARLA-82, in Backlog.
 
-Vocabulary: `GLOSSARY.md` (To-do, Reminder and Project reference are new). Decisions:
+Vocabulary: `docs/GLOSSARY.md` (To-do, Reminder and Project reference are new). Decisions:
 - ADR-0001: command mode is the only LLM path, and dictation stays raw.
 - ADR-0002: one LLM agent with allowlisted tools.
 - ADR-0003: command replies preview in the Card.
