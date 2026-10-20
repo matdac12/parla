@@ -873,5 +873,6 @@ mod tests {
             updater.endpoints[0].as_str(),
             "https://github.com/matdac12/parla/releases/latest/download/latest.json"
         );
+        assert!(updater.require_signed_version);
     }
 }

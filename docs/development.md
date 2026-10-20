@@ -226,7 +226,7 @@ nothing.
   (`newer_stable_only` in `updater.rs`, unit-tested). The plugin's own default
   is just `remote > current`, which would take `0.2.0+1` for newer than `0.2.0`
   and offer `0.3.0-rc.1` to a stable install.
-- **Not done: `requireSignedVersion`.** `latest.json` is not signed; the
+- **Done, in config: `requireSignedVersion`.** `latest.json` is not signed; the
   signature covers only the installer. Someone who can replace `latest.json`
   (a compromised release or account) could announce `99.0.0` with the URL and
   `.sig` of an older, genuinely signed installer, and the comparator above
@@ -234,13 +234,13 @@ nothing.
   closes that: `tauri bundle` writes the version into the signature's signed
   comment (`version:` in `crates/tauri-cli/src/bundle.rs`, `sign_file`), and the
   plugin then refuses a download whose signed version differs from the announced
-  one (`tauri-plugin-updater` 2.14, `updater.rs` `verify_signed_version`). It is
-  left off because no signed release exists to prove it end to end. Turn it on
-  in step 2 above, together with the public key, before the first release is
-  published: a release signed without a version is rejected once it is on, so
-  the first signed release must be one that carries it. Its test is step 4:
-  0.1.3 must still update to 0.1.4. If you ever sign by hand, pass
-  `tauri signer sign --app-version <version>`.
+  one (`tauri-plugin-updater` 2.14, `updater.rs` `verify_signed_version`). The
+  flag is already set in `tauri.conf.json` and does nothing while `pubkey` is
+  empty (Parla never checks, downloads or verifies then), so step 2 only adds
+  the key. It has not been proved against a real signed release: a release
+  signed without a version is rejected, so every signed release must carry one.
+  Its test is step 4: 0.1.3 must still update to 0.1.4. If you ever sign by
+  hand, pass `tauri signer sign --app-version <version>`.
 - **Still open.** A tampered `latest.json` can also point at an installer that
   is validly signed *for the announced version* only if the signing key leaked;
   that is outside what any version check covers.
