@@ -6,6 +6,7 @@
 .wiz-step { font-size: 0.8rem; color: var(--text-3); }
 .wiz-progress { height: 4px; margin: 0 22px; }
 .wiz-main { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 30px 28px; }
+.wiz-main .status { scroll-margin-bottom: 14px; }
 .wiz-main h1 { margin-bottom: 4px; }
 .wiz-main .hero { margin-top: 4px; }
 .wiz-main .hint { margin-top: 14px; }

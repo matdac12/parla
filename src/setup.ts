@@ -46,7 +46,12 @@ let busy = false;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms));
 
-const say = setStatusLine;
+/** Sets a status line and, if it landed below the fold of the scrolling step
+ *  body (behind the footer), scrolls it into view so a message is never hidden. */
+function say(element: HTMLElement, text: string, kind: "success" | "error" | "" = ""): void {
+  setStatusLine(element, text, kind);
+  if (text) element.scrollIntoView({ block: "nearest" });
+}
 
 const getSettings = (): Promise<Settings> => invoke<Settings>("get_settings");
 
