@@ -104,6 +104,32 @@ pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), St
     .map_err(|e| e.to_string())?
 }
 
+/// The setup wizard's cloud choice: stores the provider's API key (when one is
+/// given; a blank key keeps the saved one) and makes it the active provider,
+/// as one save under SaveLock. Nothing else in the settings changes.
+#[tauri::command]
+pub async fn set_cloud_key(
+    app: tauri::AppHandle,
+    id: String,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let serial = app.state::<SaveLock>();
+        let _save = serial.0.lock().map_err(|_| "Settings save lock poisoned")?;
+        let shared = app.state::<SharedSettings>();
+        let path = settings::path(&app)?;
+        let previous = snapshot(&shared)?;
+        set_cloud_key_with(&shared, &id, api_key.as_deref(), |value| {
+            settings::save(&path, value)
+        })?;
+        sync_model_residency(&shared, &previous);
+        announce(&app);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Picks the local model. A model that is not on disk is downloaded first
 /// (with the usual progress events), so the provider never points at missing
 /// files. Resolves with the model selected afterwards: a later selection made
@@ -170,12 +196,55 @@ fn select_provider_with(
     id: &str,
     persist: impl FnOnce(&Settings) -> Result<(), String>,
 ) -> Result<(), String> {
+    choose_provider(shared, id, |_| {}, persist)
+}
+
+// Caller holds SaveLock. `edit` changes the copy that is saved along with the
+// provider choice.
+fn choose_provider(
+    shared: &std::sync::RwLock<Settings>,
+    id: &str,
+    edit: impl FnOnce(&mut Settings),
+    persist: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<(), String> {
     if crate::provider::registry::get(id).is_none() {
         return Err("Unknown transcription provider".into());
     }
     let mut requested = shared.read().map_err(|_| "Settings lock poisoned")?.clone();
+    edit(&mut requested);
     requested.active_provider = id.into();
     save_with(shared, requested, persist, |_| Ok(())).map(|_| ())
+}
+
+// Caller holds SaveLock. Only the key and the provider choice change; the rest
+// of the provider's section and every other setting stay as saved.
+fn set_cloud_key_with(
+    shared: &std::sync::RwLock<Settings>,
+    id: &str,
+    api_key: Option<&str>,
+    persist: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<(), String> {
+    // "parakeet" is the local engine: it has no key.
+    if id == "parakeet" {
+        return Err("The local engine has no API key".into());
+    }
+    let key = api_key.map(str::trim).filter(|key| !key.is_empty());
+    choose_provider(
+        shared,
+        id,
+        |requested| {
+            let Some(key) = key else { return };
+            let section = requested
+                .providers
+                .entry(id.into())
+                .or_insert_with(|| serde_json::json!({}));
+            if !section.is_object() {
+                *section = serde_json::json!({});
+            }
+            section["api_key"] = key.into();
+        },
+        persist,
+    )
 }
 
 /// `save_settings` (the Settings form and the tray flyout): also checks what
@@ -274,6 +343,76 @@ mod tests {
             "must reject unknown providers"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn cloud_key_and_provider_are_saved_together_and_nothing_else_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut initial = Settings {
+            active_provider: "parakeet".into(),
+            restore_delay_ms: 777,
+            ..Settings::default()
+        };
+        initial.providers.insert(
+            "openai".into(),
+            serde_json::json!({"model": "keep", "api_key": "old"}),
+        );
+        initial
+            .providers
+            .insert("future".into(), serde_json::json!({"x": 1}));
+        let shared = RwLock::new(initial.clone());
+
+        set_cloud_key_with(&shared, "openai", Some("  new-key \n"), |value| {
+            settings::save(&path, value)
+        })
+        .unwrap();
+        let reloaded = settings::load(&path).unwrap();
+        assert_eq!(reloaded.active_provider, "openai");
+        assert_eq!(
+            reloaded.providers["openai"],
+            serde_json::json!({"model": "keep", "api_key": "new-key"})
+        );
+        assert_eq!(shared.read().unwrap().active_provider, "openai");
+        let mut expected = initial.clone();
+        expected.active_provider = "openai".into();
+        expected.providers.insert(
+            "openai".into(),
+            serde_json::json!({"model": "keep", "api_key": "new-key"}),
+        );
+        assert_eq!(
+            serde_json::to_value(reloaded).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+
+        // A blank key only selects the provider and keeps the saved key.
+        set_cloud_key_with(&shared, "openai", Some("   "), |_| Ok(())).unwrap();
+        set_cloud_key_with(&shared, "xai", None, |_| Ok(())).unwrap();
+        let after = shared.read().unwrap().clone();
+        assert_eq!(after.active_provider, "xai");
+        assert_eq!(after.providers["openai"]["api_key"], "new-key");
+        assert!(!after.providers.contains_key("xai"));
+    }
+
+    #[test]
+    fn cloud_key_failures_change_nothing() {
+        let initial = Settings {
+            active_provider: "parakeet".into(),
+            ..Settings::default()
+        };
+        let shared = RwLock::new(initial.clone());
+        assert!(
+            set_cloud_key_with(&shared, "openai", Some("k"), |_| Err("disk full".into())).is_err()
+        );
+        for id in ["parakeet", "unknown"] {
+            assert!(
+                set_cloud_key_with(&shared, id, Some("k"), |_| panic!("must reject {id}")).is_err()
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&*shared.read().unwrap()).unwrap(),
+            serde_json::to_value(initial).unwrap()
+        );
     }
 
     #[test]

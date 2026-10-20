@@ -277,14 +277,11 @@ async function applyEngine(): Promise<boolean> {
       return false;
     }
     try {
-      if (key !== "") {
-        // The whole settings go back, as from the Settings page; only the key
-        // differs. Read fresh: the tray may have changed something since.
-        const latest = await getSettings();
-        latest.providers[cloudId] = { ...(latest.providers[cloudId] ?? {}), api_key: key };
-        await invoke("save_settings", { settings: latest });
+      // One backend save of the key and the provider choice, under the same
+      // lock as every other settings save.
+      if (key !== "" || current.active_provider !== cloudId) {
+        await invoke("set_cloud_key", { id: cloudId, apiKey: key });
       }
-      if (current.active_provider !== cloudId) await invoke("select_provider", { id: cloudId });
     } catch (error) {
       say(engineResult, String(error), "error");
       return false;

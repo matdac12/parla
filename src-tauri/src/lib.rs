@@ -107,6 +107,7 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::save_settings,
             commands::settings::select_provider,
+            commands::settings::set_cloud_key,
             commands::settings::select_model,
             commands::settings::check_command_hotkey,
             commands::traccia::test_traccia,

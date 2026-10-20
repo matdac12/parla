@@ -14,6 +14,7 @@ on:
       - .github/release-notes.md
       - src-tauri/tauri.release.conf.json
       - src-tauri/tauri.updater.conf.json
+      - src-tauri/nsis/**
   workflow_dispatch:
 
 permissions:

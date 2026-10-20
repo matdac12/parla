@@ -212,7 +212,13 @@ are involved.
   folder** to delete it. Parla never deletes it. If the value and a shortcut both
   exist, the toggle warns and can still be turned off. The shortcut is detected
   by name only; its target is not read.
+- **Uninstalling** the installed copy removes the value when it starts that copy
+  (the installer's uninstaller, `src-tauri/nsis/installer-hooks.nsh`). A value
+  that starts another copy, such as a portable one, is left alone. An update
+  never touches it. The portable zip has no uninstaller, so delete the value
+  with the toggle before deleting the folder.
 - A login start has no console, so stderr logs of such a session go nowhere.
+  Parla has no log file.
 
 ### Two ways to record
 
