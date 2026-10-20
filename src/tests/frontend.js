@@ -262,10 +262,14 @@ await check("Start with Windows applies at once and a Startup shortcut locks it"
   box.dispatchEvent(new Event("change"));
   await settle();
   assert(!autostart.enabled, "Turning it off did not reach set_autostart");
-  // Mattia's case: a Parla.lnk in the Startup folder.
+  // Mattia's case: a Parla.lnk in the Startup folder. The page only re-reads on
+  // focus once it has seen a shortcut, so a shortcut that appears while it is
+  // open is found when turning the setting on is refused.
   autostart = { ...autostart, shortcut: "Parla.lnk" };
-  window.dispatchEvent(new Event("focus"));
+  box.checked = true;
+  box.dispatchEvent(new Event("change"));
   await settle();
+  assert(document.getElementById("autostart-result").textContent.includes("Parla.lnk"), "The refusal was not shown");
   assert(box.disabled && !box.checked, "A Startup shortcut did not lock the toggle");
   assert(note.textContent.includes("Parla.lnk"), "The note does not name the shortcut");
   assert(!document.getElementById("autostart-folder").hidden, "No Open Startup folder button");

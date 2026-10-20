@@ -127,6 +127,16 @@ git tag v0.2.0
 git push origin main v0.2.0
 ```
 
+`src-tauri/nsis/installer-hooks.nsh` (`installerHooks` in the release config)
+extends the generated uninstaller: it keeps a `Run\Parla` value that starts a
+different copy of Parla. To read the result, bundle locally without a signing
+key (`npx tauri build --no-bundle`, then `npx tauri bundle --bundles nsis
+--config src-tauri/tauri.release.conf.json`, with the VC++ DLLs in
+`src-tauri/target/release-stage`) and open
+`src-tauri/target/release/nsis/x64/installer.nsi`; the hooks are inlined in
+`Section Uninstall`. Never run the installer or uninstaller on a machine whose
+own Parla autostart you want to keep.
+
 The workflow fails if the tag does not match the version in all of those files.
 Run it from the Actions tab (**Release → Run workflow**) on any branch for a dry
 run: it builds and uploads the `parla-release` artifact but publishes nothing.

@@ -18,7 +18,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::command_mode::UrlOpener;
@@ -283,16 +282,10 @@ fn announce(app: &AppHandle) {
         } else {
             "Open Parla to install it."
         };
-        match app
-            .notification()
-            .builder()
-            .title("Parla update")
-            .body(format!("Parla {version} is available. {how}"))
-            .show()
-        {
-            // Only a shown notification counts, or a blocked one is never retried.
-            Ok(()) => state.edit(|inner| inner.prefs.notified = version),
-            Err(error) => eprintln!("Notification could not be sent: {error}"),
+        let message = format!("Parla {version} is available. {how}");
+        // Only a shown notification counts, or a blocked one is never retried.
+        if crate::failure::show_toast(app, "Parla update", &message) {
+            state.edit(|inner| inner.prefs.notified = version);
         }
     }
     if let Err(error) = app.emit_to(WINDOW, CHANGED, status(app)) {

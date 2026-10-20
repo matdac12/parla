@@ -30,6 +30,10 @@ mockIPC(async (cmd, args) => {
     case "get_settings": return structuredClone(settings);
     case "save_settings": Object.assign(settings, args.settings); return { warning: null };
     case "select_provider": settings.active_provider = args.id; return;
+    case "set_cloud_key":
+      if (args.apiKey) settings.providers[args.id] = { ...(settings.providers[args.id] ?? {}), api_key: args.apiKey };
+      settings.active_provider = args.id;
+      return;
     case "list_providers":
       return [
         { id: "openai", display_name: "OpenAI", available: params.has("keyset") || Boolean(settings.providers.openai?.api_key), reason: "OpenAI API key is not set" },

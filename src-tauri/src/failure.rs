@@ -196,16 +196,21 @@ fn notify_info(app: &tauri::AppHandle, message: &str) {
     show_toast(app, "Parla", message);
 }
 
-fn show_toast(app: &tauri::AppHandle, title: &str, message: &str) {
+/// Shows a notification and says whether Windows accepted it.
+pub(crate) fn show_toast(app: &tauri::AppHandle, title: &str, message: &str) -> bool {
     eprintln!("Parla: {message}");
-    if let Err(error) = app
+    match app
         .notification()
         .builder()
         .title(title)
         .body(message)
         .show()
     {
-        eprintln!("Notification could not be sent: {error}");
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("Notification could not be sent: {error}");
+            false
+        }
     }
 }
 
