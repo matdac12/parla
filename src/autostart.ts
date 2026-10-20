@@ -36,7 +36,7 @@ export interface AutostartControls {
 
 /** Shows `status`: the checkbox, and a note on what else starts Parla. The
  *  checkbox is locked while a Startup shortcut makes turning it on unsafe:
- *  that would start Parla twice. */
+ *  that would launch Parla twice; the second launch exits at once. */
 export function renderAutostart(controls: AutostartControls, status: AutostartStatus): void {
   const { box, note, folder, repair } = controls;
   box.checked = status.enabled;
@@ -47,7 +47,7 @@ export function renderAutostart(controls: AutostartControls, status: AutostartSt
   if (!status.supported) {
     note.textContent = "Only available on Windows.";
   } else if (status.shortcut !== null && status.enabled) {
-    note.textContent = `Parla will start twice at login: this setting and “${status.shortcut}” in your Startup folder both start it. Delete the shortcut.`;
+    note.textContent = `This setting and “${status.shortcut}” in your Startup folder both start Parla at login. Only one copy runs, the second exits; delete the shortcut to keep it tidy.`;
     note.classList.add("capture-hint");
   } else if (status.shortcut !== null) {
     note.textContent = `“${status.shortcut}” in your Startup folder already starts Parla at login. To manage it here, delete the shortcut, then turn this on.`;

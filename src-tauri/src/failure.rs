@@ -1,4 +1,5 @@
 //! Failure notifications and a single persisted clip, shared by tray and IPC retry.
+use crate::log::log_error;
 use crate::{
     clip::Clip,
     flow::{self, DictationState},
@@ -154,7 +155,7 @@ fn notify_failure(app: &tauri::AppHandle, title: &str, message: &str) {
     // https://github.com/tauri-apps/plugins-workspace/blob/v2/plugins/notification/src/desktop.rs
     if let Some(tray) = app.tray_by_id("parla") {
         if let Err(error) = tray.set_tooltip(Some(format!("Parla — {message}"))) {
-            eprintln!("Cannot update error tooltip: {error}");
+            log_error!("Cannot update error tooltip: {error}");
         }
         // A small red dot on the usual icon remains visible even if a hotkey
         // rebind subsequently replaces the shared tooltip.
@@ -163,11 +164,13 @@ fn notify_failure(app: &tauri::AppHandle, title: &str, message: &str) {
             let badged = error_badge(icon.rgba(), width, height);
             let image = tauri::image::Image::new_owned(badged, width, height);
             if let Err(error) = tray.set_icon(Some(image)) {
-                eprintln!("Cannot update error icon: {error}");
+                log_error!("Cannot update error icon: {error}");
             }
         }
     }
     show_toast(app, title, message);
+    // Last: the failure is final and already shown, so the write delays nothing.
+    crate::log::error(&format!("{title}: {message}"));
 }
 
 /// The app icon with a red dot in its bottom-right corner, ringed by a
@@ -208,7 +211,7 @@ pub(crate) fn show_toast(app: &tauri::AppHandle, title: &str, message: &str) -> 
     {
         Ok(()) => true,
         Err(error) => {
-            eprintln!("Notification could not be sent: {error}");
+            log_error!("Notification could not be sent: {error}");
             false
         }
     }
@@ -243,7 +246,7 @@ fn save_clip(path: &Path, clip: &Clip) -> anyhow::Result<()> {
         for stale in [path, temporary.as_path()] {
             if let Err(error) = std::fs::remove_file(stale) {
                 if error.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
+                    log_error!(
                         "Cannot remove stale recovery audio {}: {error}",
                         stale.display()
                     );

@@ -4,9 +4,9 @@
 //! nothing is kept in settings.json.
 //!
 //! A `Parla` shortcut in the Startup folder (what Parla used before this
-//! setting) starts it too. Turning the setting on next to one would start Parla
-//! twice at login, so it is refused until the shortcut is gone. Parla never
-//! deletes it.
+//! setting) starts it too. Turning the setting on next to one would launch Parla
+//! twice at login (the second exits, see `single_instance`), so it is refused
+//! until the shortcut is gone. Parla never deletes it.
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -90,7 +90,7 @@ pub fn set(
         if let Some(shortcut) = startup_dir.and_then(startup_shortcut) {
             return Err(format!(
                 "{shortcut} in your Startup folder already starts Parla at login. Delete it first, \
-                 or Parla would start twice."
+                 or both would launch Parla and the second would just exit."
             ));
         }
         key.set(VALUE_NAME, &command_for(exe))?;
@@ -415,7 +415,7 @@ mod tests {
 
         let error = set(&key, &exe(), Some(dir.path()), true).unwrap_err();
         assert!(
-            error.contains("Parla.lnk") && error.contains("twice"),
+            error.contains("Parla.lnk") && error.contains("second would just exit"),
             "{error}"
         );
         assert_eq!(key.get(VALUE_NAME).unwrap(), None, "nothing was written");

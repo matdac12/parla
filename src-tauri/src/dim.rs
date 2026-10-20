@@ -10,6 +10,7 @@
 //! config folder, so a crash or kill is undone at the next start.
 // Only the Windows worker drives the fade; elsewhere `dim` is a no-op.
 #![cfg_attr(not(windows), allow(dead_code))]
+use crate::log::log_error;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -209,7 +210,7 @@ fn remove_saved(file: &Path) {
     match std::fs::remove_file(file) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => eprintln!("dim: removing {FILE_NAME} failed: {error}"),
+        Err(error) => log_error!("dim: removing {FILE_NAME} failed: {error}"),
     }
 }
 
@@ -221,7 +222,7 @@ fn restore_crashed<V: Volume>(file: &Path, sessions: impl FnOnce() -> Vec<Found<
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(error) => {
-            eprintln!("dim: reading {FILE_NAME} failed: {error}");
+            log_error!("dim: reading {FILE_NAME} failed: {error}");
             return;
         }
     };

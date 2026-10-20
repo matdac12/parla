@@ -1,3 +1,4 @@
+use crate::log::log_error;
 use crate::settings::{self, LocalModel, Settings, SharedSettings};
 use tauri::{Emitter, Manager};
 
@@ -49,7 +50,7 @@ pub(crate) fn save_if_absent(app: &tauri::AppHandle) {
         return;
     };
     if let Err(error) = settings::save(&path, &current) {
-        eprintln!("Setup: could not write the settings file: {error}");
+        log_error!("Setup: could not write the settings file: {error}");
     }
 }
 
@@ -83,7 +84,8 @@ pub async fn save_settings(
         Ok(saved)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+    .and_then(|result| crate::log::logged("save_settings", result))
 }
 
 // Caller holds SaveLock; the settings RwLock is held only to snapshot/commit.
@@ -101,7 +103,8 @@ pub async fn select_provider(app: tauri::AppHandle, id: String) -> Result<(), St
         Ok(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+    .and_then(|result| crate::log::logged("select_provider", result))
 }
 
 /// The setup wizard's cloud choice: stores the provider's API key (when one is
@@ -127,7 +130,8 @@ pub async fn set_cloud_key(
         Ok(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+    .and_then(|result| crate::log::logged("set_cloud_key", result))
 }
 
 /// Picks the local model. A model that is not on disk is downloaded first
@@ -157,7 +161,8 @@ pub async fn select_model(app: tauri::AppHandle, id: String) -> Result<String, S
         Ok(snapshot(&shared)?.local_model.id().to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+    .and_then(|result| crate::log::logged("select_model", result))
 }
 
 fn snapshot(shared: &SharedSettings) -> Result<Settings, String> {

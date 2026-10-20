@@ -10,6 +10,7 @@
 //! after Parla has been up for a couple of minutes. The webviews reach it
 //! through the commands below; they have no access to the plugin's own.
 
+use crate::log::log_error;
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
@@ -100,7 +101,7 @@ impl UpdaterState {
         let result = change(&mut inner);
         if let Some(path) = &self.path {
             if let Err(error) = save(path, &inner.prefs) {
-                eprintln!("Could not save {}: {error}", path.display());
+                log_error!("Could not save {}: {error}", path.display());
             }
         }
         result
@@ -121,7 +122,7 @@ fn save(path: &Path, prefs: &Prefs) -> Result<(), String> {
 fn load(path: &Path) -> Prefs {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            eprintln!("Ignoring {}: {error}", path.display());
+            log_error!("Ignoring {}: {error}", path.display());
             Prefs::default()
         }),
         Err(_) => Prefs::default(),
@@ -257,7 +258,7 @@ async fn check(app: &AppHandle) -> bool {
             true
         }
         Err(error) => {
-            eprintln!("Update check failed: {error}");
+            log_error!("Update check failed: {error}");
             state.lock().error = Some("Could not reach the update feed. Try again later.".into());
             false
         }
@@ -289,7 +290,7 @@ fn announce(app: &AppHandle) {
         }
     }
     if let Err(error) = app.emit_to(WINDOW, CHANGED, status(app)) {
-        eprintln!("Could not tell the window about the update: {error}");
+        log_error!("Could not tell the window about the update: {error}");
     }
 }
 
@@ -358,7 +359,11 @@ pub async fn install_update(app: AppHandle, state: State<'_, UpdaterState>) -> R
             || {},
         )
         .await
-        .map_err(|error| format!("Update failed: {error}"))
+        .map_err(|error| {
+            let message = format!("Update failed: {error}");
+            crate::log::error(&message);
+            message
+        })
 }
 
 /// The portable build's link to the release.

@@ -7,6 +7,7 @@
 //!     same quantize_dynamic recipe as v3. The repo ships no preprocessor, so
 //!     nemo128.onnx (no trained weights) comes from the pinned v3 revision.
 //! Downloads never become visible to the provider until every file is verified.
+use crate::log::log_error;
 use crate::{
     provider::parakeet::ParakeetConfig,
     settings::{LocalModel, Settings},
@@ -138,7 +139,7 @@ pub fn setup(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> 
         tauri::async_runtime::spawn_blocking(move || {
             // A missing model stays unavailable; startup is never blocked by inference.
             if let Err(error) = crate::provider::parakeet::warm(&settings) {
-                eprintln!("Parakeet warm-up: {error}");
+                log_error!("Parakeet warm-up: {error}");
             }
         });
     }

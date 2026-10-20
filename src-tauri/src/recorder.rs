@@ -27,6 +27,7 @@
 //! rubato resampling, reopen-on-next-start after a device failure) follows
 //! Handy's recorder (github.com/cjpais/Handy, MIT); see `THIRD_PARTY_NOTICES.md`.
 
+use crate::log::log_error;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -186,7 +187,7 @@ pub fn recorder() -> Option<Arc<Recorder>> {
             }
         }
         Err(error) => {
-            eprintln!("microphone unavailable: {error:#}");
+            log_error!("microphone unavailable: {error:#}");
             None
         }
     }
@@ -566,7 +567,7 @@ fn audio_thread(
                     last_device_check = Instant::now();
                     if device_needs_reopen(&shared, session.as_ref()) {
                         if let Err(error) = reopen_session(&shared, &mut session, &mut capture) {
-                            eprintln!("microphone: background reopen failed: {error}");
+                            log_error!("microphone: background reopen failed: {error}");
                         }
                     }
                 }

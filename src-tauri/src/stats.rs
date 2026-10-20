@@ -4,6 +4,7 @@
 //! sent to each provider/model/mode drives the estimated cost (PARLA-19), plus
 //! the LLM tokens of each command run (PARLA-66).
 
+use crate::log::log_error;
 use crate::{
     pricing::{self, BATCH, STREAMING},
     timing::DictationRecord,
@@ -262,7 +263,7 @@ impl StatsStore {
                         ..backfilled
                     };
                     if let Err(error) = save(&path, &stats) {
-                        eprintln!("Stats usage backfill not saved: {error}");
+                        log_error!("Stats usage backfill not saved: {error}");
                     }
                     stats
                 } else {
@@ -273,12 +274,12 @@ impl StatsStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let stats = backfill(history);
                 if let Err(error) = save(&path, &stats) {
-                    eprintln!("Stats backfill not saved: {error}");
+                    log_error!("Stats backfill not saved: {error}");
                 }
                 stats
             }
             Err(error) => {
-                eprintln!("Stats unreadable: {error}");
+                log_error!("Stats unreadable: {error}");
                 Stats {
                     version: VERSION,
                     ..Stats::default()
@@ -302,7 +303,7 @@ impl StatsStore {
                         Message::Save(stats) => {
                             last_result = persist(stats);
                             if let Err(error) = &last_result {
-                                eprintln!("Stats not saved: {error}");
+                                log_error!("Stats not saved: {error}");
                             }
                         }
                         Message::Flush(reply) => {
@@ -332,7 +333,7 @@ impl StatsStore {
         // Keep enqueueing under the short memory lock so snapshots cannot be
         // written out of order. The writer never takes this lock or runs here.
         if self.writer.send(Message::Save(stats.clone())).is_err() {
-            eprintln!("Stats writer is unavailable");
+            log_error!("Stats writer is unavailable");
         }
         Some(stats.clone())
     }
