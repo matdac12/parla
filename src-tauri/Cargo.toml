@@ -1,6 +1,6 @@
 [package]
 name = "parla"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fast push-to-talk dictation for Windows"
 edition = "2021"
 
