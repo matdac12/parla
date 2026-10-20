@@ -29,19 +29,20 @@ Install Parla (https://github.com/matdac12/parla), a Windows dictation app, on t
 Download the latest Parla_*_x64-setup.exe from the GitHub release at
 https://github.com/matdac12/parla/releases/latest, verify it against that release's
 SHA256SUMS.txt, run it with /S for a silent per-user install, then start Parla from its
-Start menu shortcut. It lives in the system tray. Then walk me through setup: ask whether
-I want cloud transcription (an OpenAI or xAI API key, pasted in Settings) or local
-(download the Parakeet model in Settings, about 640 MB), and tell me the hotkeys from
-the README.
+Start menu shortcut. It lives in the system tray and opens a short setup guide on its first
+launch. Walk me through it: ask whether I want cloud transcription (an OpenAI or xAI API key)
+or local (the Parakeet model, about 640 MB), and tell me the hotkeys from the README.
 ```
 
 ## First run
 
-1. Parla has no main window. Find it in the **system tray**: open the tray menu and
-   choose **Settings…**.
-2. Paste an **OpenAI** or **xAI** API key, or choose **Parakeet (local)** and
-   download the model (about 640 MB, once; after that it needs no network or key).
-   Then **Save**.
+1. The first time Parla starts, a short **setup guide** opens: your microphone, the
+   engine (paste an **OpenAI** or **xAI** API key, or choose **Local** and download the
+   Parakeet model, about 640 MB, once; after that it needs no network or key), a test
+   dictation, and whether Parla starts with Windows. Every step can be skipped.
+2. After that Parla lives in the **system tray**. Click its icon for quick switches, or
+   right-click it for **Settings…**. **Settings → Dictation & hotkey → Run setup again**
+   reopens the guide.
 3. Click into any text field, hold **Ctrl+Alt**, speak, release.
 
 | Shortcut | What it does |

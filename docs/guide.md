@@ -87,7 +87,9 @@ once.
 Settings are split into **Transcription** (provider, keys, models, local
 model), **Dictation & hotkey** (shortcut, the **Command mode** card, live
 transcription and captions), **Other audio** ([dimming](#dimming-other-audio)),
-**Vocabulary** and **Clipboard** (paste compatibility, restore delay). Switching
+**Vocabulary** and **Clipboard** (paste compatibility, restore delay). A **Startup
+and setup** card at the end of **Dictation & hotkey** holds
+[Start with Windows](#start-with-windows) and **Run setup again**. Switching
 provider or local model applies at once. Other edits show a **Save** bar at the
 bottom with **Discard**; it stays until you save or discard, across pages.
 
@@ -152,6 +154,63 @@ so it costs nothing while closed.
 - **Quit Parla** — exits Parla.
 
 History, Timings and Benchmark are reached from the main window's sidebar.
+
+### First-run setup
+
+The first time Parla starts with no `settings.json`, it opens a setup window
+instead of sitting silently in the tray. Every step has **Skip**, **Skip setup**
+closes it at any point, and closing the window does the same; the wizard never
+blocks dictation. **Settings → Dictation & hotkey → Run setup again** opens it
+whenever you like. It runs on your existing settings and changes only what you
+change in it: pressing **Continue** on an untouched step, or **Skip**, writes
+nothing.
+
+1. **Welcome:** the shortcut, from your settings.
+2. **Microphone:** the Windows default input device by name, and a live level
+   bar that turns green once it hears you. Parla records from the default
+   device only, so **Windows sound settings** opens the page where it is chosen
+   (the step re-checks when you come back). While the bar runs it holds the
+   microphone like a benchmark recording does, so a hotkey press waits; it
+   stops when you leave the step, and by itself after a minute.
+3. **Speech engine:** **Cloud** (OpenAI or xAI Grok, with a key field; a key
+   already set, or in `OPENAI_API_KEY` / `XAI_API_KEY`, counts) or **Local**
+   (the selected Parakeet model; **Continue** downloads it with progress, then
+   switches to it). It uses the Settings commands, so a key typed here is saved
+   exactly as it is in Settings → Transcription.
+4. **Try it:** click the box, use the real hotkey and speak. This is a normal
+   dictation (same recorder, engine and paste; it also lands in History and your
+   totals): the box is simply the window that has focus when the paste comes. A
+   line under it reports the time from release to paste, or the error.
+5. **Start with Windows:** [the toggle below](#start-with-windows), on by default
+   on a new install and showing the real state on a rerun. It is applied when
+   you press **Continue**.
+6. **Done:** what is set, and where the tray icon is.
+
+"First run" means there is no settings file. Parla writes one when the wizard
+closes (with defaults, if you changed nothing), so it does not reopen on its own.
+An existing file, even a broken one, never triggers it.
+
+### Start with Windows
+
+Settings → Dictation & hotkey → **Start Parla with Windows**, and the wizard's
+fifth step, write or remove one value named `Parla` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, holding the quoted path
+of the running `parla.exe`. Parla already starts straight into the tray with no
+window, so the value has no arguments. The setting applies at once (no Save) and
+lives only in the registry, not in `settings.json`. No installer or admin rights
+are involved.
+
+- **If you moved or reinstalled Parla** the value may point at another copy; the
+  toggle then says so and **Use this copy** rewrites it.
+- **A Parla shortcut in the Startup folder**
+  (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`, a file named
+  `Parla*.lnk`), which was the way to autostart before this setting, also starts
+  Parla. Turning the toggle on next to one would start it twice at login, so the
+  toggle is locked while the shortcut exists and says so, with **Open Startup
+  folder** to delete it. Parla never deletes it. If the value and a shortcut both
+  exist, the toggle warns and can still be turned off. The shortcut is detected
+  by name only; its target is not read.
+- A login start has no console, so stderr logs of such a session go nowhere.
 
 ### Two ways to record
 
@@ -873,6 +932,9 @@ the failure/retry path.
   a portable zip, so Windows SmartScreen warns on first run. Signed behavior
   (including reliable notifications) is untested. Install a newer release over
   the old one to update.
+- **Setup wizard and Start with Windows.** Built on Windows and unit-tested
+  (the registry round trip runs on a throwaway key), but the first-run window
+  and a real login start still need a hand check.
 - **Elevated windows.** A non-elevated app cannot inject paste into
   elevated/admin windows (Windows UIPI). Secure desktop and applications that
   intercept Ctrl+V are unsupported. Windows Terminal must be allowed to paste

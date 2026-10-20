@@ -16,6 +16,7 @@ export default defineConfig({
         bench: "src/bench.html",
         flyout: "src/flyout.html",
         overlay: "src/overlay.html",
+        setup: "src/setup.html",
       },
     },
   },

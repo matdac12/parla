@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./settings.css";
 import { engineStatus, type LocalModelStatus, type ProviderInfo, type Settings } from "./records";
+import { openStartupFolder, readAutostart, renderAutostart, writeAutostart, type AutostartStatus } from "./autostart";
 
 interface SaveResult {
   warning: string | null;
@@ -1002,8 +1003,46 @@ function wireForm(): void {
   els.discard.addEventListener("click", discard);
 }
 
+/** Start with Windows (PARLA-52) lives in the registry, not settings.json, so
+ *  it applies on click like the provider switch, and Save does not see it. The
+ *  Run setup again button opens the wizard (PARLA-100). */
+function wireStartup(): void {
+  const controls = {
+    box: byId<HTMLInputElement>("autostart"),
+    note: byId<HTMLParagraphElement>("autostart-note"),
+    folder: byId<HTMLButtonElement>("autostart-folder"),
+    repair: byId<HTMLButtonElement>("autostart-repair"),
+  };
+  const result = byId<HTMLParagraphElement>("autostart-result");
+  const show = (status: AutostartStatus): void => renderAutostart(controls, status);
+  const refresh = (): void => {
+    readAutostart().then(show, (error) => setStatusLine(result, `Could not read the setting: ${String(error)}`, "error"));
+  };
+  const apply = async (enabled: boolean): Promise<void> => {
+    controls.box.disabled = true;
+    controls.repair.disabled = true;
+    try {
+      show(await writeAutostart(enabled));
+      setStatusLine(result, enabled ? "Parla will start with Windows." : "Parla will not start with Windows.", "success");
+    } catch (error) {
+      setStatusLine(result, String(error), "error");
+      refresh();
+    } finally {
+      controls.repair.disabled = false;
+    }
+  };
+  controls.box.addEventListener("change", () => void apply(controls.box.checked));
+  controls.repair.addEventListener("click", () => void apply(true));
+  controls.folder.addEventListener("click", () => void openStartupFolder());
+  byId<HTMLButtonElement>("run-setup").addEventListener("click", () => void invoke("open_window", { name: "setup" }));
+  // The shortcut is deleted in Explorer: re-read when the window is back.
+  window.addEventListener("focus", refresh);
+  refresh();
+}
+
 async function main(): Promise<void> {
   wireForm();
+  wireStartup();
   try {
     const [settings, providers] = await Promise.all([
       invoke<Settings>("get_settings"),
