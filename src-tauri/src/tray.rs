@@ -172,7 +172,10 @@ fn ensure_window(
         let handle = app.clone();
         window.on_window_event(move |event| {
             if matches!(event, WindowEvent::Destroyed) {
-                crate::setup::closed(&handle);
+                // Stopping the meter waits on the audio worker and the settings
+                // write takes the save lock: keep both off the event loop.
+                let handle = handle.clone();
+                std::thread::spawn(move || crate::setup::closed(&handle));
             }
         });
     }

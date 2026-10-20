@@ -183,7 +183,10 @@ const localModel = (): LocalModelStatus | undefined =>
 
 function renderEngine(): void {
   if (!engineState) return;
-  for (const radio of engineRadios) radio.checked = radio.value === engine;
+  for (const radio of engineRadios) {
+    radio.checked = radio.value === engine;
+    radio.disabled = downloading;
+  }
   cloudPanel.hidden = engine !== "cloud";
   localPanel.hidden = engine !== "local";
 
@@ -305,6 +308,7 @@ async function applyEngine(): Promise<boolean> {
   } finally {
     downloading = false;
     nextButton.textContent = "Continue";
+    renderEngine();
   }
   return true;
 }
@@ -358,6 +362,8 @@ const autostart = {
 };
 const startResult = must<HTMLParagraphElement>("start-result");
 let autostartNow: AutostartStatus | null = null;
+/** What the user last ticked, so coming back to the step keeps it. */
+let startChoice: boolean | null = null;
 
 async function enterStart(): Promise<void> {
   say(startResult, "");
@@ -368,9 +374,10 @@ async function enterStart(): Promise<void> {
     return;
   }
   renderAutostart(autostart, autostartNow);
+  if (autostart.box.disabled) return;
   // On a new install the answer starts at yes; on a rerun it is what it is.
-  const open = autostartNow.supported && !autostartNow.enabled && autostartNow.shortcut === null;
-  if (firstRun && open) autostart.box.checked = true;
+  if (startChoice !== null) autostart.box.checked = startChoice;
+  else if (firstRun && !autostartNow.enabled) autostart.box.checked = true;
 }
 
 async function applyStart(): Promise<boolean> {
@@ -387,6 +394,9 @@ async function applyStart(): Promise<boolean> {
   }
 }
 
+autostart.box.addEventListener("change", () => {
+  startChoice = autostart.box.checked;
+});
 autostart.folder.addEventListener("click", () => void openStartupFolder());
 autostart.repair.addEventListener("click", () => {
   void writeAutostart(true).then(
@@ -404,7 +414,7 @@ window.addEventListener("focus", () => {
   void readAutostart().then((status) => {
     autostartNow = status;
     renderAutostart(autostart, status);
-    if (!status.enabled && !autostart.box.disabled) autostart.box.checked = wanted;
+    if (!autostart.box.disabled) autostart.box.checked = wanted;
   }, () => undefined);
 });
 

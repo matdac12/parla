@@ -139,6 +139,7 @@ mod registry {
     const KEY_QUERY_VALUE: u32 = 0x0001;
     const KEY_SET_VALUE: u32 = 0x0002;
     const REG_SZ: u32 = 1;
+    const REG_EXPAND_SZ: u32 = 2;
     const ERROR_SUCCESS: i32 = 0;
     const ERROR_FILE_NOT_FOUND: i32 = 2;
 
@@ -275,8 +276,10 @@ mod registry {
                 return Ok(None);
             }
             check(code, "Reading the registry value")?;
-            if kind != REG_SZ {
-                return Ok(Some(String::new()));
+            if kind != REG_SZ && kind != REG_EXPAND_SZ {
+                // Something starts at login under this name, just not text
+                // Parla wrote: report it, never as "off".
+                return Ok(Some("(a value Parla cannot read)".into()));
             }
             let mut data = vec![0_u16; (len as usize).div_ceil(2)];
             let mut size = (data.len() * 2) as u32;

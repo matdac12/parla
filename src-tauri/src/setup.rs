@@ -16,13 +16,17 @@ use tauri::{Emitter, Manager};
 /// The wizard's window label, and the target of its events.
 pub const LABEL: &str = "setup";
 
-/// A new install has no settings file yet. Any file there, even one that does
-/// not parse or cannot be read, means someone already set Parla up.
-pub fn is_first_run(settings_path: &Path) -> bool {
-    matches!(
-        std::fs::metadata(settings_path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-    )
+/// A new install has neither a settings file nor a history yet. Any settings
+/// file there, even one that does not parse or cannot be read, means someone
+/// already set Parla up; a history file means it was used on defaults.
+pub fn is_first_run(settings_path: &Path, history_path: &Path) -> bool {
+    let missing = |path: &Path| {
+        matches!(
+            std::fs::metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    };
+    missing(settings_path) && missing(history_path)
 }
 
 /// The wizard window is gone, however it closed.
@@ -134,34 +138,53 @@ pub fn default_microphone() -> Option<String> {
 mod tests {
     use super::*;
 
+    fn paths(dir: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+        (
+            dir.path().join("settings.json"),
+            dir.path().join("history.jsonl"),
+        )
+    }
+
     #[test]
-    fn a_missing_settings_file_is_a_first_run() {
+    fn nothing_on_disk_is_a_first_run() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(is_first_run(&dir.path().join("settings.json")));
+        let (settings, history) = paths(&dir);
+        assert!(is_first_run(&settings, &history));
         // Not even the folder exists yet on a fresh install.
-        assert!(is_first_run(&dir.path().join("new").join("settings.json")));
+        assert!(is_first_run(
+            &dir.path().join("new").join("settings.json"),
+            &history
+        ));
     }
 
     #[test]
     fn any_settings_file_means_set_up_already() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
+        let (path, history) = paths(&dir);
         for contents in ["{}", r#"{"hotkey":"F9"}"#, "not json", ""] {
             std::fs::write(&path, contents).unwrap();
-            assert!(!is_first_run(&path), "{contents:?}");
+            assert!(!is_first_run(&path, &history), "{contents:?}");
         }
         // A file Parla cannot read is still somebody's settings.
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        assert!(!is_first_run(&path));
+        assert!(!is_first_run(&path, &history));
+    }
+
+    #[test]
+    fn a_history_without_settings_is_a_parla_used_on_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, history) = paths(&dir);
+        std::fs::write(&history, b"{}\n").unwrap();
+        assert!(!is_first_run(&settings, &history));
     }
 
     #[test]
     fn saving_defaults_ends_first_run_and_loads_back() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
+        let (path, history) = paths(&dir);
         crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
-        assert!(!is_first_run(&path));
+        assert!(!is_first_run(&path, &history));
         assert!(crate::settings::load(&path).is_ok());
     }
 }

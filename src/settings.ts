@@ -1010,7 +1010,10 @@ function wireStartup(): void {
     watching = status.shortcut !== null;
   };
   const refresh = (): void => {
-    readAutostart().then(show, (error) => setStatusLine(result, `Could not read the setting: ${String(error)}`, "error"));
+    readAutostart().then(show, (error) => {
+      controls.box.disabled = false;
+      setStatusLine(result, `Could not read the setting: ${String(error)}`, "error");
+    });
   };
   const apply = async (enabled: boolean): Promise<void> => {
     controls.box.disabled = true;

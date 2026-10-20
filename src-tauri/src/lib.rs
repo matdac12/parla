@@ -66,7 +66,10 @@ pub fn run() {
             // must be managed before anything that creates or shows a window.
             let settings_path = settings::path(app.handle())?;
             // Decided before anything can write the file (PARLA-100).
-            let first_run = setup::is_first_run(&settings_path);
+            let first_run = setup::is_first_run(
+                &settings_path,
+                &history::path(app.handle()).unwrap_or_default(),
+            );
             let config = settings::load(&settings_path).unwrap_or_else(|error| {
                 eprintln!("{error}; using defaults until settings are repaired");
                 settings::Settings::default()

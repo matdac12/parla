@@ -186,9 +186,11 @@ nothing.
    you press **Continue**.
 6. **Done:** what is set, and where the tray icon is.
 
-"First run" means there is no settings file. Parla writes one when the wizard
-closes (with defaults, if you changed nothing), so it does not reopen on its own.
-An existing file, even a broken one, never triggers it.
+"First run" means there is neither a settings file nor a `history.jsonl`, so a
+Parla that was only ever used on defaults does not get the wizard on update.
+Parla writes the settings file when the wizard closes (with defaults, if you
+changed nothing), so it does not reopen on its own. An existing file, even a
+broken one, never triggers it.
 
 ### Start with Windows
 

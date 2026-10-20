@@ -41,7 +41,8 @@ pub(crate) fn save_if_absent(app: &tauri::AppHandle) {
     };
     let serial = app.state::<SaveLock>();
     let _save = serial.0.lock().unwrap_or_else(|e| e.into_inner());
-    if !crate::setup::is_first_run(&path) {
+    // Only the settings file matters here: it is what the wizard exists to create.
+    if path.exists() {
         return;
     }
     let Ok(current) = snapshot(&app.state::<SharedSettings>()) else {

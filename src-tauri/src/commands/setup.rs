@@ -51,13 +51,31 @@ pub async fn mic_info() -> Result<Option<String>, String> {
     blocking(|| Ok(setup::default_microphone())).await
 }
 
+/// The meter holds the microphone and the dictation guard: only the wizard
+/// may run it.
+fn only_setup(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == setup::LABEL {
+        Ok(())
+    } else {
+        Err("Only the setup window can use the microphone meter".into())
+    }
+}
+
 #[tauri::command]
-pub async fn mic_meter_start(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn mic_meter_start(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    only_setup(&window)?;
     blocking(move || app.state::<setup::MicMeter>().start(&app)).await
 }
 
 #[tauri::command]
-pub async fn mic_meter_stop(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn mic_meter_stop(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    only_setup(&window)?;
     blocking(move || {
         app.state::<setup::MicMeter>().stop();
         Ok(())
