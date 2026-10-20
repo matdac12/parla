@@ -66,27 +66,34 @@ jobs:
         run: ./.github/scripts/relink-ort-dylibs.ps1
       - run: npm ci
       - run: npx tauri build --no-bundle
-      - name: Stage parla.exe and DirectML.dll
+      # No DirectML.dll: build.rs delay-loads it and the CPU-only ONNX Runtime
+      # never calls it. ONNX Runtime's C++ code does need MSVCP140*.dll, which
+      # import VCRUNTIME140*.dll, so these ship app-local and Parla starts
+      # without the VC++ Redistributable (PARLA-32).
+      - name: Stage parla.exe and the VC++ runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $release = 'src-tauri/target/release'
           $stage = 'src-tauri/target/release-stage'
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          foreach ($name in 'parla.exe', 'DirectML.dll') {
-            $file = Get-Item (Join-Path $release $name)
-            # ort may create symlinks on admin runners. Ship actual bytes.
-            $source = $file.FullName
-            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-              $source = $file.ResolveLinkTarget($true).FullName
-            }
-            Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name) -Force
+          Copy-Item -LiteralPath 'src-tauri/target/release/parla.exe' -Destination $stage -Force
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'No Visual Studio with the x64 C++ tools found' }
+          $version = (Get-Content (Join-Path $vs 'VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt') -Raw).Trim()
+          $crt = Get-ChildItem (Join-Path $vs "VC/Redist/MSVC/$version/x64") -Directory -Filter 'Microsoft.VC*.CRT' |
+            Select-Object -First 1
+          if (!$crt) { throw "No x64 CRT folder in VC++ redist $version" }
+          "VC++ runtime $version from $($crt.FullName)"
+          # Keep in sync with resources in tauri.release.conf.json.
+          foreach ($name in 'msvcp140.dll', 'msvcp140_1.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            $dll = Join-Path $crt.FullName $name
+            if (!(Test-Path -LiteralPath $dll -PathType Leaf)) { throw "Missing $dll" }
+            Copy-Item -LiteralPath $dll -Destination $stage -Force
           }
-          if ((Get-Item (Join-Path $stage 'DirectML.dll')).Length -le 1MB) {
-            throw 'DirectML.dll must be a real file larger than 1 MB'
-          }
+          Get-ChildItem $stage | Format-Table Name, Length
       # Bundles the parla.exe built above; tauri.release.conf.json adds the
-      # NSIS target and installs DirectML.dll next to the executable.
+      # NSIS target and installs the VC++ runtime DLLs next to the executable.
       - run: npx tauri bundle --bundles nsis --config src-tauri/tauri.release.conf.json
       - name: Collect the installer, the portable zip and checksums
         shell: pwsh
@@ -118,12 +125,37 @@ jobs:
           Get-ChildItem $dir | Format-Table Name, Length
           $exe = Get-ChildItem $dir -Filter '*.exe' | Where-Object Name -ne 'uninstall.exe' | Select-Object -First 1
           if (!$exe) { throw 'The installer did not install the app executable' }
-          if (!(Test-Path (Join-Path $dir 'DirectML.dll'))) { throw 'DirectML.dll is not next to the executable' }
+          if (Test-Path (Join-Path $dir 'DirectML.dll')) { throw 'The installer still ships DirectML.dll' }
+          $runtime = @(Get-ChildItem 'src-tauri/target/release-stage' -Filter '*.dll' -File).Name
+          if (!$runtime) { throw 'No VC++ runtime DLLs were staged' }
+          foreach ($name in $runtime) {
+            if (!(Test-Path (Join-Path $dir $name))) { throw "$name is not next to the executable" }
+          }
           # A missing DLL kills the process at load; a healthy Parla sits in the tray.
           $app = Start-Process $exe.FullName -PassThru
           Start-Sleep -Seconds 10
           if ($app.HasExited) { throw "Parla exited at startup with code $($app.ExitCode)" }
-          Stop-Process -Id $app.Id -Force
+          try {
+            # The runner has the VC++ Redistributable in System32; the app-local
+            # copies must win, or a clean PC would still fail.
+            $modules = (Get-Process -Id $app.Id).Modules
+            # Get-Item expands 8.3 short names, which module paths may use.
+            $installDir = (Get-Item -LiteralPath $exe.FullName).Directory.FullName
+            foreach ($name in $runtime) {
+              $module = $modules | Where-Object ModuleName -eq $name | Select-Object -First 1
+              if (!$module) { throw "Parla did not load $name" }
+              "$name <- $($module.FileName)"
+              if ((Get-Item -LiteralPath $module.FileName).Directory.FullName -ne $installDir) {
+                throw "$name was loaded from $($module.FileName), not from $installDir"
+              }
+            }
+            # DirectML.dll is delay-loaded and must stay unloaded on the CPU path.
+            $loaded = tasklist /m DirectML.dll /fi "PID eq $($app.Id)" /fo csv /nh |
+              Select-String -SimpleMatch "`"$($app.Id)`""
+            if ($loaded) { throw "Parla loaded DirectML.dll: $loaded" }
+          } finally {
+            Stop-Process -Id $app.Id -Force
+          }
       - name: Publish the GitHub Release
         if: github.ref_type == 'tag'
         shell: pwsh

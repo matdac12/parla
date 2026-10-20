@@ -48,10 +48,12 @@ npm run tauri build -- --no-bundle
 .\src-tauri\target\release\parla.exe
 ```
 
-The build leaves `parla.exe` and the ONNX Runtime companion DLLs (including
-`DirectML.dll`) in `src-tauri\target\release\`. Keep them in the same folder;
-copying only the executable will prevent startup. The installer and the portable
-zip come from the release workflow; see [Releasing](#releasing).
+The build leaves `parla.exe` in `src-tauri\target\release\`. `ort` also puts
+`DirectML.dll` there, but `build.rs` delay-loads it and the CPU-only runtime
+never calls it, so the exe runs without it. The exe does need the Visual C++
+runtime (`msvcp140*.dll`, `vcruntime140*.dll`), which a machine with Visual
+Studio already has. The installer and the portable zip, which ship that runtime
+next to the exe, come from the release workflow; see [Releasing](#releasing).
 
 The first build compiles the whole Rust dependency tree and downloads ONNX
 Runtime, so expect several minutes; incremental rebuilds are much faster.
@@ -111,8 +113,10 @@ Rust cache, and only main saves it.
 ## Releasing
 
 Releases come from `.github/workflows/release.yml`. It builds `parla.exe`, packs
-it with `DirectML.dll` into an NSIS installer (`tauri bundle` with
-`src-tauri/tauri.release.conf.json`) and a portable zip, writes `SHA256SUMS.txt`,
+it with the x64 VC++ runtime DLLs from the runner's Visual Studio redist folder
+into an NSIS installer (`tauri bundle` with `src-tauri/tauri.release.conf.json`)
+and a portable zip, writes `SHA256SUMS.txt`, checks that the installed exe
+starts, loads those DLLs from its own folder and does not load `DirectML.dll`,
 and, for a `v*` tag, publishes them as a GitHub Release. The release notes are
 `.github/release-notes.md` plus GitHub's generated changelog.
 

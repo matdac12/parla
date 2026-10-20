@@ -686,11 +686,12 @@ timing, `--no-trim` skips the silence trim (very quiet recordings lose words
 to it), and `--tsv out.tsv` saves every row. Timings need an otherwise idle
 machine.
 
-The release installer and portable zip ship `parla.exe` with `DirectML.dll`.
-ONNX Runtime is statically linked from `ort`'s prebuilt CPU binaries; the
-prebuilt Windows runtime links DirectML even for CPU inference, so `DirectML.dll`
-is a load-time requirement and must sit beside `parla.exe`. No model is bundled,
-committed, or downloaded by CI.
+ONNX Runtime is statically linked from `ort`'s prebuilt CPU binaries. The
+prebuilt Windows runtime imports DirectML even for CPU inference, so `build.rs`
+delay-loads `DirectML.dll`; Parla only uses the CPU execution provider, so the
+DLL is never loaded and releases don't ship it. ONNX Runtime does need the
+Visual C++ runtime, which the installer and the portable zip ship next to
+`parla.exe`. No model is bundled, committed, or downloaded by CI.
 
 Optional inference smoke test: set `PARLA_PARAKEET_MODEL_DIR` (v3) and/or
 `PARLA_PARAKEET_ULTRA_MODEL_DIR` to an installed model folder and run
@@ -860,7 +861,7 @@ all of it in Windows' `audiodg`. Model unloading is not implemented.
 
 ## Known limitations / untested on Windows
 
-CI lints and unit-tests on the Windows runner. On a real Windows
+CI compiles and unit-tests on Linux and on the Windows runner. On a real Windows
 machine the maintainer has so far confirmed: the app starts in the tray; OpenAI,
 xAI and local Parakeet dictation paste into text fields; the benchmark view runs
 all three providers; hold-to-talk, hands-free, Esc cancel and the recording pill
@@ -903,8 +904,8 @@ the failure/retry path.
 - **Memory.** The recording pill keeps WebView2 loaded; secondary windows release
   their resources on close. The older baseline is in
   [Resource use](#resource-use).
-- **Linux.** Not checked by CI. It may compile, but insertion is a no-op and
-  Wayland is not a supported desktop.
+- **Linux.** Compiles and tests, but insertion is a no-op and Wayland is not a
+  supported desktop.
 
 ## Recognition hints and latency
 

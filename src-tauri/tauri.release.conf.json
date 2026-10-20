@@ -3,7 +3,10 @@
   "bundle": {
     "targets": ["nsis"],
     "resources": {
-      "target/release-stage/DirectML.dll": "DirectML.dll"
+      "target/release-stage/msvcp140.dll": "msvcp140.dll",
+      "target/release-stage/msvcp140_1.dll": "msvcp140_1.dll",
+      "target/release-stage/vcruntime140.dll": "vcruntime140.dll",
+      "target/release-stage/vcruntime140_1.dll": "vcruntime140_1.dll"
     },
     "windows": {
       "nsis": {
