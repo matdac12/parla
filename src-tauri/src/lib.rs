@@ -1,3 +1,4 @@
+use log::log_error;
 use tauri::Manager;
 
 mod autostart;
@@ -13,6 +14,7 @@ pub mod focus_probe;
 pub mod history;
 pub mod hotkey;
 pub mod inserter;
+pub mod log;
 pub mod models;
 mod overlay;
 mod pricing;
@@ -21,6 +23,7 @@ pub mod recorder;
 pub mod segment;
 pub mod settings;
 pub mod setup;
+pub mod single_instance;
 pub mod stats;
 pub mod streaming;
 pub mod timing;
@@ -58,12 +61,19 @@ fn opt_out_of_power_throttling() {
 }
 
 pub fn run() {
+    // First of all, before any window, tray icon or keyboard hook (PARLA-102).
+    if single_instance::claim() == single_instance::Claim::Running {
+        std::process::exit(0);
+    }
     #[cfg(windows)]
     opt_out_of_power_throttling();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                log::init(&dir);
+            }
             // Webviews can invoke commands as soon as they load, so all state
             // must be managed before anything that creates or shows a window.
             let settings_path = settings::path(app.handle())?;
@@ -73,7 +83,7 @@ pub fn run() {
                 &history::path(app.handle()).unwrap_or_default(),
             );
             let config = settings::load(&settings_path).unwrap_or_else(|error| {
-                eprintln!("{error}; using defaults until settings are repaired");
+                log_error!("{error}; using defaults until settings are repaired");
                 settings::Settings::default()
             });
             models::setup(app.handle(), &config)?;
@@ -88,15 +98,18 @@ pub fn run() {
             app.manage(commands::settings::SaveLock::default());
             app.manage(setup::MicMeter::default());
             if let Err(error) = history::setup(app) {
-                eprintln!("History disabled: {error}");
+                log_error!("History disabled: {error}");
             }
             if let Err(error) = stats::setup(app) {
-                eprintln!("Stats disabled: {error}");
+                log_error!("Stats disabled: {error}");
             }
             tray::setup(app)?;
             overlay::setup(app)?;
             flow::setup(app)?;
             updater::setup(app);
+            // A second launch asks this copy to show its window.
+            let handle = app.handle().clone();
+            single_instance::watch(move || tray::open_app(&handle, "home"));
             if first_run {
                 tray::open_setup(app.handle(), true);
             }
@@ -162,12 +175,12 @@ fn flush_on_exit(app: &tauri::AppHandle) {
     dim::shutdown();
     if let Some(history) = app.try_state::<history::History>() {
         if let Err(error) = history.drain(std::time::Duration::from_secs(1)) {
-            eprintln!("History shutdown drain failed: {error}");
+            log_error!("History shutdown drain failed: {error}");
         }
     }
     if let Some(stats) = app.try_state::<stats::StatsStore>() {
         if let Err(error) = stats.flush() {
-            eprintln!("Stats shutdown flush failed: {error}");
+            log_error!("Stats shutdown flush failed: {error}");
         }
     }
 }

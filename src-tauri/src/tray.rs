@@ -1,6 +1,7 @@
 //! Owns the tray icon: its right-click menu, its left-click flyout, and the
 //! lifecycle of the windows they open.
 
+use crate::log::log_error;
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -129,13 +130,13 @@ fn queue_window(app: &tauri::AppHandle, label: &str, view: &str) {
                         .and_then(|()| window.show())
                         .and_then(|()| window.set_focus())
                     {
-                        eprintln!("failed to show {label}: {error}");
+                        log_error!("failed to show {label}: {error}");
                     }
                 }
-                Err(error) => eprintln!("failed to open {label}: {error}"),
+                Err(error) => log_error!("failed to open {label}: {error}"),
             })
         {
-            eprintln!("failed to schedule window: {error}");
+            log_error!("failed to schedule window: {error}");
         }
     });
 }
@@ -295,7 +296,7 @@ fn on_tray_click(app: &tauri::AppHandle, button: MouseButton, icon: Rect) {
         .build();
     let window = match built {
         Ok(window) => window,
-        Err(error) => return eprintln!("failed to open the flyout: {error}"),
+        Err(error) => return log_error!("failed to open the flyout: {error}"),
     };
     // A borderless window that keeps its shadow is sized by tao from the
     // frame it measures, which on a window never shown still counts the
@@ -517,11 +518,11 @@ pub(crate) fn run_test_mic(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let Some(recorder) = crate::recorder::recorder() else {
-            eprintln!("test mic: no input device available");
+            log_error!("test mic: no input device available");
             return;
         };
         if let Err(error) = recorder.start() {
-            eprintln!("test mic: not starting ({error:#})");
+            log_error!("test mic: not starting ({error:#})");
             return;
         }
         std::thread::sleep(Duration::from_secs(3));
@@ -530,7 +531,7 @@ pub(crate) fn run_test_mic(app: &tauri::AppHandle) {
         let path = match app.path().app_data_dir() {
             Ok(dir) => dir.join("clips").join("test.wav"),
             Err(error) => {
-                eprintln!("test mic: resolving the app data dir failed: {error}");
+                log_error!("test mic: resolving the app data dir failed: {error}");
                 return;
             }
         };
@@ -544,7 +545,7 @@ pub(crate) fn run_test_mic(app: &tauri::AppHandle) {
                 );
                 reveal(&path);
             }
-            Err(error) => eprintln!("test mic: saving failed: {error:#}"),
+            Err(error) => log_error!("test mic: saving failed: {error:#}"),
         }
     });
 }

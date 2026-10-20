@@ -1,6 +1,7 @@
 //! Cached CPU inference, following Handy (MIT, Copyright (c) 2025 CJ Pais):
 //! https://github.com/cjpais/Handy/blob/main/src-tauri/src/managers/transcription.rs
 use super::{Availability, ProviderError, SttProvider};
+use crate::log::log_error;
 use crate::{
     clip::{Clip, SAMPLE_RATE},
     models,
@@ -126,7 +127,7 @@ pub fn sync_residency(settings: &Settings) {
             .name("parla-parakeet-warm".into())
             .spawn(move || {
                 if let Err(error) = warm(&settings) {
-                    eprintln!("Parakeet warm-up: {error}");
+                    log_error!("Parakeet warm-up: {error}");
                 }
             });
     } else {

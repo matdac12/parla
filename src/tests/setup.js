@@ -58,7 +58,7 @@ mockIPC(async (cmd, args) => {
     case "mic_meter_stop": clearInterval(metering); return;
     case "autostart_status": return structuredClone(autostart);
     case "set_autostart":
-      if (args.enabled && autostart.shortcut) throw new Error("Parla.lnk in your Startup folder already starts Parla at login. Delete it first, or Parla would start twice.");
+      if (args.enabled && autostart.shortcut) throw new Error("Parla.lnk in your Startup folder already starts Parla at login. Delete it first, or both would launch Parla and the second would just exit.");
       autostart.enabled = args.enabled;
       return structuredClone(autostart);
     default: return;

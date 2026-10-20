@@ -5,6 +5,7 @@
 //! https://docs.rs/crate/global-hotkey/0.8.0/source/src/platform_impl/windows/mod.rs
 //! https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
 
+use crate::log::log_error;
 use std::sync::{
     mpsc::{self, Sender},
     Arc, Mutex,
@@ -367,7 +368,7 @@ impl Hotkey {
         #[cfg(windows)]
         hotkey.start_listener(events)?;
         if let Err(error) = hotkey.set_shortcut(DEFAULT_SHORTCUT) {
-            eprintln!("Parla default hotkey disabled: {error}");
+            log_error!("Parla default hotkey disabled: {error}");
         }
         Ok(hotkey)
     }
@@ -422,7 +423,7 @@ impl Hotkey {
             .name("parla-keys".into())
             .spawn(move || {
                 if let Err(error) = windows_hook::run(state, events, ready) {
-                    eprintln!("Parla keyboard hook stopped: {error}");
+                    log_error!("Parla keyboard hook stopped: {error}");
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -466,7 +467,7 @@ fn replace_shortcut(
         if let Some(previous) = previous {
             if let Err(error) = backend.unregister(previous) {
                 if let Err(rollback) = backend.unregister(shortcut) {
-                    eprintln!("Parla shortcut rollback failed: {rollback}");
+                    log_error!("Parla shortcut rollback failed: {rollback}");
                 }
                 return Err(error.to_string());
             }

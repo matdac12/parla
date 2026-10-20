@@ -1,6 +1,7 @@
 //! Hotkey callbacks enqueue only. A responsive coordinator drops overlapping
 //! holds while one session worker owns recording, transcription and paste.
 pub use crate::failure::on_failure;
+use crate::log::log_error;
 use crate::{
     command_mode, focus_probe,
     hotkey::{Chord, Hotkey, HotkeyEvent},
@@ -149,7 +150,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let hotkey = match Hotkey::new(app.handle(), events) {
         Ok(hotkey) => hotkey,
         Err(error) => {
-            eprintln!("Parla hotkey disabled: {error}");
+            log_error!("Parla hotkey disabled: {error}");
             crate::hotkey::update_tooltip(app.handle(), false);
             return Ok(());
         }
@@ -165,7 +166,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Err(error) = crate::settings::apply(&app, &initial) {
-                eprintln!("Saved hotkey could not be applied: {error}");
+                log_error!("Saved hotkey could not be applied: {error}");
             }
             let busy = app.state::<DictationState>();
             let mut controller = Controller { phase: Phase::Idle };
@@ -228,7 +229,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Err(error) => {
                                 controller.phase = Phase::Idle;
-                                eprintln!("Cannot start dictation worker: {error}");
+                                log_error!("Cannot start dictation worker: {error}");
                             }
                         }
                     }

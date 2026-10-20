@@ -1,6 +1,7 @@
 //! Benchmark IPC (PARLA-10). Recording and runs happen on blocking workers.
 //! Both hold the `DictationState` guard, so a hotkey dictation cannot start
 //! (or paste) while the benchmark owns the microphone or the providers.
+use crate::log::log_error;
 use crate::{
     bench::{self, BenchRun, BenchSession},
     clip::Clip,
@@ -113,10 +114,10 @@ pub(crate) fn finish_recording(
                 crate::timing::DictationRecord::new(std::time::SystemTime::now(), "").id
             );
             if let Err(error) = clip.save_wav(&dir.join("clips").join(name)) {
-                eprintln!("bench: saving the clip failed: {error:#}");
+                log_error!("bench: saving the clip failed: {error:#}");
             }
         }
-        Err(error) => eprintln!("bench: resolving the app data dir failed: {error}"),
+        Err(error) => log_error!("bench: resolving the app data dir failed: {error}"),
     }
     session.set_clip(clip);
     Some(Ok(audio_ms))

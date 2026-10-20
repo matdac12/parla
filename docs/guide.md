@@ -207,18 +207,28 @@ are involved.
 - **A Parla shortcut in the Startup folder**
   (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`, a file named
   `Parla*.lnk`), which was the way to autostart before this setting, also starts
-  Parla. Turning the toggle on next to one would start it twice at login, so the
-  toggle is locked while the shortcut exists and says so, with **Open Startup
-  folder** to delete it. Parla never deletes it. If the value and a shortcut both
-  exist, the toggle warns and can still be turned off. The shortcut is detected
-  by name only; its target is not read.
+  Parla. Turning the toggle on next to one would launch it twice at login (the
+  second launch exits at once, see [One copy at a time](#one-copy-at-a-time)),
+  so the toggle is locked while the shortcut exists and says so, with **Open
+  Startup folder** to delete it. Parla never deletes it. If the value and a
+  shortcut both exist, the toggle notes it and can still be turned off. The
+  shortcut is detected by name only; its target is not read.
 - **Uninstalling** the installed copy removes the value when it starts that copy
   (the installer's uninstaller, `src-tauri/nsis/installer-hooks.nsh`). A value
   that starts another copy, such as a portable one, is left alone. An update
   never touches it. The portable zip has no uninstaller, so delete the value
   with the toggle before deleting the folder.
 - A login start has no console, so stderr logs of such a session go nowhere.
-  Parla has no log file.
+  Failures are also written to [the log file](#the-log-file).
+
+### One copy at a time
+
+Only one Parla runs per Windows user. Starting it again (the Start menu, a
+second login entry, a double click) installs no hotkey or tray icon: it asks
+the running Parla to open its main window, then exits right away with code 0.
+This is a named mutex checked before anything else starts, so it costs
+microseconds at startup and nothing while dictating. Debug builds can run
+beside the installed copy; see [development](development.md).
 
 ### Two ways to record
 
@@ -898,6 +908,23 @@ loads lazily on retry, and can be opened in an audio player. A new failure
 replaces it; a successful retry deletes it. It contains your voice and stays
 until replaced or successfully retried — delete it manually while Parla is
 closed if you don't want it kept.
+
+### The log file
+
+Failures are appended, one timestamped line each, to
+**`%APPDATA%\com.matdac6.parla\parla.log`** (local time, `2026-10-20 18:40:12 …`):
+a failed dictation or command run, a settings save that failed or was refused,
+Start with Windows and update errors, a failed history, stats or clipboard
+write, a panic. It is the place to look after an autostart session, which has
+no console. Stderr still prints everything it did.
+
+The log never records a successful dictation, and nothing is written while you
+dictate: a failure is written only after its notification is shown. The file
+never writes a transcript itself (an error message from a service could still quote some text), and key-shaped strings (`sk-…`, `xai-…`) are redacted. At about 1 MB it is renamed to
+`parla.log.1`, replacing the previous one, so the two files together stay under
+about 2 MB. A message identical to the one just written is skipped for a
+minute, so a failure that repeats every second (a missing microphone) does not
+flood the file. Delete them freely; Parla recreates the log on the next failure.
 
 Notification delivery on Windows is guaranteed only for installed apps with an
 AppUserModelID; development may show PowerShell's name and icon, and delivery

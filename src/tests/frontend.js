@@ -293,7 +293,7 @@ await check("Start with Windows applies at once and a Startup shortcut locks it"
   autostart = { ...autostart, enabled: true };
   window.dispatchEvent(new Event("focus"));
   await settle();
-  assert(!box.disabled && box.checked && note.textContent.includes("twice"), "Both-at-once was not reported");
+  assert(!box.disabled && box.checked && note.textContent.includes("both start Parla"), "Both-at-once was not reported");
   autostart = { ...autostart, enabled: false, shortcut: null };
 });
 await check("Run setup again opens the wizard", async () => {

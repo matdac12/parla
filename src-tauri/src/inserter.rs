@@ -5,6 +5,7 @@
 //! https://github.com/cjpais/Handy/blob/main/src-tauri/src/clipboard.rs
 //! https://github.com/cjpais/Handy/blob/main/src-tauri/src/input.rs
 
+use crate::log::log_error;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_RESTORE_DELAY_MS: u64 = 250;
@@ -95,7 +96,7 @@ pub fn give_back(borrowed: &Borrowed) {
     let _pending = pending_restore();
     match WindowsDesktop::new() {
         Ok(mut desktop) => give_back_to(&mut desktop, borrowed),
-        Err(error) => eprintln!("Parla clipboard give-back failed: {error}"),
+        Err(error) => log_error!("Parla clipboard give-back failed: {error}"),
     }
 }
 
@@ -297,7 +298,7 @@ fn schedule_restore(due: Instant) {
                     }
                 }
             })
-            .map_err(|error| eprintln!("Parla clipboard restore thread failed: {error}"))
+            .map_err(|error| log_error!("Parla clipboard restore thread failed: {error}"))
             .ok()
             .map(|_| sender)
     });
@@ -458,7 +459,7 @@ fn paste_over(
     // The text is already pasted, so a failed Enter is not a failed dictation.
     if send && result.is_ok() {
         if let Err(error) = desktop.send_enter() {
-            eprintln!("Parla auto-send Enter failed: {error}");
+            log_error!("Parla auto-send Enter failed: {error}");
         }
     }
     // Always attempt restoration, even if input injection failed.
@@ -477,7 +478,7 @@ fn restore_pending(desktop: &mut impl Desktop, pending: &mut Option<PendingResto
         return;
     };
     if let Err(error) = restore_clipboard(desktop, Some(&restore.pasted), &restore.saved) {
-        eprintln!("Parla clipboard restore failed after retries: {error}");
+        log_error!("Parla clipboard restore failed after retries: {error}");
     }
 }
 
@@ -510,7 +511,7 @@ fn give_back_to(desktop: &mut impl Desktop, borrowed: &Borrowed) {
         return;
     };
     if let Err(error) = restore_clipboard(desktop, borrowed.copied.as_deref(), saved) {
-        eprintln!("Parla clipboard give-back failed after retries: {error}");
+        log_error!("Parla clipboard give-back failed after retries: {error}");
     }
 }
 

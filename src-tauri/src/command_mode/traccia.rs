@@ -3,6 +3,7 @@
 //! nothing here runs at startup or on the dictation path (ADR-0001).
 
 use super::when::{Date, When};
+use crate::log::log_error;
 use crate::{provider::openai, settings::Settings};
 use reqwest::{
     blocking::RequestBuilder,
@@ -395,7 +396,7 @@ fn http() -> Result<&'static reqwest::blocking::Client, Error> {
             openai::client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|error| eprintln!("Cannot build the Traccia client: {error}"))
+                .map_err(|error| log_error!("Cannot build the Traccia client: {error}"))
                 .ok()
         })
         .as_ref()

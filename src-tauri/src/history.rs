@@ -10,6 +10,7 @@
 //! each chunk once and stops at the newest `limit` rows, keeping only a bounded
 //! partial-line carry. Corrupt lines are skipped and oversized lines dropped,
 //! so neither a large history nor a corrupt tail can grow memory without bound.
+use crate::log::log_error;
 use crate::timing::DictationRecord;
 use std::{
     fs::{File, OpenOptions},
@@ -200,7 +201,7 @@ impl Writer {
         let line = match serde_json::to_string(record) {
             Ok(line) => line,
             Err(error) => {
-                eprintln!("history: encoding a record failed: {error}");
+                log_error!("history: encoding a record failed: {error}");
                 return;
             }
         };
@@ -211,12 +212,12 @@ impl Writer {
         match self.file() {
             Ok(file) => {
                 if let Err(error) = file.write_all(&bytes) {
-                    eprintln!("history: append failed: {error}");
+                    log_error!("history: append failed: {error}");
                     // Reopen (and heal) before the next append.
                     self.file = None;
                 }
             }
-            Err(error) => eprintln!("history: opening the history file failed: {error}"),
+            Err(error) => log_error!("history: opening the history file failed: {error}"),
         }
     }
 

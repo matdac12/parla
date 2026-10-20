@@ -41,6 +41,20 @@ from the tray, the benchmark window from the main window's sidebar. Only the
 recording pill stays loaded at startup.
 All windows are created after their app state is registered.
 
+Parla runs once per Windows user: a second launch asks the running copy to show
+its window and exits (`src-tauri/src/single_instance.rs`, a named mutex). To run
+a debug build beside the installed Parla, give it its own name:
+
+```powershell
+$env:PARLA_INSTANCE = "dev"
+npm run tauri dev
+```
+
+`PARLA_INSTANCE` is read in debug builds only; a release build ignores it. It
+changes only the guard. Both copies still share the settings folder and
+compete for the same hotkey, so give the dev copy another one in Settings (or
+quit the installed copy) while you test.
+
 For a standalone executable, from the repository root:
 
 ```powershell

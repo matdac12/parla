@@ -1,4 +1,5 @@
 //! IPC for the main Parla window.
+use crate::log::log_error;
 use crate::stats::{StatsStore, Summary};
 use tauri::Manager;
 
@@ -31,7 +32,7 @@ pub fn flyout_ready(window: tauri::WebviewWindow, height: f64) -> Result<(), Str
         return Err("Only the flyout can show itself".into());
     }
     crate::tray::show_flyout(&window, height).map_err(|error| {
-        eprintln!("failed to show the flyout: {error}");
+        log_error!("failed to show the flyout: {error}");
         error.to_string()
     })
 }

@@ -21,7 +21,10 @@ pub async fn autostart_status() -> Result<autostart::Status, String> {
 /// refused (with the reason) while a Parla shortcut is in the Startup folder.
 #[tauri::command]
 pub async fn set_autostart(enabled: bool) -> Result<autostart::Status, String> {
-    blocking(move || autostart::set_current(enabled)).await
+    crate::log::logged(
+        "set_autostart",
+        blocking(move || autostart::set_current(enabled)).await,
+    )
 }
 
 /// Hands `target` (a folder, or a settings page such as `ms-settings:sound`)
