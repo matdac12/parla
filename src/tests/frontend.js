@@ -319,6 +319,9 @@ await check("an available update shows a banner whose Later hides it, and the Up
   auto.click();
   await settle();
   assert(updateStatus.auto === false && !auto.checked, "Update automatically did not turn off");
+  await emit("update://waiting", null);
+  await settle();
+  assert(document.getElementById("updates-state").textContent === "Finishing your dictation…", "Install did not say it waits for the dictation");
   await emit("update://changed", { ...updateStatus, available: null, last_check: 1_700_000_000 });
   await settle();
   assert(document.getElementById("update-dot").hidden && document.getElementById("updates-act").hidden, "A cleared update stayed visible");

@@ -10,11 +10,13 @@
 //! after Parla has been up for a couple of minutes. The webviews reach it
 //! through the commands below; they have no access to the plugin's own.
 
+use crate::autostart::{Registry, RunKey};
+use crate::flow::{DictationGuard, DictationState};
 use crate::log::log_error;
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,15 @@ const WINDOW: &str = "app";
 /// Sent when the status changes behind the window's back.
 const CHANGED: &str = "update://changed";
 const PROGRESS: &str = "update://progress";
+/// Sent when the download is in and Install waits for a dictation to end.
+const WAITING: &str = "update://waiting";
+/// How long Install waits for a dictation or command run to end, and how often
+/// it looks. A latched dictation can run for minutes; after that Install says
+/// so instead of hanging.
+const IDLE_LIMIT: Duration = Duration::from_secs(120);
+const IDLE_POLL: Duration = Duration::from_millis(100);
+const STILL_DICTATING: &str =
+    "Parla is still dictating. Finish the dictation, then press Install again.";
 
 /// What Parla remembers between runs, in `updater.json` next to
 /// `settings.json`. Not part of `Settings`: the toggle applies at once and
@@ -74,6 +85,8 @@ struct Inner {
     prefs: Prefs,
     available: Option<Update>,
     error: Option<String>,
+    /// Edits made so far; orders the writes of `updater.json`.
+    edits: u64,
 }
 
 pub struct UpdaterState {
@@ -83,6 +96,9 @@ pub struct UpdaterState {
     portable: bool,
     path: Option<PathBuf>,
     inner: Mutex<Inner>,
+    /// The last edit written to `updater.json` (and the lock for writing it);
+    /// see `edit_with`.
+    file: Mutex<u64>,
     /// One check or install at a time.
     busy: tokio::sync::Mutex<()>,
 }
@@ -94,15 +110,31 @@ impl UpdaterState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Changes the state and saves the preferences. The save happens under the
-    /// lock, so two edits cannot write the file out of order.
+    /// Changes the state and saves the preferences.
     fn edit<R>(&self, change: impl FnOnce(&mut Inner) -> R) -> R {
+        self.edit_with(change, |prefs| {
+            if let Some(path) = &self.path {
+                if let Err(error) = save(path, prefs) {
+                    log_error!("Could not save {}: {error}", path.display());
+                }
+            }
+        })
+    }
+
+    /// The disk write runs after the state lock is released, so a slow disk
+    /// never stalls `status` or the background tick, whoever else is writing.
+    /// Each edit is numbered under the state lock; a write that finds a newer
+    /// edit already on disk is skipped, so the file never goes back in time.
+    fn edit_with<R>(&self, change: impl FnOnce(&mut Inner) -> R, write: impl FnOnce(&Prefs)) -> R {
         let mut inner = self.lock();
         let result = change(&mut inner);
-        if let Some(path) = &self.path {
-            if let Err(error) = save(path, &inner.prefs) {
-                log_error!("Could not save {}: {error}", path.display());
-            }
+        inner.edits += 1;
+        let (edit, prefs) = (inner.edits, inner.prefs.clone());
+        drop(inner);
+        let mut written = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        if edit > *written {
+            write(&prefs);
+            *written = edit;
         }
         result
     }
@@ -160,13 +192,62 @@ fn key_configured(app: &AppHandle) -> bool {
         .is_some_and(|key| !key.trim().is_empty())
 }
 
-/// The installer leaves `uninstall.exe` beside `parla.exe`; the zip, and a
-/// build run from `target/`, do not.
+/// Where the NSIS installer records the install (its `UNINSTKEY`: the product
+/// name, `Parla`, not the identifier), with the folder as `InstallLocation`.
+/// The release installs per user, so only HKCU is read.
+const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Parla";
+
+/// `InstallLocation` as the installer wrote it: quoted, maybe with a trailing
+/// backslash. Compared the way Windows compares paths.
+fn same_folder(recorded: &str, dir: &Path) -> bool {
+    fn normal(path: &str) -> String {
+        path.trim()
+            .trim_matches('"')
+            .trim_start_matches(r"\\?\")
+            .replace('/', r"\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    }
+    normal(recorded) == normal(&dir.display().to_string())
+}
+
+/// Installed when the installer's record names this folder. With no record,
+/// the old test: `uninstall.exe` beside the exe. A zip run from another
+/// folder, or a build run from `target/`, has neither.
+fn portable_given(
+    dir: &Path,
+    recorded: Option<&str>,
+    uninstaller_beside: impl FnOnce() -> bool,
+) -> bool {
+    match recorded {
+        Some(location) => !same_folder(location, dir),
+        None => !uninstaller_beside(),
+    }
+}
+
 fn is_portable() -> bool {
-    std::env::current_exe()
+    let Some(dir) = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| !dir.join("uninstall.exe").is_file()))
-        .unwrap_or(true)
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
+        return true;
+    };
+    // Resolved on both sides, so a junction, a subst drive or an 8.3 name for
+    // the same folder is not taken for another folder.
+    let resolved = |path: &str| {
+        std::fs::canonicalize(path.trim().trim_matches('"'))
+            .map_or_else(|_| path.to_string(), |path| path.display().to_string())
+    };
+    let recorded = Registry::new(UNINSTALL_KEY)
+        .get("InstallLocation")
+        .ok()
+        .flatten()
+        .filter(|location| !location.trim().is_empty())
+        .map(|location| resolved(&location));
+    let dir = PathBuf::from(resolved(&dir.display().to_string()));
+    portable_given(&dir, recorded.as_deref(), || {
+        dir.join("uninstall.exe").is_file()
+    })
 }
 
 fn release_page(version: &str) -> String {
@@ -208,7 +289,9 @@ pub fn setup(app: &tauri::App) {
             prefs,
             available: None,
             error: None,
+            edits: 0,
         }),
+        file: Mutex::new(0),
         busy: tokio::sync::Mutex::new(()),
     });
     if enabled {
@@ -328,9 +411,39 @@ pub fn dismiss_update(app: AppHandle, state: State<'_, UpdaterState>) -> Status 
     status(&app)
 }
 
-/// Downloads the update, checks its signature, and hands over to the
-/// installer, which closes Parla and starts the new version. Returns only
-/// when something failed.
+/// Waits until `try_begin` hands out the dictation gate, i.e. no dictation or
+/// command run is in flight, and returns the guard. `on_wait` runs once, only
+/// if the first try fails. Gives up after `limit`.
+async fn wait_for_idle(
+    try_begin: impl Fn() -> Option<DictationGuard>,
+    on_wait: impl FnOnce(),
+    poll: Duration,
+    limit: Duration,
+) -> Result<DictationGuard, String> {
+    if let Some(guard) = try_begin() {
+        return Ok(guard);
+    }
+    on_wait();
+    let started = Instant::now();
+    loop {
+        tokio::time::sleep(poll).await;
+        if let Some(guard) = try_begin() {
+            return Ok(guard);
+        }
+        if started.elapsed() >= limit {
+            return Err(STILL_DICTATING.into());
+        }
+    }
+}
+
+/// Downloads the update and checks its signature. Then, once no dictation or
+/// command run is in flight, hands over to the installer, which closes Parla
+/// and starts the new version. Returns only when something failed.
+///
+/// The download may overlap a dictation; the install may not, since the
+/// installer ends the process. The install takes the gate a dictation takes
+/// and keeps it, so a hotkey press during the hand-over finds Parla busy. The
+/// dictation path gains nothing: it already does this one atomic swap.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, state: State<'_, UpdaterState>) -> Result<(), String> {
     if state.portable {
@@ -344,8 +457,13 @@ pub async fn install_update(app: AppHandle, state: State<'_, UpdaterState>) -> R
         .ok_or("There is no update to install.")?;
     let mut received = 0u64;
     let mut shown = 0u8;
-    update
-        .download_and_install(
+    let fail = |error: tauri_plugin_updater::Error| {
+        let message = format!("Update failed: {error}");
+        crate::log::error(&message);
+        message
+    };
+    let bytes = update
+        .download(
             |chunk, total| {
                 received += chunk as u64;
                 let percent = total
@@ -359,11 +477,18 @@ pub async fn install_update(app: AppHandle, state: State<'_, UpdaterState>) -> R
             || {},
         )
         .await
-        .map_err(|error| {
-            let message = format!("Update failed: {error}");
-            crate::log::error(&message);
-            message
-        })
+        .map_err(fail)?;
+    let dictation = app.state::<DictationState>();
+    let _gate = wait_for_idle(
+        || dictation.try_begin(),
+        || {
+            let _ = app.emit_to(WINDOW, WAITING, ());
+        },
+        IDLE_POLL,
+        IDLE_LIMIT,
+    )
+    .await?;
+    update.install(bytes).map_err(fail)
 }
 
 /// The portable build's link to the release.
@@ -416,6 +541,191 @@ mod tests {
             ..Prefs::default()
         };
         assert!(!prefs.due(10 * DAY));
+    }
+
+    fn state(path: Option<PathBuf>) -> UpdaterState {
+        UpdaterState {
+            enabled: true,
+            portable: false,
+            path,
+            inner: Mutex::new(Inner {
+                prefs: Prefs::default(),
+                available: None,
+                error: None,
+                edits: 0,
+            }),
+            file: Mutex::new(0),
+            busy: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    #[test]
+    fn the_prefs_write_runs_without_the_state_lock() {
+        let updater = state(None);
+        let mut written = None;
+        updater.edit_with(
+            |inner| inner.prefs.auto = false,
+            |prefs| {
+                // `status` and the background tick lock this while a write runs.
+                assert!(updater.inner.try_lock().is_ok(), "state locked during I/O");
+                written = Some(prefs.clone());
+            },
+        );
+        assert_eq!(written.map(|prefs| prefs.auto), Some(false));
+        assert!(!updater.lock().prefs.auto);
+    }
+
+    #[test]
+    fn edits_reach_the_file_in_order_and_leave_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("updater.json");
+        let updater = std::sync::Arc::new(state(Some(path.clone())));
+        updater.edit(|inner| inner.prefs.last_check = 1);
+        updater.edit(|inner| inner.prefs.dismissed = "0.2.0".into());
+        assert_eq!(
+            load(&path),
+            Prefs {
+                last_check: 1,
+                dismissed: "0.2.0".into(),
+                ..Prefs::default()
+            }
+        );
+        // Many edits at once: the file ends up holding the final state.
+        let threads: Vec<_> = (1..=16)
+            .map(|n| {
+                let updater = updater.clone();
+                std::thread::spawn(move || updater.edit(|inner| inner.prefs.last_check += n))
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let expected = updater.lock().prefs.clone();
+        assert_eq!(expected.last_check, 1 + (1..=16).sum::<u64>());
+        assert_eq!(load(&path), expected);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["updater.json"]);
+    }
+
+    #[test]
+    fn a_missing_or_broken_prefs_file_loads_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("updater.json");
+        assert_eq!(load(&path), Prefs::default());
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert_eq!(load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn the_install_location_matches_however_the_installer_wrote_it() {
+        let dir = Path::new(r"C:\Users\Zoë\AppData\Local\Parla");
+        for recorded in [
+            r"C:\Users\Zoë\AppData\Local\Parla",
+            r#""C:\Users\Zoë\AppData\Local\Parla""#,
+            r"C:\Users\Zoë\AppData\Local\Parla\",
+            r"c:\users\zoë\appdata\local\PARLA",
+            r"C:/Users/Zoë/AppData/Local/Parla",
+            r"\\?\C:\Users\Zoë\AppData\Local\Parla",
+            r#"  "C:\Users\Zoë\AppData\Local\Parla\"  "#,
+        ] {
+            assert!(same_folder(recorded, dir), "{recorded}");
+        }
+        for recorded in [
+            r"C:\Users\Zoë\AppData\Local\Parla2",
+            r"C:\Users\Zoë\AppData\Local",
+            r"D:\Parla",
+            "",
+        ] {
+            assert!(!same_folder(recorded, dir), "{recorded}");
+        }
+    }
+
+    #[test]
+    fn the_installers_record_decides_and_uninstall_exe_is_the_fallback() {
+        let dir = Path::new(r"C:\Users\me\AppData\Local\Parla");
+        let here = Some(r#""C:\Users\me\AppData\Local\Parla""#);
+        let elsewhere = Some(r"D:\Apps\Parla");
+        // The record names this folder: installed, with or without the uninstaller.
+        assert!(!portable_given(dir, here, || true));
+        assert!(!portable_given(dir, here, || false));
+        // The record names another folder: a zip beside an installed copy, even
+        // when a stale uninstall.exe sits next to it.
+        assert!(portable_given(dir, elsewhere, || false));
+        assert!(portable_given(dir, elsewhere, || true));
+        // No record: the old test.
+        assert!(!portable_given(dir, None, || true));
+        assert!(portable_given(dir, None, || false));
+    }
+
+    /// The installer writes `Uninstall\<productName>`; read from the config so
+    /// a rename cannot silently leave the lookup pointing at nothing.
+    #[test]
+    fn the_uninstall_key_is_the_one_the_installer_names_after_the_product() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let product = config["productName"].as_str().unwrap();
+        assert!(UNINSTALL_KEY.ends_with(&format!(r"\Uninstall\{product}")));
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tauri::async_runtime::block_on(future)
+    }
+
+    #[test]
+    fn install_goes_ahead_at_once_when_nothing_is_in_flight() {
+        let dictation = DictationState::default();
+        let mut waited = false;
+        let gate = block_on(wait_for_idle(
+            || dictation.try_begin(),
+            || waited = true,
+            Duration::from_millis(5),
+            Duration::from_millis(200),
+        ));
+        assert!(gate.is_ok() && !waited);
+        // It holds the gate, so a dictation started now is turned away.
+        assert!(dictation.try_begin().is_none());
+        drop(gate);
+        assert!(dictation.try_begin().is_some());
+    }
+
+    #[test]
+    fn install_waits_for_a_dictation_to_finish() {
+        let dictation = DictationState::default();
+        let running = dictation.try_begin().unwrap();
+        let finish = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(running);
+        });
+        let mut waited = 0;
+        let gate = block_on(wait_for_idle(
+            || dictation.try_begin(),
+            || waited += 1,
+            Duration::from_millis(5),
+            Duration::from_secs(5),
+        ));
+        finish.join().unwrap();
+        assert!(gate.is_ok());
+        assert_eq!(waited, 1, "the window is told once");
+    }
+
+    #[test]
+    fn install_gives_up_while_a_dictation_runs_and_leaves_it_alone() {
+        let dictation = DictationState::default();
+        let running = dictation.try_begin().unwrap();
+        let gate = block_on(wait_for_idle(
+            || dictation.try_begin(),
+            || {},
+            Duration::from_millis(5),
+            Duration::from_millis(40),
+        ));
+        assert_eq!(gate.err().as_deref(), Some(STILL_DICTATING));
+        // The dictation still owns the gate; once it ends, a retry works.
+        assert!(dictation.try_begin().is_none());
+        drop(running);
+        assert!(dictation.try_begin().is_some());
     }
 
     #[test]

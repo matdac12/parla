@@ -274,6 +274,27 @@ fn pending_restore() -> std::sync::MutexGuard<'static, Option<PendingRestore>> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Puts the user's clipboard back if a paste still owes it, once the restore
+/// is due (the target app may not have read the paste yet). For the exit path:
+/// the timer thread would not get to it.
+#[cfg(windows)]
+pub fn flush_pending_restore() {
+    let due = pending_restore().as_ref().map(|restore| restore.due);
+    let Some(due) = due else {
+        return;
+    };
+    // At most the restore delay; the lock is free meanwhile.
+    std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    let mut pending = pending_restore();
+    match WindowsDesktop::new() {
+        Ok(mut desktop) => restore_pending(&mut desktop, &mut pending),
+        Err(error) => log_error!("Parla clipboard restore on exit failed: {error}"),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn flush_pending_restore() {}
+
 /// Wakes the long-lived restore thread at `due`. A restore it cannot run stays
 /// pending, and the next paste carries the user's text forward.
 #[cfg(windows)]
