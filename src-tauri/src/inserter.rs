@@ -196,8 +196,10 @@ pub fn copied_empty_selection() -> bool {
             let pointer = GlobalLock(handle) as *const u8;
             if !pointer.is_null() {
                 units = std::slice::from_raw_parts(pointer, GlobalSize(handle))
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| u16::from_le_bytes(pair))
                     .collect();
                 GlobalUnlock(handle);
             }
