@@ -1,12 +1,32 @@
 name: CI
 
+# Lints and tests on Windows. The exe is built only by release.yml.
 on:
   push:
-  pull_request:
+    # Branches only: a v* tag runs release.yml instead.
+    branches: ['**']
+    tags-ignore: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - LICENSE
+      - .github/release-notes.md
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# A new push cancels the branch's running CI. Each main run gets its own group,
+# so main is never cancelled.
+concurrency:
+  group: ci-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # No debuginfo: smaller target dir and cache, faster links. Panics still print
+  # file:line; only RUST_BACKTRACE frames lose line numbers.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   windows:
@@ -17,16 +37,21 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      # The runner's preinstalled stable, which includes rustfmt and clippy.
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo fmt --version
+          cargo clippy --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          # Branch runs restore main's cache but skip the 2.5-6 min upload.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Branch runs restore main's cache but skip the upload.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/parla-94-windows-only-ci' }}
       # ort-sys downloads ONNX Runtime here and watches DLL links into target/.
       # rust-cache neither caches this dir nor keeps the links, so without these
       # two steps every run reruns ort-sys and rebuilds ort -> transcribe-rs.
-      # Saved on any branch, only on a miss: ~70 MB, once per Cargo.lock.
+      # Saved on any branch, only on a miss: ~45 MB, once per Cargo.lock.
       - uses: actions/cache@v4
         with:
           path: ~/AppData/Local/ort.pyke.io
@@ -34,65 +59,13 @@ jobs:
       - name: Relink ort's DLLs pruned by rust-cache
         shell: pwsh
         run: ./.github/scripts/relink-ort-dylibs.ps1
-      - run: npm ci
-      - run: cargo test --locked
-        working-directory: src-tauri
-      - run: npx tauri build --no-bundle
-      - name: Stage executable and materialize ONNX companion DLLs
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $release = Join-Path $PWD 'src-tauri/target/release'
-          $staging = Join-Path $env:RUNNER_TEMP 'parla-artifact'
-          New-Item -ItemType Directory -Path $staging -Force | Out-Null
-          $files = @((Get-Item (Join-Path $release 'parla.exe')))
-          $files += @(Get-ChildItem -Path $release -Filter '*.dll' -File)
-          foreach ($file in $files) {
-            # ort may create symlinks on admin runners. Upload actual bytes.
-            $source = $file.FullName
-            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-              $source = $file.ResolveLinkTarget($true).FullName
-            }
-            $destination = Join-Path $staging $file.Name
-            [IO.File]::Copy($source, $destination, $true)
-            if ((Get-Item $destination).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-              throw "Artifact contains a link instead of a real file: $destination"
-            }
-          }
-          $directml = Join-Path $staging 'DirectML.dll'
-          if (!(Test-Path $directml -PathType Leaf) -or (Get-Item $directml).Length -le 1MB) {
-            throw 'Artifact must contain a real DirectML.dll larger than 1 MB'
-          }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: parla-windows-x64
-          path: ${{ runner.temp }}/parla-artifact/
-          if-no-files-found: error
-
-  linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          # Branch runs restore main's cache but skip the 2.5-6 min upload.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev
       - run: cargo fmt --check
         working-directory: src-tauri
+      - run: npm ci && npm run build
+      # clippy checks the deps (rmeta), test builds them; --all-targets gives
+      # clippy the same dev-dependency features as test, so both share the
+      # build scripts and proc macros, and the cache keeps both trees.
       - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
       - run: cargo test --locked
         working-directory: src-tauri
-      - run: npm ci && npm run build
