@@ -126,64 +126,18 @@ pub use registry::Registry;
 
 #[cfg(windows)]
 mod registry {
-    //! The few advapi32 calls needed, declared here because the crate's
-    //! windows-sys features do not include the registry and Cargo.toml stays as
-    //! it is. `raw-dylib` links them the way windows-sys does.
     use super::RunKey;
-    use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
-
-    type Hkey = isize;
-    /// `(HKEY)(LONG)0x80000001`: sign-extended, as in winreg.h.
-    const HKEY_CURRENT_USER: Hkey = 0x8000_0001_u32 as i32 as isize;
-    const KEY_QUERY_VALUE: u32 = 0x0001;
-    const KEY_SET_VALUE: u32 = 0x0002;
-    const REG_SZ: u32 = 1;
-    const REG_EXPAND_SZ: u32 = 2;
-    const ERROR_SUCCESS: i32 = 0;
-    const ERROR_FILE_NOT_FOUND: i32 = 2;
-
-    #[link(name = "advapi32", kind = "raw-dylib")]
-    extern "system" {
-        fn RegCreateKeyExW(
-            key: Hkey,
-            subkey: *const u16,
-            reserved: u32,
-            class: *const u16,
-            options: u32,
-            access: u32,
-            security: *const c_void,
-            result: *mut Hkey,
-            disposition: *mut u32,
-        ) -> i32;
-        fn RegOpenKeyExW(
-            key: Hkey,
-            subkey: *const u16,
-            options: u32,
-            access: u32,
-            result: *mut Hkey,
-        ) -> i32;
-        fn RegSetValueExW(
-            key: Hkey,
-            name: *const u16,
-            reserved: u32,
-            kind: u32,
-            data: *const u8,
-            len: u32,
-        ) -> i32;
-        fn RegQueryValueExW(
-            key: Hkey,
-            name: *const u16,
-            reserved: *const u32,
-            kind: *mut u32,
-            data: *mut u8,
-            len: *mut u32,
-        ) -> i32;
-        fn RegDeleteValueW(key: Hkey, name: *const u16) -> i32;
-        #[cfg(test)]
-        fn RegDeleteKeyW(key: Hkey, subkey: *const u16) -> i32;
-        fn RegCloseKey(key: Hkey) -> i32;
-    }
+    #[cfg(test)]
+    use windows_sys::Win32::System::Registry::RegDeleteKeyW;
+    use windows_sys::Win32::{
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
+        System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+            RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_EXPAND_SZ,
+            REG_SZ,
+        },
+    };
 
     fn wide(text: &str) -> Vec<u16> {
         std::ffi::OsStr::new(text)
@@ -192,7 +146,7 @@ mod registry {
             .collect()
     }
 
-    fn check(code: i32, what: &str) -> Result<(), String> {
+    fn check(code: u32, what: &str) -> Result<(), String> {
         if code == ERROR_SUCCESS {
             Ok(())
         } else {
@@ -201,7 +155,7 @@ mod registry {
     }
 
     /// An open key, closed on drop.
-    struct Open(Hkey);
+    struct Open(HKEY);
     impl Drop for Open {
         fn drop(&mut self) {
             // SAFETY: a handle this process opened and has not closed.
@@ -223,7 +177,7 @@ mod registry {
 
         /// `None` when the key does not exist.
         fn open(&self, access: u32) -> Result<Option<Open>, String> {
-            let mut handle: Hkey = 0;
+            let mut handle: HKEY = std::ptr::null_mut();
             // SAFETY: a NUL-terminated subkey and a valid out pointer.
             let code = unsafe {
                 RegOpenKeyExW(
@@ -303,7 +257,7 @@ mod registry {
         }
 
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
-            let mut handle: Hkey = 0;
+            let mut handle: HKEY = std::ptr::null_mut();
             // SAFETY: a NUL-terminated subkey and valid out pointers; the key
             // is created when it is missing.
             let code = unsafe {
