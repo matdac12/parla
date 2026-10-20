@@ -63,11 +63,28 @@ mockIPC((command, args) => {
   }
 }, { shouldMockEvents: true });
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
+// The app renders in animation frames, and a minimized or background window
+// never runs them, which would stall every render below. Probe once and, if
+// frames are not coming, stand in a timer for them. Only timing changes.
+if (!await new Promise((resolve) => { requestAnimationFrame(() => resolve(true)); setTimeout(() => resolve(false), 500); })) {
+  window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), 16);
+}
 const initialSettings = new URLSearchParams(location.search).has("settings");
 location.hash = initialSettings ? "settings" : "home";
 await import("../app.ts");
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 await settle();
+// Wait for what a check asserts, not for a fixed time: the list renders in an
+// animation frame, which is slow for 2000 rows and throttled in the background.
+async function until(condition, message, timeout = 10_000) {
+  const deadline = performance.now() + timeout;
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`Timed out waiting for: ${message}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+// One animation frame, to let a render that must NOT happen have its chance.
+const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 window.frontendTestResults = [];
 async function check(name, test) {
   try { await test(); window.frontendTestResults.push({ name, passed: true }); }
@@ -86,7 +103,7 @@ await check("initial tray Settings route opens the first settings page", () => {
   assert(document.getElementById("page-home").hidden, "Home shown alongside Settings");
 });
 go("history");
-await settle();
+await until(() => rows().length === 200, "History to render its first page");
 await check("usage cards show audio time, cost and a projection after a week", async () => {
   const text = (id) => document.getElementById(id).textContent;
   assert(text("stat-words") === "100" && text("stat-dictations") === "10", "Counters missing");
@@ -108,7 +125,7 @@ await check("new dictation preserves existing rows and Copy feedback", async () 
   copy.click();
   await settle();
   await emit("dictation://recorded", { ...records[0], id: "live-1", text: "New words" });
-  await settle();
+  await until(() => firstRow().textContent.includes("New words"), "new row to render");
   assert(days.contains(existing), "Existing row was rebuilt");
   assert(copy.textContent === "Copied", "Copy feedback was reset");
   assert(firstRow().textContent.includes("New words"), "New row missing");
@@ -129,48 +146,47 @@ await check("hidden history defers DOM updates and catches up on return", async 
   assert(firstRow() === existing, "Hidden window rendered an update");
   Object.defineProperty(document, "hidden", { configurable: true, value: false });
   document.dispatchEvent(new Event("visibilitychange"));
-  await settle();
-  assert(firstRow().textContent.includes("Received while hidden"), "Deferred update was lost");
+  await until(() => firstRow().textContent.includes("Received while hidden"), "deferred update to render");
 });
 await check("search keeps matching row identity and handles no matches", async () => {
   const existing = firstRow();
   const search = document.getElementById("search");
   search.value = "Received while";
   search.dispatchEvent(new Event("input"));
-  await settle();
-  assert(firstRow() === existing && rows().length === 1, "Search rebuilt or lost its matching row");
+  await until(() => rows().length === 1, "search to narrow to one row");
+  assert(firstRow() === existing, "Search rebuilt or lost its matching row");
   search.value = "no-such-transcript";
   search.dispatchEvent(new Event("input"));
-  await settle();
-  assert(rows().length === 0 && !document.getElementById("empty").hidden, "Empty search state is incorrect");
+  await until(() => rows().length === 0 && !document.getElementById("empty").hidden, "empty search state");
   search.value = "";
   search.dispatchEvent(new Event("input"));
-  await settle();
+  await until(() => rows().length === 200, "cleared search to restore the list");
 });
 await check("history stays deferred while browsing Settings", async () => {
   go("transcription");
   const existing = firstRow();
   await emit("dictation://recorded", { ...records[0], id: "live-settings", text: "During settings" });
-  await settle();
+  await frame();
+  await frame();
   assert(firstRow() === existing, "History rendered while Settings was open");
   go("history");
-  await settle();
-  assert(firstRow().textContent.includes("During settings"), "Returning to History lost a live update");
+  await until(() => firstRow().textContent.includes("During settings"), "History to show the update made during Settings");
 });
 await check("history reads do not overwrite dictations arriving during the read", async () => {
   holdHistory = true;
   document.getElementById("more").click();
   await emit("dictation://recorded", { ...records[0], id: "live-race", text: "Arrived during read" });
   finishHistory();
-  await settle();
+  await until(() => rows().length === 400, "expanded history page to render");
   assert(firstRow().textContent.includes("Arrived during read"), "History read overwrote the live dictation");
-  assert(rows().length === 400, "Expanded page limit was not preserved");
 });
 await check("a full 2000-row history only adds one DOM row per dictation", async () => {
   while (!document.getElementById("more").hidden) {
+    const before = rows().length;
     document.getElementById("more").click();
-    await settle();
+    await until(() => rows().length > before, "next history page to render");
   }
+  await until(() => rows().length === 2000, "full history page to render");
   assert(rows().length === 2000, "Full history page was not loaded");
   const retained = firstRow();
   let added = 0;
@@ -179,7 +195,8 @@ await check("a full 2000-row history only adds one DOM row per dictation", async
   });
   observer.observe(days, { childList: true, subtree: true });
   await emit("dictation://recorded", { ...records[0], id: "live-full", text: "Newest in full history" });
-  await settle();
+  await until(() => firstRow().textContent.includes("Newest in full history"), "newest row to render");
+  await frame();
   observer.disconnect();
   assert(added === 1 && days.contains(retained), `Expected one inserted row, got ${added}`);
   assert(rows().length === 2000, "Full list exceeded its cap");
@@ -222,12 +239,11 @@ await check("compatibility preference saves without modifying language detection
 // (PARLA-59), so the check clears it here.
 await check("clearing history removes every row and shows the empty state", async () => {
   go("history");
-  await settle();
+  await until(() => !document.getElementById("clear").disabled, "History to render before clearing");
   document.getElementById("clear").click();
   document.getElementById("confirm-clear").click();
-  await settle();
+  await until(() => rows().length === 0, "cleared history to empty the list");
   assert(records.length === 0, "History file was not cleared");
-  assert(rows().length === 0, "Deleted transcripts remained visible");
   assert(!document.getElementById("empty").hidden, "Cleared history empty state was not shown");
 });
 await check("vocabulary edits save and unsafe entries are rejected", async () => {
