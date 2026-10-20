@@ -5,7 +5,7 @@ const html = new DOMParser().parseFromString(await (await fetch("/overlay.html")
 document.body.replaceChildren(...html.body.childNodes);
 window.ipcCalls = [];
 mockIPC((cmd, args) => { window.ipcCalls.push({ cmd, args }); }, { shouldMockEvents: true });
-await import("/src/overlay.ts");
+await import("../overlay.ts");
 const settle = () => new Promise(resolve => setTimeout(resolve, 280));
 await settle();
 window.overlayTestResults = [];

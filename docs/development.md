@@ -75,7 +75,7 @@ and from the repository root, `npm ci && npm run build` if you touched the
 frontend.
 
 Frontend regression checks use the real DOM/modules with Tauri's official IPC
-mocks: run `npm run dev`, then open
+mocks (pages in `src/tests/`): run `npm run dev`, then open
 `http://localhost:1420/tests/frontend.html` and the same URL with `?settings`.
 The page reports results for row reuse, hidden rendering, 2,000-row updates,
 history-read races, cross-window history clearing, and compatibility settings.
