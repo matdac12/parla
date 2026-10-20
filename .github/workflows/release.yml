@@ -105,6 +105,22 @@ jobs:
           name: parla-release
           path: ${{ env.OUT }}
           if-no-files-found: error
+      - name: Smoke-test the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'parla-installed'
+          $setup = Join-Path $env:OUT "Parla_${env:VERSION}_x64-setup.exe"
+          Start-Process $setup -ArgumentList '/S', "/D=$dir" -Wait
+          Get-ChildItem $dir | Format-Table Name, Length
+          $exe = Get-ChildItem $dir -Filter '*.exe' | Where-Object Name -ne 'uninstall.exe' | Select-Object -First 1
+          if (!$exe) { throw 'The installer did not install the app executable' }
+          if (!(Test-Path (Join-Path $dir 'DirectML.dll'))) { throw 'DirectML.dll is not next to the executable' }
+          # A missing DLL kills the process at load; a healthy Parla sits in the tray.
+          $app = Start-Process $exe.FullName -PassThru
+          Start-Sleep -Seconds 10
+          if ($app.HasExited) { throw "Parla exited at startup with code $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force
       - name: Publish the GitHub Release
         if: github.ref_type == 'tag'
         shell: pwsh
