@@ -30,7 +30,7 @@ pub fn check_command_hotkey(command: String, dictation: String) -> Option<String
 
 /// Serializes saves without holding SharedSettings across disk or main-thread IO.
 #[derive(Default)]
-pub struct SaveLock(std::sync::Mutex<()>);
+pub struct SaveLock(pub(crate) std::sync::Mutex<()>);
 
 /// PARLA-8 IPC result: { "warning": null | string }. Persistence failure rejects
 /// the invoke. A hotkey failure resolves with a warning: requested settings are

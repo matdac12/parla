@@ -101,6 +101,16 @@ pub(crate) fn open_bench(app: &tauri::AppHandle) {
     queue_window(app, "bench", "");
 }
 
+/// Opens the setup wizard: `first_run` on a new install (defaults on, as the
+/// page says), otherwise a rerun that starts from the current settings.
+pub(crate) fn open_setup(app: &tauri::AppHandle, first_run: bool) {
+    queue_window(
+        app,
+        crate::setup::LABEL,
+        if first_run { "first" } else { "again" },
+    );
+}
+
 fn queue_window(app: &tauri::AppHandle, label: &str, view: &str) {
     let handle = app.clone();
     let label = label.to_owned();
@@ -147,13 +157,23 @@ fn ensure_window(
         // app.ts maps an unknown page to Home.
         "app" => ("Parla", format!("app.html#{view}"), 900.0, 680.0),
         "bench" => ("Parla Benchmark", "bench.html".into(), 960.0, 640.0),
+        "setup" => ("Parla setup", format!("setup.html#{view}"), 560.0, 660.0),
         _ => return Err(tauri::Error::WindowNotFound),
     };
     let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(width, height)
+        .center()
         .visible(false)
         .build()?;
+    if label == crate::setup::LABEL {
+        let handle = app.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                crate::setup::closed(&handle);
+            }
+        });
+    }
     if label == "bench" {
         if let Some(session) = app.try_state::<crate::bench::BenchSession>() {
             session.open_window();

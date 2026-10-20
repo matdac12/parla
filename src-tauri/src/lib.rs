@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+mod autostart;
 mod bench;
 mod card;
 pub mod clip;
@@ -19,6 +20,7 @@ pub mod provider;
 pub mod recorder;
 pub mod segment;
 pub mod settings;
+pub mod setup;
 pub mod stats;
 pub mod streaming;
 pub mod timing;
@@ -62,7 +64,10 @@ pub fn run() {
         .setup(|app| {
             // Webviews can invoke commands as soon as they load, so all state
             // must be managed before anything that creates or shows a window.
-            let config = settings::load(&settings::path(app.handle())?).unwrap_or_else(|error| {
+            let settings_path = settings::path(app.handle())?;
+            // Decided before anything can write the file (PARLA-100).
+            let first_run = setup::is_first_run(&settings_path);
+            let config = settings::load(&settings_path).unwrap_or_else(|error| {
                 eprintln!("{error}; using defaults until settings are repaired");
                 settings::Settings::default()
             });
@@ -76,6 +81,7 @@ pub fn run() {
             app.manage(bench::BenchSession::default());
             app.manage(failure::RetryLock::default());
             app.manage(commands::settings::SaveLock::default());
+            app.manage(setup::MicMeter::default());
             if let Err(error) = history::setup(app) {
                 eprintln!("History disabled: {error}");
             }
@@ -85,6 +91,9 @@ pub fn run() {
             tray::setup(app)?;
             overlay::setup(app)?;
             flow::setup(app)?;
+            if first_run {
+                tray::open_setup(app.handle(), true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -116,6 +125,14 @@ pub fn run() {
             commands::app::flyout_ready,
             commands::app::quit,
             commands::app::test_mic,
+            commands::setup::autostart_status,
+            commands::setup::set_autostart,
+            commands::setup::open_startup_folder,
+            commands::setup::open_sound_settings,
+            commands::setup::mic_info,
+            commands::setup::mic_meter_start,
+            commands::setup::mic_meter_stop,
+            commands::setup::finish_setup,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Parla")

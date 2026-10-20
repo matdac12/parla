@@ -10,12 +10,14 @@ pub fn get_stats(app: tauri::AppHandle) -> Summary {
         .summary()
 }
 
-/// Shows the benchmark window, or the main window on one of its pages: History
-/// and Timings are pages there, not windows of their own.
+/// Shows the benchmark window, the setup wizard ("Run setup again" in
+/// Settings), or the main window on one of its pages: History and Timings are
+/// pages there, not windows of their own.
 #[tauri::command]
 pub fn open_window(app: tauri::AppHandle, name: String) -> Result<(), String> {
     match name.as_str() {
         "bench" => crate::tray::open_bench(&app),
+        "setup" => crate::tray::open_setup(&app, false),
         "home" | "history" | "timings" | "settings" => crate::tray::open_app(&app, &name),
         _ => return Err(format!("Unknown window: {name}")),
     }
