@@ -940,12 +940,23 @@ never touches the hotkey-to-paste path. When a newer version exists you get one
 notification, an **Install / Later** banner at the top of the Parla window and a
 dot on **Updates** in the sidebar. **Install** downloads the installer, checks
 its signature against the public key built into Parla, closes Parla and
-restarts it on the new version.
+restarts it on the new version. The download may overlap a dictation; the
+install does not. If a dictation or command run is in flight, Install shows
+"Finishing your dictation…" and starts the installer once it has ended (it
+gives up after two minutes with "Parla is still dictating", and you press
+Install again). Every Install button goes through that one wait, and while the
+installer takes over the hotkeys are ignored, like during a dictation.
 
 **Settings → Updates** shows the version, **Check for updates now**, and the
 **Update automatically** switch (the daily check; off means only the button
 checks). The switch and the time of the last check live in
 `%APPDATA%\com.matdac6.parla\updater.json`, not in `settings.json`.
+
+Parla counts as installed when the installer's uninstall entry
+(`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Parla`) names the
+folder `parla.exe` runs from; with no entry it falls back to an `uninstall.exe`
+beside the exe. A zip extracted straight into the installed folder is
+therefore still "installed", and an update replaces that folder's files.
 
 The portable zip cannot replace itself: it shows "new version available" and a
 button to the release page. A build without the updater public key (see

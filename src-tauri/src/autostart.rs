@@ -310,7 +310,7 @@ pub struct Registry;
 
 #[cfg(not(windows))]
 impl Registry {
-    fn new(_subkey: &str) -> Self {
+    pub fn new(_subkey: &str) -> Self {
         Self
     }
 }

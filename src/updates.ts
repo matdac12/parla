@@ -117,6 +117,7 @@ export function mountUpdates(): void {
     note = "";
     render(event.payload);
   });
+  void listen("update://waiting", () => say("Finishing your dictation…"));
   void listen<number>("update://progress", (event) => say(`Downloading the update… ${event.payload}%`));
   void invoke<UpdateStatus>("update_status").then(render);
 }
