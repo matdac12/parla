@@ -37,6 +37,9 @@
           <button type="button" data-page="clipboard">
             <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3" width="9" height="11" rx="1.3"/><path d="M6 3V2h4v1"/></svg>Clipboard
           </button>
+          <button type="button" data-page="updates">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v5.2M5.9 8.3 8 10.4l2.1-2.1"/></svg>Updates<span class="update-dot" id="update-dot" hidden></span>
+          </button>
         </nav>
         <div class="rail-foot">
           <button type="button" class="link" data-open="bench">Benchmark ↗</button>
@@ -45,6 +48,12 @@
       </aside>
 
       <main class="main" id="main">
+        <div class="banner banner-update" id="update-banner" role="status" hidden>
+          <span id="update-banner-text"></span>
+          <button type="button" class="small primary" id="update-banner-act"></button>
+          <button type="button" class="small" id="update-banner-later">Later</button>
+        </div>
+
         <section class="page" id="page-home" aria-label="Home">
           <div class="hero">
             <dl class="how" id="how"></dl>
@@ -321,6 +330,26 @@
                   How long Parla waits after pasting before restoring your previous clipboard (50–2000 ms).
                   Raise it if a slow app pastes the old clipboard.
                 </p>
+              </div>
+            </section>
+          </section>
+
+          <section class="page" id="page-updates" aria-labelledby="updates-title" hidden>
+            <h1 id="updates-title">Updates</h1>
+            <p class="lede">Parla updates itself from its GitHub releases. Every update is signed; Parla checks the signature before it installs.</p>
+            <section class="card">
+              <h2>Version</h2>
+              <p class="updates-version" id="updates-version"></p>
+              <p class="hint" id="updates-state" role="status" aria-live="polite"></p>
+              <div class="updates-actions">
+                <button type="button" id="updates-check">Check for updates now</button>
+                <button type="button" class="primary" id="updates-act" hidden></button>
+              </div>
+            </section>
+            <section class="card">
+              <div class="field">
+                <label><input id="updates-auto" type="checkbox" /> Update automatically</label>
+                <p class="hint">Look for a new version once a day in the background and tell you. Nothing installs until you choose Install.</p>
               </div>
             </section>
           </section>

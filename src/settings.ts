@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./settings.css";
+import { mountUpdates } from "./updates";
 import { engineStatus, formatSize, setStatusLine, type LocalModelStatus, type ProviderInfo, type Settings } from "./records";
 import { openStartupFolder, readAutostart, renderAutostart, writeAutostart, type AutostartStatus } from "./autostart";
 
@@ -1042,6 +1043,7 @@ function wireStartup(): void {
 async function main(): Promise<void> {
   wireForm();
   wireStartup();
+  mountUpdates();
   try {
     const [settings, providers] = await Promise.all([
       invoke<Settings>("get_settings"),

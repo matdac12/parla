@@ -898,6 +898,26 @@ AppUserModelID; development may show PowerShell's name and icon, and delivery
 from the unpackaged `parla.exe` is not guaranteed. The red tray icon and error
 tooltip are always set as a fallback.
 
+## Updates
+
+Installed copies update themselves from the GitHub Releases of
+`matdac12/parla`. About two minutes after start, and then at most once a day,
+Parla reads `latest.json` from the newest release in the background. This
+never touches the hotkey-to-paste path. When a newer version exists you get one
+notification, an **Install / Later** banner at the top of the Parla window and a
+dot on **Updates** in the sidebar. **Install** downloads the installer, checks
+its signature against the public key built into Parla, closes Parla and
+restarts it on the new version.
+
+**Settings → Updates** shows the version, **Check for updates now**, and the
+**Update automatically** switch (the daily check; off means only the button
+checks). The switch and the time of the last check live in
+`%APPDATA%\com.matdac6.parla\updater.json`, not in `settings.json`.
+
+The portable zip cannot replace itself: it shows "new version available" and a
+button to the release page. A build without the updater public key (see
+`docs/development.md`, Releasing → Updates) has no checks and no notices.
+
 ## Resource use
 
 Before windows were made lazy, measured once on a Windows 11 machine with the
@@ -930,10 +950,10 @@ behave as described. Still unchecked: Windows Terminal, elevated windows,
 lock/sleep recovery, notification delivery, clipboard restore under load, and
 the failure/retry path.
 
-- **No code signing or auto-update.** Releases ship an unsigned installer and
-  a portable zip, so Windows SmartScreen warns on first run. Signed behavior
-  (including reliable notifications) is untested. Install a newer release over
-  the old one to update.
+- **No code signing.** Releases ship an unsigned installer and a portable zip,
+  so Windows SmartScreen warns on first run. Signed behavior (including
+  reliable notifications) is untested. Updates are signed with a separate
+  updater key, which is not a Windows code-signing certificate.
 - **Setup wizard and Start with Windows.** Built on Windows and unit-tested
   (the registry round trip runs on a throwaway key), but the first-run window
   and a real login start still need a hand check.

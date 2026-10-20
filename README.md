@@ -16,6 +16,10 @@ for your user only, without an admin prompt, and adds Parla to the Start menu.
 If you don't want an installer, use the portable `.zip`: extract it, keep the
 folder together and run `parla.exe`.
 
+Installed copies update themselves: **Settings → Updates** checks for a new
+release and installs it after you click Install. The portable zip only tells
+you a new version is out.
+
 Parla isn't code-signed yet, so Windows SmartScreen will say *"Windows
 protected your PC"*. Click **More info → Run anyway**. Every release includes
 a `SHA256SUMS.txt` to check your download against.

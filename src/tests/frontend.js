@@ -16,6 +16,11 @@ let holdHistory = false;
 let finishHistory;
 let autostart = { supported: true, enabled: false, stale: false, command: null, shortcut: null };
 const ipcCalls = [];
+let updateStatus = {
+  enabled: true, current: "0.1.2", portable: false, auto: true, last_check: null,
+  available: "0.1.3",
+  dismissed: false, error: null,
+};
 async function emit(name, payload) {
   if (name === "dictation://recorded") records.unshift(payload);
   await emitEvent(name, payload);
@@ -44,6 +49,9 @@ mockIPC((command, args) => {
     case "clear_history": records.length = 0; return null;
     case "check_command_hotkey": return null;
     case "get_stats": return { total_words: 100, dictations: 10, audio_ms: (4 * 60 + 12) * 60_000, first_used_at: Date.now() - 30 * 86_400_000, cost_usd: 0.84, unpriced_audio_ms: 0, unpriced_llm_tokens: 0 };
+    case "update_status": case "check_for_update": return updateStatus;
+    case "dismiss_update": return (updateStatus = { ...updateStatus, dismissed: true });
+    case "set_auto_update": return (updateStatus = { ...updateStatus, auto: args.auto });
     case "save_settings": savedSettings = structuredClone(args.settings); return { warning: null };
     case "autostart_status": return structuredClone(autostart);
     case "set_autostart":
@@ -274,6 +282,29 @@ await check("Run setup again opens the wizard", async () => {
   await settle();
   const call = ipcCalls.find((entry) => entry.command === "open_window");
   assert(call?.args.name === "setup", "Run setup again did not open the setup window");
+});
+await check("an available update shows a banner whose Later hides it, and the Updates page keeps Install", async () => {
+  const banner = document.getElementById("update-banner");
+  assert(!banner.hidden && banner.textContent.includes("0.1.3"), "Update banner missing");
+  assert(!document.getElementById("update-dot").hidden, "Updates dot missing");
+  document.getElementById("update-banner-later").click();
+  await settle();
+  assert(banner.hidden, "Later did not hide the banner");
+  go("updates");
+  await settle();
+  assert(!document.getElementById("page-updates").hidden, "Updates page did not open");
+  assert(document.getElementById("updates-version").textContent === "Parla 0.1.2", "Current version missing");
+  assert(!document.getElementById("updates-act").hidden, "Install button hidden after Later");
+  const auto = document.getElementById("updates-auto");
+  auto.click();
+  await settle();
+  assert(updateStatus.auto === false && !auto.checked, "Update automatically did not turn off");
+  await emit("update://changed", { ...updateStatus, available: null, last_check: 1_700_000_000 });
+  await settle();
+  assert(document.getElementById("update-dot").hidden && document.getElementById("updates-act").hidden, "A cleared update stayed visible");
+  await emit("update://changed", { ...updateStatus, enabled: false, available: null });
+  await settle();
+  assert(document.getElementById("updates-check").disabled && auto.disabled, "Controls stayed on without a public key");
 });
 const report = document.createElement("pre");
 report.id = "test-results";

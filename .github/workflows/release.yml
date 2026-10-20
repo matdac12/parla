@@ -13,6 +13,7 @@ on:
       - .github/workflows/release.yml
       - .github/release-notes.md
       - src-tauri/tauri.release.conf.json
+      - src-tauri/tauri.updater.conf.json
   workflow_dispatch:
 
 permissions:
@@ -44,6 +45,25 @@ jobs:
             throw "Tag $env:GITHUB_REF_NAME does not match version $version"
           }
           "VERSION=$version" >> $env:GITHUB_ENV
+      # Updates (PARLA-101) need the private key (a secret) and the matching
+      # public key in tauri.conf.json. Without the secret the release is built
+      # as before, without update artifacts or latest.json; a tag must not
+      # publish that once the public key is set, or installed copies lose their feed.
+      - name: Check the updater signing setup
+        shell: pwsh
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pubkey = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          if ($env:SIGNING_KEY) {
+            if (!$pubkey) { throw 'TAURI_SIGNING_PRIVATE_KEY is set but plugins.updater.pubkey in src-tauri/tauri.conf.json is empty. See docs/development.md, Releasing > Updates.' }
+            'UPDATER=true' >> $env:GITHUB_ENV
+          } elseif ($pubkey -and $env:GITHUB_REF_TYPE -eq 'tag') {
+            throw 'plugins.updater.pubkey is set but the TAURI_SIGNING_PRIVATE_KEY secret is missing. See docs/development.md, Releasing > Updates.'
+          } else {
+            Write-Output '::warning::No update artifacts: the TAURI_SIGNING_PRIVATE_KEY secret is not set.'
+          }
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -94,7 +114,23 @@ jobs:
           Get-ChildItem $stage | Format-Table Name, Length
       # Bundles the parla.exe built above; tauri.release.conf.json adds the
       # NSIS target and installs the VC++ runtime DLLs next to the executable.
-      - run: npx tauri bundle --bundles nsis --config src-tauri/tauri.release.conf.json
+      # tauri.updater.conf.json also signs the installer (Parla_*-setup.exe.sig);
+      # the key reaches this step only, not the build scripts of the steps above.
+      - name: Bundle the installer
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $configs = @('--config', 'src-tauri/tauri.release.conf.json')
+          if ($env:UPDATER -eq 'true') {
+            $configs += '--config', 'src-tauri/tauri.updater.conf.json'
+          } else {
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+          }
+          npx tauri bundle --bundles nsis @configs
+          if ($LASTEXITCODE -ne 0) { throw "tauri bundle failed ($LASTEXITCODE)" }
       - name: Collect the installer, the portable zip and checksums
         shell: pwsh
         run: |
@@ -110,6 +146,24 @@ jobs:
           }
           # LF endings: CRLF makes `sha256sum -c` skip every line (PARLA-95).
           [IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), ($lines -join "`n") + "`n")
+          # The update feed, added after the checksums: they list what users download.
+          if ($env:UPDATER -eq 'true') {
+            $sig = "src-tauri/target/release/bundle/nsis/$setup.sig"
+            Copy-Item $sig (Join-Path $out "$setup.sig")
+            $latest = [ordered]@{
+              version = $env:VERSION
+              notes = "Parla $env:VERSION"
+              pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+              platforms = [ordered]@{
+                'windows-x86_64' = [ordered]@{
+                  signature = (Get-Content $sig -Raw).Trim()
+                  url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$setup"
+                }
+              }
+            }
+            [IO.File]::WriteAllText((Join-Path $out 'latest.json'), ($latest | ConvertTo-Json -Depth 5) + "`n")
+            Get-Content (Join-Path $out 'latest.json')
+          }
           Get-ChildItem $out | Format-Table Name, Length
           "OUT=$out" >> $env:GITHUB_ENV
       - uses: actions/upload-artifact@v4
@@ -134,6 +188,8 @@ jobs:
           Get-ChildItem $dir | Format-Table Name, Length
           $exe = Get-ChildItem $dir -Filter '*.exe' | Where-Object Name -ne 'uninstall.exe' | Select-Object -First 1
           if (!$exe) { throw 'The installer did not install the app executable' }
+          # Parla tells an installed copy from the portable one by this file.
+          if (!(Test-Path (Join-Path $dir 'uninstall.exe'))) { throw 'The installer did not write uninstall.exe' }
           if (Test-Path (Join-Path $dir 'DirectML.dll')) { throw 'The installer still ships DirectML.dll' }
           $runtime = @(Get-ChildItem 'src-tauri/target/release-stage' -Filter '*.dll' -File).Name
           if (!$runtime) { throw 'No VC++ runtime DLLs were staged' }

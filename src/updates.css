@@ -1,0 +1,24 @@
+/* The Updates page and the banner above every page. */
+.banner-update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 30px 0;
+  max-width: 580px;
+  padding: 10px 12px 10px 14px;
+  font-size: 0.9rem;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.banner-update > span { flex: 1; overflow-wrap: anywhere; }
+
+.update-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.updates-version { margin: 0 0 0.2rem; font-weight: 600; }
+.updates-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.9rem; }
