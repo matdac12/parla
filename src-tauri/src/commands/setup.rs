@@ -24,25 +24,26 @@ pub async fn set_autostart(enabled: bool) -> Result<autostart::Status, String> {
     blocking(move || autostart::set_current(enabled)).await
 }
 
-/// Opens the Startup folder in Explorer, so the user can delete a shortcut.
-#[tauri::command]
-pub fn open_startup_folder() -> Result<(), String> {
-    let dir = autostart::startup_dir().ok_or("The Startup folder is unknown")?;
+/// Hands `target` (a folder, or a settings page such as `ms-settings:sound`)
+/// to Explorer.
+fn explorer(target: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
     std::process::Command::new("explorer")
-        .arg(dir)
+        .arg(target)
         .spawn()
         .map(drop)
         .map_err(|error| error.to_string())
 }
 
+/// Opens the Startup folder, so the user can delete a shortcut.
+#[tauri::command]
+pub fn open_startup_folder() -> Result<(), String> {
+    explorer(autostart::startup_dir().ok_or("The Startup folder is unknown")?)
+}
+
 /// Windows' Sound settings, where the default microphone is chosen.
 #[tauri::command]
 pub fn open_sound_settings() -> Result<(), String> {
-    std::process::Command::new("explorer")
-        .arg("ms-settings:sound")
-        .spawn()
-        .map(drop)
-        .map_err(|error| error.to_string())
+    explorer("ms-settings:sound")
 }
 
 #[tauri::command]

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./settings.css";
-import { engineStatus, type LocalModelStatus, type ProviderInfo, type Settings } from "./records";
+import { engineStatus, formatSize, setStatusLine, type LocalModelStatus, type ProviderInfo, type Settings } from "./records";
 import { openStartupFolder, readAutostart, renderAutostart, writeAutostart, type AutostartStatus } from "./autostart";
 
 interface SaveResult {
@@ -181,12 +181,6 @@ function setProviderStatus(text: string, kind: "success" | "error" | "" = ""): v
   setStatusLine(els.providerStatus, text, kind);
 }
 
-/** A status line inside a card (the provider switch, Test connection). */
-function setStatusLine(element: HTMLElement, text: string, kind: "success" | "error" | ""): void {
-  element.textContent = text;
-  element.className = kind ? `status provider-status status-${kind}` : "status provider-status";
-}
-
 function updateDirty(): void {
   if (!state.settings) return;
   // An OpenAI key typed on the Transcription page enables the toggle before saving.
@@ -347,10 +341,6 @@ interface ParakeetUi {
   dir: HTMLParagraphElement;
   bar: HTMLDivElement;
   fill: HTMLDivElement;
-}
-
-function formatSize(bytes: number): string {
-  return `${Math.round(bytes / 1_000_000)} MB`;
 }
 
 // Set by setupParakeet so a successful save can re-check the model status.
@@ -1014,7 +1004,11 @@ function wireStartup(): void {
     repair: byId<HTMLButtonElement>("autostart-repair"),
   };
   const result = byId<HTMLParagraphElement>("autostart-result");
-  const show = (status: AutostartStatus): void => renderAutostart(controls, status);
+  let watching = false;
+  const show = (status: AutostartStatus): void => {
+    renderAutostart(controls, status);
+    watching = status.shortcut !== null;
+  };
   const refresh = (): void => {
     readAutostart().then(show, (error) => setStatusLine(result, `Could not read the setting: ${String(error)}`, "error"));
   };
@@ -1036,7 +1030,9 @@ function wireStartup(): void {
   controls.folder.addEventListener("click", () => void openStartupFolder());
   byId<HTMLButtonElement>("run-setup").addEventListener("click", () => void invoke("open_window", { name: "setup" }));
   // The shortcut is deleted in Explorer: re-read when the window is back.
-  window.addEventListener("focus", refresh);
+  window.addEventListener("focus", () => {
+    if (watching) refresh();
+  });
   refresh();
 }
 

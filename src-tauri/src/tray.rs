@@ -160,12 +160,14 @@ fn ensure_window(
         "setup" => ("Parla setup", format!("setup.html#{view}"), 560.0, 660.0),
         _ => return Err(tauri::Error::WindowNotFound),
     };
-    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(width, height)
-        .center()
-        .visible(false)
-        .build()?;
+        .visible(false);
+    if label == crate::setup::LABEL {
+        builder = builder.center();
+    }
+    let window = builder.build()?;
     if label == crate::setup::LABEL {
         let handle = app.clone();
         window.on_window_event(move |event| {

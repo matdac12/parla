@@ -30,7 +30,27 @@ pub fn check_command_hotkey(command: String, dictation: String) -> Option<String
 
 /// Serializes saves without holding SharedSettings across disk or main-thread IO.
 #[derive(Default)]
-pub struct SaveLock(pub(crate) std::sync::Mutex<()>);
+pub struct SaveLock(std::sync::Mutex<()>);
+
+/// Writes the current settings if there is no settings file yet (the setup
+/// wizard closing on a new install, PARLA-100); an existing file is never
+/// touched.
+pub(crate) fn save_if_absent(app: &tauri::AppHandle) {
+    let Ok(path) = settings::path(app) else {
+        return;
+    };
+    let serial = app.state::<SaveLock>();
+    let _save = serial.0.lock().unwrap_or_else(|e| e.into_inner());
+    if !crate::setup::is_first_run(&path) {
+        return;
+    }
+    let Ok(current) = snapshot(&app.state::<SharedSettings>()) else {
+        return;
+    };
+    if let Err(error) = settings::save(&path, &current) {
+        eprintln!("Setup: could not write the settings file: {error}");
+    }
+}
 
 /// PARLA-8 IPC result: { "warning": null | string }. Persistence failure rejects
 /// the invoke. A hotkey failure resolves with a warning: requested settings are

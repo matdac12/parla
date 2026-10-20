@@ -9,8 +9,10 @@ import {
   combo,
   el,
   engineStatus,
+  formatSize,
   must,
   parseShortcut,
+  setStatusLine,
   type DictationRecord,
   type LocalModelStatus,
   type ProviderInfo,
@@ -44,11 +46,7 @@ let busy = false;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms));
 
-/** A status line under a card, in the Settings colours. */
-function say(element: HTMLElement, text: string, kind: "success" | "error" | "" = ""): void {
-  element.textContent = text;
-  element.className = kind ? `status provider-status status-${kind}` : "status provider-status";
-}
+const say = setStatusLine;
 
 const getSettings = (): Promise<Settings> => invoke<Settings>("get_settings");
 
@@ -122,8 +120,7 @@ async function showMicName(): Promise<void> {
 }
 
 async function enterMic(): Promise<void> {
-  await showMicName();
-  await startMeter();
+  await Promise.all([showMicName(), startMeter()]);
 }
 
 // Same scale as the recording pill.
@@ -145,11 +142,16 @@ void listen("setup://meter-stopped", () => {
 });
 micAgain.addEventListener("click", () => void startMeter());
 must<HTMLButtonElement>("mic-sound").addEventListener("click", () => void invoke("open_sound_settings"));
-// Back from Windows' sound settings: the default may have changed, and the
-// recorder only re-checks it when a recording starts.
+// Back from Windows' sound settings: the recorder only re-checks the default
+// device when a recording starts, so a changed name restarts the meter.
 window.addEventListener("focus", () => {
   if (STEPS[index] !== "mic" || busy) return;
-  void stopMeter().then(enterMic);
+  const before = micName.textContent;
+  void invoke<string | null>("mic_info").then(async (name) => {
+    if ((name ?? "No microphone found") === before) return;
+    await stopMeter();
+    await enterMic();
+  }, () => undefined);
 });
 
 // --- Engine ----------------------------------------------------------------
@@ -173,7 +175,6 @@ let cloudId = "openai";
 let engineState: Awaited<ReturnType<typeof engineNow>> | null = null;
 let downloading = false;
 
-const formatSize = (bytes: number): string => `${Math.round(bytes / 1_000_000)} MB`;
 const cloudProviders = (): ProviderInfo[] => (engineState?.providers ?? []).filter((p) => p.id !== "parakeet");
 const providerLabel = (id: string): string => engineState?.providers.find((p) => p.id === id)?.display_name ?? id;
 /** The local model Settings has selected (v3 unless the user picked Ultra). */
@@ -264,7 +265,7 @@ void listen<{ id?: string; downloaded?: number; total?: number }>("model://progr
 async function applyEngine(): Promise<boolean> {
   if (!engineState) return true;
   say(engineResult, "");
-  const current = await getSettings();
+  const current = engineState.settings;
   if (engine === "cloud") {
     const key = keyInput.value.trim();
     const provider = engineState.providers.find((p) => p.id === cloudId);
@@ -274,10 +275,11 @@ async function applyEngine(): Promise<boolean> {
     }
     try {
       if (key !== "") {
-        // The whole settings go back, as from the Settings page; only the key differs.
-        const section = current.providers[cloudId] ?? {};
-        current.providers[cloudId] = { ...section, api_key: key };
-        await invoke("save_settings", { settings: current });
+        // The whole settings go back, as from the Settings page; only the key
+        // differs. Read fresh: the tray may have changed something since.
+        const latest = await getSettings();
+        latest.providers[cloudId] = { ...(latest.providers[cloudId] ?? {}), api_key: key };
+        await invoke("save_settings", { settings: latest });
       }
       if (current.active_provider !== cloudId) await invoke("select_provider", { id: cloudId });
     } catch (error) {
@@ -409,9 +411,11 @@ window.addEventListener("focus", () => {
 // --- Done ------------------------------------------------------------------
 
 async function enterDone(): Promise<void> {
-  const { settings, providers, models } = await engineNow();
+  const [{ settings, providers, models }, start] = await Promise.all([
+    engineNow(),
+    readAutostart().catch(() => null),
+  ]);
   const engineLine = engineStatus(settings, providers, models);
-  const start = await readAutostart().catch(() => null);
   const startText = start === null || !start.supported
     ? "Not available"
     : start.enabled ? "On" : start.shortcut !== null ? "Through a Startup shortcut" : "Off";

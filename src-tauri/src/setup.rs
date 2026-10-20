@@ -2,7 +2,7 @@
 //! microphone meter its Microphone step shows. The wizard is a normal window
 //! (`tray::open_setup`) on the normal settings and dictation code; nothing here
 //! sits on the hotkey-to-paste path.
-use crate::{commands::settings::SaveLock, flow::DictationGuard, settings::SharedSettings};
+use crate::flow::DictationGuard;
 use std::{
     path::Path,
     sync::{
@@ -25,32 +25,10 @@ pub fn is_first_run(settings_path: &Path) -> bool {
     )
 }
 
-/// Writes the current settings if there is no settings file, so that closing
-/// the wizard without changing anything still ends first-run. An existing file
-/// is never touched.
-pub fn ensure_settings_file(app: &tauri::AppHandle) {
-    let Ok(path) = crate::settings::path(app) else {
-        return;
-    };
-    let serial = app.state::<SaveLock>();
-    let _serial = serial.0.lock().unwrap_or_else(|e| e.into_inner());
-    if !is_first_run(&path) {
-        return;
-    }
-    let current = app
-        .state::<SharedSettings>()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if let Err(error) = crate::settings::save(&path, &current) {
-        eprintln!("Setup: could not write the settings file: {error}");
-    }
-}
-
 /// The wizard window is gone, however it closed.
 pub fn closed(app: &tauri::AppHandle) {
     app.state::<MicMeter>().stop();
-    ensure_settings_file(app);
+    crate::commands::settings::save_if_absent(app);
 }
 
 /// How long the meter listens before it stops itself, so a forgotten wizard
