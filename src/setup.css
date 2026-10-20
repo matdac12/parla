@@ -20,6 +20,7 @@
 
 .engine-panel { margin: 0.9rem 0 0; }
 .engine-key { margin: 0.9rem 0 0; }
+#autostart { accent-color: var(--accent); }
 #try-box { width: 100%; padding: 0.5rem 0.7rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: inherit; color: var(--text); background: var(--bg); resize: vertical; }
 #try-box:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .wiz-main .card .hotkey-row { margin-top: 0.8rem; }
