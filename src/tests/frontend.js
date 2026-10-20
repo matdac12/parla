@@ -42,7 +42,7 @@ mockIPC((command, args) => {
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
 const initialSettings = new URLSearchParams(location.search).has("settings");
 location.hash = initialSettings ? "settings" : "home";
-await import("/src/app.ts");
+await import("../app.ts");
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 await settle();
 window.frontendTestResults = [];

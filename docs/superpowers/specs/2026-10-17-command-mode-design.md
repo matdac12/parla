@@ -2,7 +2,7 @@
 
 > **Superseded in part (2026-10-17, PARLA-54):** text replies no longer paste automatically. They open in the Card (ADR-0003, `2026-10-17-safety-net-and-card-design.md`). The rest of this spec stands.
 
-Design settled with Mattia on 2026-10-17 in a grill-with-docs session. Vocabulary: `GLOSSARY.md`. Decisions with lasting weight: ADR-0001 (command mode is the only LLM path; dictation stays raw) and ADR-0002 (one LLM agent with allowlisted tools, which absorbs the PARLA-55 voice launcher).
+Design settled with Mattia on 2026-10-17 in a grill-with-docs session. Vocabulary: `docs/GLOSSARY.md`. Decisions with lasting weight: ADR-0001 (command mode is the only LLM path; dictation stays raw) and ADR-0002 (one LLM agent with allowlisted tools, which absorbs the PARLA-55 voice launcher).
 
 ## Problem Statement
 

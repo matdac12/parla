@@ -119,9 +119,9 @@ Measure first-caption latency; faster connection alone is not a proven UX gain.
 - `src-tauri/src/streaming/{mod,audio,transport,protocol}.rs` — cancellation, bounded feed, PCM conversion, setup/finalization and reconciliation.
 - `src-tauri/src/flow.rs` — release/cancel boundary, streaming selection, fallback and single paste.
 - `src-tauri/src/provider/{openai,xai}.rs` — batch request builders and config resolution.
-- `src-tauri/src/settings.rs`, `src-tauri/src/commands/settings.rs`, `src/settings.ts`, `app.html` — persistence/UI. Provider radio choices now auto-save via select_provider without saving other drafts.
+- `src-tauri/src/settings.rs`, `src-tauri/src/commands/settings.rs`, `src/settings.ts`, `src/app.html` — persistence/UI. Provider radio choices now auto-save via select_provider without saving other drafts.
 - `src-tauri/src/timing.rs` — backward-compatible latency records and mode/model metadata.
-- `tests/frontend.html/js`, `tests/overlay.html/js` — actual UI with mocked IPC.
+- `src/tests/frontend.html/js`, `src/tests/overlay.html/js` — actual UI with mocked IPC.
 - `README.md` — build/test commands and runtime packaging.
 
 Verify current official API schemas before coding:

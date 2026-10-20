@@ -59,8 +59,8 @@ is selected before the existing batch provider and single paste call.
 
 ## Task 3: Caption companion and settings
 
-**Files:** overlay.rs, overlay.ts/css/html; settings.rs/ts; app.html;
-new tests/overlay.html/js; existing tests/frontend.js.
+**Files:** overlay.rs, overlay.ts/css/html; settings.rs/ts; src/app.html;
+new src/tests/overlay.html/js; existing src/tests/frontend.js.
 
 **Interfaces:** Generation-tagged caption reset/update/clear events. Explicit
 `streaming_enabled` and `live_captions` settings, both default true.
