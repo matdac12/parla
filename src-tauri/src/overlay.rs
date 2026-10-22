@@ -757,7 +757,7 @@ mod tests {
 }
 
 #[cfg(all(test, windows, feature = "native-smoke"))]
-mod native_tests {
+pub(crate) mod native_tests {
     use super::*;
     use std::sync::Mutex;
 
@@ -793,7 +793,7 @@ mod native_tests {
         fn mouse_event(flags: u32, dx: i32, dy: i32, data: i32, extra: usize);
     }
 
-    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    pub(crate) fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !done() {
             assert!(std::time::Instant::now() < deadline, "{what}");

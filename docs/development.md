@@ -103,6 +103,14 @@ running, run from `src-tauri/`:
 cargo test --locked --features native-smoke --lib secondary_windows_are_lazy_and_can_be_destroyed_and_reopened -- --ignored --nocapture
 ```
 
+A second one (PARLA-106) checks that a keyboard hook still sees key-downs while
+a Parla window is in front. It takes the focus and sends F24, so run it with
+nobody typing; it needs no dev server:
+
+```powershell
+cargo test --locked --features native-smoke --lib a_parla_window_in_front_leaves_key_downs_to_keyboard_hooks -- --ignored
+```
+
 Windows is the target, and the only platform CI checks. Parla may still compile
 on Linux, but nothing checks that it does; there, text insertion is a no-op that
 returns an unsupported error, and the global shortcut backend needs a supported

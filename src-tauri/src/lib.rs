@@ -60,6 +60,15 @@ fn opt_out_of_power_throttling() {
     }
 }
 
+/// Tauri's builder with the raw keyboard and mouse input tao asks for by
+/// default turned off. Parla reads none of it (Tauri never forwards device
+/// events), and while a Parla window is in front that registration stops
+/// Windows from handing key-downs to Parla's low-level hook and to the hooks
+/// after it, such as another app's shortcuts (PARLA-106).
+fn builder() -> tauri::Builder<tauri::Wry> {
+    tauri::Builder::default().device_event_filter(tauri::DeviceEventFilter::Always)
+}
+
 pub fn run() {
     // First of all, before any window, tray icon or keyboard hook (PARLA-102).
     if single_instance::claim() == single_instance::Claim::Running {
@@ -67,7 +76,7 @@ pub fn run() {
     }
     #[cfg(windows)]
     opt_out_of_power_throttling();
-    tauri::Builder::default()
+    builder()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -183,5 +192,118 @@ fn flush_on_exit(app: &tauri::AppHandle) {
         if let Err(error) = stats.flush() {
             log_error!("Stats shutdown flush failed: {error}");
         }
+    }
+}
+
+#[cfg(all(test, windows, feature = "native-smoke"))]
+mod native_tests {
+    use crate::overlay::native_tests::wait_until;
+    use std::{
+        ptr::null_mut,
+        sync::atomic::{AtomicU32, Ordering},
+        time::Duration,
+    };
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    use windows_sys::Win32::{
+        Foundation::{LPARAM, LRESULT, WPARAM},
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        UI::{
+            Input::KeyboardAndMouse::VK_F24,
+            WindowsAndMessaging::{
+                CallNextHookEx, GetForegroundWindow, GetMessageW, PostThreadMessageW,
+                SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
+                WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT,
+            },
+        },
+    };
+
+    /// F24 key-downs the test hook saw.
+    static DOWNS: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "system" fn count_downs(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code == HC_ACTION as i32 && wparam as u32 == WM_KEYDOWN {
+            // SAFETY: HC_ACTION keyboard notifications carry a KBDLLHOOKSTRUCT.
+            let input = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            if input.vkCode == u32::from(VK_F24) {
+                DOWNS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        // SAFETY: forwards every event.
+        unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
+    }
+
+    /// A hook thread like Parla's (`hotkey::windows_hook::run`). Its hook is
+    /// the newest, so first in the chain, as Parla's is after each refresh:
+    /// the bug needs that. Returns the thread's id once the hook is in.
+    fn hook_thread() -> u32 {
+        let (id, installed) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: plain user32 calls on this thread, which owns the hook.
+            unsafe {
+                let hook = SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(count_downs),
+                    GetModuleHandleW(null_mut()),
+                    0,
+                );
+                assert!(!hook.is_null(), "SetWindowsHookExW failed");
+                id.send(GetCurrentThreadId()).unwrap();
+                let mut message = std::mem::zeroed::<MSG>();
+                while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {}
+                UnhookWindowsHookEx(hook);
+            }
+        });
+        installed.recv().unwrap()
+    }
+
+    /// PARLA-106: with one of Parla's windows in front, a low-level hook in
+    /// Parla's process saw no key-downs at all (its hotkey did nothing, and
+    /// other apps' shortcuts broke) while tao had raw input registered. Takes
+    /// the focus and sends F24; run explicitly with nobody typing.
+    #[test]
+    #[ignore = "takes the focus and sends F24; needs a Windows desktop"]
+    fn a_parla_window_in_front_leaves_key_downs_to_keyboard_hooks() {
+        use enigo::{Direction, Key, Keyboard};
+        let mut context = tauri::generate_context!();
+        // The test runner does not embed the app's icon resource.
+        context.set_default_window_icon(Some(tauri::image::Image::new_owned(vec![0; 4], 1, 1)));
+        let app = super::builder()
+            .any_thread()
+            .setup(|app| {
+                let blank = WebviewUrl::External("about:blank".parse().unwrap());
+                WebviewWindowBuilder::new(app, "probe", blank).build()?;
+                Ok(())
+            })
+            .build(context)
+            .unwrap();
+        let handle = app.handle().clone();
+        let (result, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Let WebView2 start and take the focus inside the window.
+                std::thread::sleep(Duration::from_secs(3));
+                let window = handle.get_webview_window("probe").unwrap();
+                window.set_focus().unwrap();
+                let hwnd = window.hwnd().unwrap().0;
+                // SAFETY: read-only user32 query.
+                wait_until("the window never came to the front", || unsafe {
+                    GetForegroundWindow() == hwnd
+                });
+                let hooks = hook_thread();
+                enigo::Enigo::new(&enigo::Settings::default())
+                    .unwrap()
+                    .key(Key::F24, Direction::Click)
+                    .unwrap();
+                wait_until("the hook never saw the key-down", || {
+                    DOWNS.load(Ordering::SeqCst) >= 1
+                });
+                // SAFETY: ends the hook thread's message loop.
+                unsafe { PostThreadMessageW(hooks, WM_QUIT, 0, 0) };
+            }));
+            result.send(check.is_ok()).unwrap();
+            handle.exit(0);
+        });
+        app.run_return(|_, _| {});
+        assert!(outcome.recv().unwrap());
     }
 }
