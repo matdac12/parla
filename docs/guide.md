@@ -150,6 +150,7 @@ so it costs nothing while closed.
 - **Test mic (3 s)** — records three seconds from the default microphone, saves
   it as `clips/test.wav` in the app data directory, and reveals the file in
   Explorer.
+- **Copy last transcription** — puts the newest dictation's text on the clipboard.
 - **Retry last failed dictation** — enabled only while a recovery clip exists.
 - **Quit Parla** — exits Parla.
 

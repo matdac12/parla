@@ -17,10 +17,11 @@ use tauri::{
 /// The right-click menu, top to bottom, as `(id, label)`. The first item is
 /// the default (bold on Windows). History and Timings live in the app window;
 /// Benchmark is linked from its sidebar rail.
-const MENU: [(&str, &str); 5] = [
+const MENU: [(&str, &str); 6] = [
     ("open", "Open Parla"),
     ("settings", "Settings…"),
     ("test_mic", "Test mic (3 s)"),
+    ("copy_last", "Copy last transcription"),
     (RETRY, "Retry last failed dictation"),
     ("quit", "Quit Parla"),
 ];
@@ -68,6 +69,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
             "open" => open_app(app, "home"),
             "settings" => open_app(app, "settings"),
             "test_mic" => run_test_mic(app),
+            "copy_last" => copy_last_transcription(app),
             RETRY => crate::commands::failure::retry_from_tray(app.clone()),
             "quit" => app.exit(0),
             _ => {}
@@ -510,6 +512,30 @@ fn flyout_origin(
     )
 }
 
+/// Puts the newest successful dictation's text on the clipboard. Off the menu
+/// callback: the history read waits on its writer thread.
+fn copy_last_transcription(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let last = app
+            .try_state::<crate::history::History>()
+            .and_then(|history| {
+                history
+                    .load_recent_kinds(20, &["dictation"])
+                    .into_iter()
+                    .find(|row| row.error.is_none() && !row.text.trim().is_empty())
+            });
+        match last {
+            Some(row) => {
+                if let Err(error) = crate::inserter::copy_text(&row.text) {
+                    log_error!("copy last transcription: {error}");
+                }
+            }
+            None => log_error!("copy last transcription: no transcription in history"),
+        }
+    });
+}
+
 /// Records three seconds from the default microphone, saves it as
 /// `clips/test.wav` in the app data dir, and logs the path. Everything runs on
 /// a spawned thread: acquiring the recorder can block while the device opens,
@@ -684,7 +710,7 @@ mod menu_tests {
     use super::MENU;
 
     #[test]
-    fn right_click_menu_is_the_five_items_with_open_first() {
+    fn right_click_menu_is_the_six_items_with_open_first() {
         let labels: Vec<_> = MENU.iter().map(|&(_, label)| label).collect();
         assert_eq!(
             labels,
@@ -692,6 +718,7 @@ mod menu_tests {
                 "Open Parla",
                 "Settings…",
                 "Test mic (3 s)",
+                "Copy last transcription",
                 "Retry last failed dictation",
                 "Quit Parla",
             ]
