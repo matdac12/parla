@@ -12,8 +12,7 @@ use std::{
 };
 
 use tauri::{
-    Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
-    WebviewWindowBuilder,
+    Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
 };
 
 const LABEL: &str = "overlay";
