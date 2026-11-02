@@ -11,7 +11,10 @@ use std::{
     time::Duration,
 };
 
-use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindowBuilder,
+};
 
 const LABEL: &str = "overlay";
 const WIDTH: f64 = 144.0;
@@ -114,7 +117,15 @@ fn place(app: &tauri::AppHandle) -> Option<(PhysicalPosition<i32>, f64)> {
     let x = origin.x + ((f64::from(size.width) - width * scale) / 2.0) as i32;
     let y = origin.y + (f64::from(size.height) - (height + 72.0) * scale) as i32;
     let at = PhysicalPosition::new(x, y);
+    // Move first, then size in physical pixels at the monitor's scale: the
+    // window keeps the size it had on the previous monitor (`Size::apply` only
+    // resizes when the logical size changes), which clips the pill after a
+    // dock/undock or any scale change.
     let _ = window.set_position(at);
+    let _ = window.set_size(PhysicalSize::new(
+        (width * scale).round() as u32,
+        (height * scale).round() as u32,
+    ));
     Some((at, scale))
 }
 
