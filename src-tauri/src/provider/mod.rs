@@ -50,6 +50,71 @@ pub fn unless_cancelled<T>(
     None
 }
 
+/// Sends `request`, and once more when no connection could be made: nothing
+/// reached the server, so the retry cannot double a transcription (PARLA-108).
+/// The body must be in memory (`Body::buffer`) for the request to be resent.
+pub(crate) fn execute(
+    client: &reqwest::blocking::Client,
+    request: reqwest::blocking::Request,
+) -> Result<reqwest::blocking::Response, ProviderError> {
+    let again = request.try_clone();
+    match (client.execute(request), again) {
+        (Err(error), Some(again)) if error.is_connect() => {
+            // The cached address may have gone stale: look it up again for
+            // the next request, without waiting for the answer here.
+            if let Some(host) = again.url().host_str() {
+                crate::dns::refresh(host);
+            }
+            crate::log::error(&format!(
+                "Connection failed, retrying once: {}",
+                transport_error(error)
+            ));
+            client.execute(again).map_err(transport_error)
+        }
+        (result, _) => result.map_err(transport_error),
+    }
+}
+
+/// Reads a multipart body into memory. Streamed, a failed connection surfaces
+/// as reqwest's "request or response body error" with its cause dropped, and
+/// the request cannot be sent twice. The clip is in memory already: one copy.
+pub(crate) fn buffered(
+    mut request: reqwest::blocking::Request,
+) -> Result<reqwest::blocking::Request, ProviderError> {
+    if let Some(body) = request.body_mut() {
+        body.buffer().map_err(transport_error)?;
+    }
+    Ok(request)
+}
+
+/// A connect timeout is a failed connection, not the 30 s request timeout.
+/// The detail is reqwest's error chain, never a header or the URL.
+pub(crate) fn transport_error(error: reqwest::Error) -> ProviderError {
+    classify_transport(
+        error.is_connect(),
+        error.is_timeout(),
+        error_chain(&error.without_url()),
+    )
+}
+fn classify_transport(connect: bool, timeout: bool, detail: String) -> ProviderError {
+    if timeout && !connect {
+        ProviderError::Timeout
+    } else {
+        ProviderError::Network(detail)
+    }
+}
+/// "error sending request: client error (Connect): tcp connect error: ..."
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut chain = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Availability {
     Available,
@@ -155,5 +220,75 @@ mod privacy_tests {
             ProviderError::Auth("private body".into()).to_string(),
             "Authentication failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use crate::{clip::Clip, settings::Settings};
+    use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+    use std::{
+        net::{SocketAddr, TcpListener},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    #[test]
+    fn a_connect_timeout_is_a_failed_connection_not_the_request_timeout() {
+        assert_eq!(
+            classify_transport(false, true, "timed out".into()),
+            ProviderError::Timeout
+        );
+        for connect in [true, false] {
+            assert_eq!(
+                classify_transport(connect, connect, "tcp connect error".into()),
+                ProviderError::Network("tcp connect error".into())
+            );
+        }
+    }
+
+    /// Sends every host to a port nothing listens on, counting the lookups:
+    /// one per connection attempt.
+    struct Refused(SocketAddr, Arc<AtomicUsize>);
+    impl Resolve for Refused {
+        fn resolve(&self, _: Name) -> Resolving {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            let addr = self.0;
+            Box::pin(async move {
+                let addrs: Addrs = Box::new(std::iter::once(addr));
+                Ok(addrs)
+            })
+        }
+    }
+
+    #[test]
+    fn a_failed_connection_is_retried_once_and_named_as_such() {
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let client = reqwest::blocking::Client::builder()
+            .dns_resolver(Arc::new(Refused(addr, lookups.clone())))
+            .build()
+            .unwrap();
+        let mut settings = Settings::default();
+        settings
+            .providers
+            .insert("openai".into(), serde_json::json!({"api_key": "test-key"}));
+        // 22 s of audio, ~700 KB: streamed, this upload hid the failed
+        // connection behind "request or response body error".
+        let clip = Clip::new(vec![0; 16_000 * 22]);
+        let config = openai::OpenAiConfig::resolved(&settings).unwrap();
+        let request = openai::request(&client, &clip, &config).unwrap();
+        let Err(ProviderError::Network(detail)) = execute(&client, request) else {
+            panic!("expected a network error");
+        };
+        assert!(detail.contains("Connect"), "{detail}");
+        assert!(!detail.contains("body error"), "{detail}");
+        assert_eq!(lookups.load(Ordering::SeqCst), 2);
     }
 }

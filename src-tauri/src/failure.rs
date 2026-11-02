@@ -58,7 +58,7 @@ fn provider_message(provider_display_name: &str, error: &ProviderError, fallback
                 "API key rejected. Check Settings."
             }
         }
-        ProviderError::Network(_) => "no network connection. Check your connection.",
+        ProviderError::Network(_) => "could not reach the server. Check your connection.",
         ProviderError::Timeout => "timed out after 30 s. Try again.",
         ProviderError::Http { status: 401, .. } => "invalid API key (401). Check Settings.",
         ProviderError::Http { status: 403, .. } => "API key rejected (403). Check Settings.",
@@ -103,6 +103,7 @@ pub fn notify_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderE
         DICTATION_FAILED,
         &user_message(&provider_name(provider_id), error),
     );
+    log_cause(error);
 }
 
 fn provider_name(provider_id: &str) -> String {
@@ -115,7 +116,7 @@ pub fn command_message(error: &ProviderError) -> String {
     match error {
         ProviderError::MissingConfig(_) => "OpenAI API key missing — open Settings.".into(),
         ProviderError::Auth(_) => "OpenAI rejected the API key. Check Settings.".into(),
-        ProviderError::Network(_) => "no network connection. Check your connection.".into(),
+        ProviderError::Network(_) => "could not reach the server. Check your connection.".into(),
         ProviderError::Timeout => format!(
             "no reply within {} s. Try again.",
             crate::command_mode::responses::TIMEOUT.as_secs()
@@ -137,6 +138,7 @@ pub fn notify_command_error(app: &tauri::AppHandle, error: &ProviderError) {
         COMMAND_FAILED,
         &format!("Command mode: {}", command_message(error)),
     );
+    log_cause(error);
 }
 
 pub fn notify_instruction_error(app: &tauri::AppHandle, provider_id: &str, error: &ProviderError) {
@@ -145,6 +147,13 @@ pub fn notify_instruction_error(app: &tauri::AppHandle, provider_id: &str, error
         COMMAND_FAILED,
         &instruction_message(&provider_name(provider_id), error),
     );
+    log_cause(error);
+}
+
+/// The toast keeps to trusted summaries; the log also gets the cause, keys
+/// redacted, so a failure can be diagnosed afterwards (PARLA-108).
+fn log_cause(error: &ProviderError) {
+    crate::log::error(&format!("  cause: {error}"));
 }
 
 fn notify_failure(app: &tauri::AppHandle, title: &str, message: &str) {
@@ -451,7 +460,7 @@ mod tests {
             ),
             (
                 ProviderError::Network("dns sk-secret".into()),
-                "no network connection. Check your connection.",
+                "could not reach the server. Check your connection.",
             ),
             (
                 ProviderError::MissingConfig("OpenAI API key".into()),
@@ -497,7 +506,7 @@ mod tests {
             ),
             (
                 ProviderError::Network("private request".into()),
-                "Parakeet: no network connection. Check your connection.",
+                "Parakeet: could not reach the server. Check your connection.",
             ),
             (
                 ProviderError::Timeout,

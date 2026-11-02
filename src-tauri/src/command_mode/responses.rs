@@ -342,16 +342,18 @@ pub fn send(api_key: &str, request: &Request) -> Result<Reply, ProviderError> {
     let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
         .map_err(|_| ProviderError::Auth("Invalid OpenAI API key header".into()))?;
     authorization.set_sensitive(true);
-    let response = openai::client()?
+    let client = openai::client()?;
+    let request = client
         .post(ENDPOINT)
         .timeout(TIMEOUT)
         .header(AUTHORIZATION, authorization)
         .header(CONTENT_TYPE, "application/json")
         .body(body(request).to_string())
-        .send()
-        .map_err(openai::map_transport)?;
+        .build()
+        .map_err(crate::provider::transport_error)?;
+    let response = crate::provider::execute(client, request)?;
     let status = response.status().as_u16();
-    let text = response.text().map_err(openai::map_transport)?;
+    let text = response.text().map_err(crate::provider::transport_error)?;
     parse(status, &text)
 }
 

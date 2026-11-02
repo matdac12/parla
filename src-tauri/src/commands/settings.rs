@@ -179,6 +179,7 @@ fn sync_model_residency(shared: &SharedSettings, previous: &Settings) {
         crate::provider::parakeet::reload(&current);
     } else if current.active_provider != previous.active_provider {
         crate::provider::parakeet::sync_residency(&current);
+        crate::dns::warm_provider(&current.active_provider);
     }
 }
 

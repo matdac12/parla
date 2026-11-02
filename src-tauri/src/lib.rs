@@ -8,6 +8,7 @@ pub mod clip;
 pub mod command_mode;
 mod commands;
 pub mod dim;
+mod dns;
 pub mod failure;
 mod flow;
 pub mod focus_probe;
@@ -96,6 +97,8 @@ pub fn run() {
                 settings::Settings::default()
             });
             models::setup(app.handle(), &config)?;
+            // So the first dictation finds the API's address cached (PARLA-108).
+            dns::warm_provider(&config.active_provider);
             // Undoes a dim left by a crash, off the main thread.
             if let Ok(dir) = app.path().app_config_dir() {
                 dim::setup(&dir);

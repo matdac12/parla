@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::OnceLock, time::Duration};
 
 pub const DEFAULT_MODEL: &str = "gpt-transcribe";
+pub(crate) const HOST: &str = "api.openai.com";
 const ENDPOINT: &str = "https://api.openai.com/v1/audio/transcriptions";
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -96,9 +97,9 @@ impl SttProvider for OpenAi {
         let config = OpenAiConfig::resolved(settings)?;
         let client = client()?;
         let request = request(client, clip, &config)?;
-        let response = client.execute(request).map_err(map_transport)?;
+        let response = super::execute(client, request)?;
         let status = response.status().as_u16();
-        let body = response.text().map_err(map_transport)?;
+        let body = response.text().map_err(super::transport_error)?;
         parse_response(status, &body)
     }
 }
@@ -106,10 +107,11 @@ impl SttProvider for OpenAi {
 /// The shared client's connect timeout; Traccia's probe budget derives from it.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The connect timeout and pool settings every Parla client shares; the
-/// Traccia client adds its own redirect policy (PARLA-86).
+/// The connect timeout, pool settings and cached DNS (PARLA-108) every Parla
+/// client shares; the Traccia client adds its own redirect policy (PARLA-86).
 pub(crate) fn client_builder() -> reqwest::blocking::ClientBuilder {
     Client::builder()
+        .dns_resolver(crate::dns::resolver())
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(30))
@@ -140,9 +142,12 @@ pub fn prewarm(settings: &Settings) {
     let _ = std::thread::Builder::new()
         .name("parla-openai-prewarm".into())
         .spawn(|| {
-            if let Ok(response) =
-                client().and_then(|client| client.get(PREWARM_URL).send().map_err(map_transport))
-            {
+            if let Ok(response) = client().and_then(|client| {
+                client
+                    .get(PREWARM_URL)
+                    .send()
+                    .map_err(super::transport_error)
+            }) {
                 // Read to the end, or the connection is not pooled.
                 let _ = response.bytes();
             }
@@ -150,7 +155,11 @@ pub fn prewarm(settings: &Settings) {
 }
 const PREWARM_URL: &str = "https://api.openai.com/v1/models";
 
-fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Request, ProviderError> {
+pub(crate) fn request(
+    client: &Client,
+    clip: &Clip,
+    config: &OpenAiConfig,
+) -> Result<Request, ProviderError> {
     config.validate()?;
     crate::settings::validate_vocabulary(&config.vocabulary)
         .map_err(ProviderError::MissingConfig)?;
@@ -188,23 +197,13 @@ fn request(client: &Client, clip: &Clip, config: &OpenAiConfig) -> Result<Reques
         reqwest::header::HeaderValue::from_str(&format!("Bearer {}", config.api_key))
             .map_err(|_| ProviderError::MissingConfig("Invalid OpenAI API key header".into()))?;
     authorization.set_sensitive(true);
-    client
+    let request = client
         .post(ENDPOINT)
         .header(reqwest::header::AUTHORIZATION, authorization)
         .multipart(form)
         .build()
-        .map_err(map_transport)
-}
-
-pub(crate) fn map_transport(error: reqwest::Error) -> ProviderError {
-    classify_transport(error.is_timeout(), error.without_url().to_string())
-}
-fn classify_transport(timeout: bool, message: String) -> ProviderError {
-    if timeout {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(message)
-    }
+        .map_err(super::transport_error)?;
+    super::buffered(request)
 }
 fn parse_response(status: u16, body: &str) -> Result<String, ProviderError> {
     // Never retain remote error bodies: they may echo masked keys, transcript
@@ -328,14 +327,6 @@ mod tests {
             parse_response(408, "private body"),
             Err(ProviderError::Timeout)
         );
-        assert_eq!(
-            classify_transport(true, "timed out".into()),
-            ProviderError::Timeout
-        );
-        assert!(matches!(
-            classify_transport(false, "offline".into()),
-            ProviderError::Network(_)
-        ));
     }
     #[test]
     fn multipart_contains_wav_model_json_and_optional_language() {

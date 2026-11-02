@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::OnceLock, time::Duration};
 
 pub const DEFAULT_MODEL: &str = "grok-voice-transcribe-2.0";
+pub(crate) const HOST: &str = "api.x.ai";
 const ENDPOINT: &str = "https://api.x.ai/v1/stt";
 /// xAI's batch endpoint accepts up to 500 MB; guard well below it.
 const MAX_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
@@ -84,9 +85,9 @@ impl SttProvider for Xai {
         let config = XaiConfig::resolved(settings)?;
         let client = client()?;
         let request = request(client, clip, &config)?;
-        let response = client.execute(request).map_err(map_transport)?;
+        let response = super::execute(client, request)?;
         let status = response.status().as_u16();
-        let body = response.text().map_err(map_transport)?;
+        let body = response.text().map_err(super::transport_error)?;
         parse_response(status, &body)
     }
 }
@@ -95,11 +96,8 @@ fn client() -> Result<&'static Client, ProviderError> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            Client::builder()
-                .connect_timeout(Duration::from_secs(5))
+            super::openai::client_builder()
                 .timeout(Duration::from_secs(30))
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .map_err(|e| e.to_string())
         })
@@ -142,23 +140,13 @@ fn request(client: &Client, clip: &Clip, config: &XaiConfig) -> Result<Request, 
         reqwest::header::HeaderValue::from_str(&format!("Bearer {}", config.api_key))
             .map_err(|_| ProviderError::MissingConfig("Invalid xAI API key header".into()))?;
     authorization.set_sensitive(true);
-    client
+    let request = client
         .post(ENDPOINT)
         .header(reqwest::header::AUTHORIZATION, authorization)
         .multipart(form)
         .build()
-        .map_err(map_transport)
-}
-
-fn map_transport(error: reqwest::Error) -> ProviderError {
-    classify_transport(error.is_timeout(), error.without_url().to_string())
-}
-fn classify_transport(timeout: bool, message: String) -> ProviderError {
-    if timeout {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(message)
-    }
+        .map_err(super::transport_error)?;
+    super::buffered(request)
 }
 fn parse_response(status: u16, body: &str) -> Result<String, ProviderError> {
     // Never retain remote error bodies: they may echo masked keys, transcript
@@ -282,14 +270,6 @@ mod tests {
                 })
             );
         }
-        assert_eq!(
-            classify_transport(true, "timed out".into()),
-            ProviderError::Timeout
-        );
-        assert!(matches!(
-            classify_transport(false, "offline".into()),
-            ProviderError::Network(_)
-        ));
     }
     #[test]
     fn multipart_puts_model_and_options_before_file() {
