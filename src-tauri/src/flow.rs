@@ -548,14 +548,7 @@ fn finish_session_with_error(
                                 deliver(
                                     completion.focus.as_ref(),
                                     stripped.unwrap_or(text),
-                                    |text| {
-                                        inserter::paste_text_with_options(
-                                            text,
-                                            delay,
-                                            settings.paste_compatibility_mode,
-                                            stripped.is_some(),
-                                        )
-                                    },
+                                    |text| inserter::paste(text, delay, stripped.is_some()),
                                 )
                             } else {
                                 // Retried from the app window: the history entry

@@ -29,7 +29,7 @@ mockIPC((command, args) => {
   ipcCalls.push({ command, args });
   switch (command) {
     case "get_settings": return {
-      active_provider: "openai", hotkey: "Ctrl+Alt+Space", restore_delay_ms: 250, paste_compatibility_mode: false,
+      active_provider: "openai", hotkey: "Ctrl+Alt+Space", restore_delay_ms: 250,
       auto_send: false, safety_net: false, streaming_enabled: true, live_captions: true, local_model: "",
       dim_other_audio: false, dim_audio_level: 50,
       command: { enabled: false, hotkey: "LCtrl+Shift", model: "", reasoning_effort: "none", reminders: false },
@@ -218,9 +218,9 @@ await check("provider choice saves immediately and preserves unrelated draft edi
   assert(selectedProvider === "xai", "Failed provider save changed the active provider");
   rejectProviderSelection = false;
 });
-await check("compatibility preference saves without modifying language detection", async () => {
+await check("clipboard preference saves without modifying language detection", async () => {
   go("clipboard");
-  const checkbox = document.getElementById("paste-compatibility");
+  const checkbox = document.getElementById("auto-send");
   checkbox.checked = true;
   checkbox.dispatchEvent(new Event("change"));
   for (const id of ["streaming-enabled", "live-captions"]) {
@@ -231,7 +231,7 @@ await check("compatibility preference saves without modifying language detection
   }
   document.getElementById("settings-form").requestSubmit();
   await settle();
-  assert(savedSettings?.paste_compatibility_mode === true, "Compatibility preference was not saved");
+  assert(savedSettings?.auto_send === true, "Auto-send preference was not saved");
   assert(savedSettings.streaming_enabled === false && savedSettings.live_captions === false, "Live preferences were not saved independently");
   assert(!savedSettings.providers.openai?.language, "Language detection was changed");
 });

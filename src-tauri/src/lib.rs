@@ -2,7 +2,6 @@ use log::log_error;
 use tauri::Manager;
 
 mod autostart;
-mod bench;
 mod card;
 pub mod clip;
 pub mod command_mode;
@@ -105,8 +104,6 @@ pub fn run() {
             }
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(config)));
             app.manage(failure::LastFailedClip::default());
-            app.manage(bench::BenchSession::default());
-            app.manage(failure::RetryLock::default());
             app.manage(commands::settings::SaveLock::default());
             app.manage(setup::MicMeter::default());
             if let Err(error) = history::setup(app) {
@@ -147,11 +144,6 @@ pub fn run() {
             commands::models::model_status,
             commands::models::list_models,
             commands::models::download_model,
-            commands::bench::bench_start_recording,
-            commands::bench::bench_stop_recording,
-            commands::bench::bench_clip,
-            commands::bench::bench_run,
-            commands::bench::bench_runs,
             commands::app::get_stats,
             commands::app::open_window,
             commands::app::flyout_ready,

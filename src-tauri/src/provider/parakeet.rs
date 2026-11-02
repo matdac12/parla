@@ -90,7 +90,7 @@ fn with_model<T>(
 /// Bumped by every model use, so a delayed release never drops a model that
 /// was used again in the meantime.
 static USES: AtomicU64 = AtomicU64::new(0);
-/// How long a non-active model (e.g. loaded by the bench) stays resident.
+/// How long a non-active model (e.g. loaded by a provider test) stays resident.
 const IDLE_RELEASE: Duration = Duration::from_secs(60);
 
 fn release_when_idle(use_id: u64) {

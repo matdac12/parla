@@ -12,6 +12,7 @@ import {
   formatSize,
   must,
   parseShortcut,
+  renderShortcut,
   setStatusLine,
   type DictationRecord,
   type LocalModelStatus,
@@ -63,28 +64,6 @@ async function engineNow(): Promise<{ settings: Settings; providers: ProviderInf
     invoke<LocalModelStatus[]>("list_models"),
   ]);
   return { settings, providers, models };
-}
-
-/** Same rows as the Home page's shortcut box. */
-function renderShortcut(target: HTMLElement, hotkey: string): void {
-  const { keys, modifiers, hold } = parseShortcut(hotkey);
-  const rows: [string, Node[]][] = hold
-    ? [
-        ["Push to talk", [document.createTextNode("Hold "), ...combo(modifiers)]],
-        ["Hands-free", [document.createTextNode("Tap "), ...combo(keys)]],
-        ["Cancel", combo(["Esc"])],
-      ]
-    : [
-        ["Start / stop", [document.createTextNode("Tap "), ...combo(keys)]],
-        ["Cancel", combo(["Esc"])],
-      ];
-  target.replaceChildren(
-    ...rows.flatMap(([label, parts]) => {
-      const dd = el("dd");
-      dd.append(...parts);
-      return [el("dt", undefined, label), dd];
-    }),
-  );
 }
 
 // --- Welcome ---------------------------------------------------------------

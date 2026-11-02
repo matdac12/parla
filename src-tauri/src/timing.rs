@@ -11,8 +11,8 @@ use tauri::{Emitter, Manager};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictationRecord {
     pub id: String,
-    /// Row origin in `history.jsonl`; PARLA-10 reuses the file for `benchmark`
-    /// rows and command mode for `command` rows. `#[serde(default)]` keeps older rows loadable.
+    /// Row origin in `history.jsonl`: `dictation`, `command`, or `benchmark`
+    /// on rows from before PARLA-109 removed the benchmark. `#[serde(default)]` keeps older rows loadable.
     #[serde(default = "default_kind")]
     pub kind: String,
     pub started_at: u64,
@@ -24,10 +24,6 @@ pub struct DictationRecord {
     pub audio_ms: u64,
     pub text: String,
     pub error: Option<String>,
-    /// Groups the per-provider rows of one benchmark run (PARLA-10). Absent on
-    /// dictation rows and on rows written before the benchmark existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bench_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcription_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,7 +115,6 @@ impl DictationRecord {
             audio_ms: 0,
             text: String::new(),
             error: None,
-            bench_run_id: None,
             transcription_mode: None,
             model: None,
             stream_error: None,
@@ -160,8 +155,7 @@ pub const COMMAND_KIND: &str = "command";
 
 /// Per-stage latencies derived from the monotonic offsets (which are relative
 /// to key-up). A stage is `None` when either endpoint is missing, so partial
-/// or failed dictations do not report a bogus zero. Shared by the history view
-/// and available to the benchmark view (PARLA-10).
+/// or failed dictations do not report a bogus zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StageMs {
     /// Key-up to audio ready.

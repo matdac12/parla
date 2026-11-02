@@ -41,8 +41,8 @@ const MAX_METERING: Duration = Duration::from_secs(60);
 const METER_TICK: Duration = Duration::from_millis(40);
 
 /// The Microphone step's live level. It records into nothing: the clip is
-/// dropped unread. While it runs it holds the dictation guard, like the
-/// benchmark's recording, so a hotkey press cannot meet it halfway.
+/// dropped unread. While it runs it holds the dictation guard, so a hotkey
+/// press cannot meet it halfway.
 #[derive(Default)]
 pub struct MicMeter {
     running: Mutex<Option<(u64, DictationGuard)>>,

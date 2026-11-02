@@ -1,5 +1,4 @@
 pub mod app;
-pub mod bench;
 pub mod card;
 pub mod failure;
 pub mod history;

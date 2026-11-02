@@ -172,10 +172,9 @@ pub fn act(app: &tauri::AppHandle, generation: u64, action: Action) {
             };
             let settings = settings();
             outcome(
-                crate::inserter::paste_text_with_options(
+                crate::inserter::paste(
                     &card.text,
                     std::time::Duration::from_millis(settings.restore_delay_ms),
-                    settings.paste_compatibility_mode,
                     false,
                 )
                 .map(|_| done),

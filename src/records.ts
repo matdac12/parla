@@ -90,7 +90,6 @@ export interface Settings {
   active_provider: string;
   hotkey: string;
   restore_delay_ms: number;
-  paste_compatibility_mode: boolean;
   auto_send: boolean;
   safety_net: boolean;
   streaming_enabled: boolean;
@@ -160,6 +159,27 @@ export function combo(keys: string[]): Node[] {
     const kbd = el("kbd", undefined, label);
     return index === 0 ? [kbd] : [el("span", "plus", "+"), kbd];
   });
+}
+
+/** The shortcut's rows (push to talk, hands-free, cancel) as <dt>/<dd>
+ *  pairs, for Home and the setup wizard. */
+export function renderShortcut(target: HTMLElement, hotkey: string): void {
+  const { keys, modifiers, hold } = parseShortcut(hotkey);
+  const rows: [string, ...(string | Node[])[]][] = hold
+    ? [
+        ["Push to talk", "Hold ", combo(modifiers)],
+        ["Hands-free", "Tap ", combo(keys), [el("span", "muted", " · "), ...combo(modifiers), el("span", "muted", " stops")]],
+        ["Cancel", combo(["Esc"])],
+      ]
+    : [
+        ["Start / stop", "Tap ", combo(keys)],
+        ["Cancel", combo(["Esc"])],
+      ];
+  target.replaceChildren(...rows.flatMap(([label, ...parts]) => {
+    const dd = el("dd");
+    for (const part of parts) dd.append(...(typeof part === "string" ? [part] : part));
+    return [el("dt", undefined, label), dd];
+  }));
 }
 
 async function copyText(text: string): Promise<void> {

@@ -14,7 +14,6 @@ pub struct Settings {
     pub active_provider: String,
     pub hotkey: String,
     pub restore_delay_ms: u64,
-    pub paste_compatibility_mode: bool,
     /// Press Enter after pasting a dictation that ends in "send"/"invia" (PARLA-58).
     pub auto_send: bool,
     /// Probe at key-down whether the focus accepts text (PARLA-79); off, no
@@ -103,7 +102,6 @@ impl Default for Settings {
             active_provider: "openai".into(),
             hotkey: crate::hotkey::DEFAULT_SHORTCUT.into(),
             restore_delay_ms: crate::inserter::DEFAULT_RESTORE_DELAY_MS,
-            paste_compatibility_mode: false,
             auto_send: true,
             safety_net: true,
             streaming_enabled: true,

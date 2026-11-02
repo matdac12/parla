@@ -15,8 +15,7 @@ use tauri::{
 };
 
 /// The right-click menu, top to bottom, as `(id, label)`. The first item is
-/// the default (bold on Windows). History and Timings live in the app window;
-/// Benchmark is linked from its sidebar rail.
+/// the default (bold on Windows). History and Timings live in the app window.
 const MENU: [(&str, &str); 6] = [
     ("open", "Open Parla"),
     ("settings", "Settings…"),
@@ -77,7 +76,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .build(app)?;
 
     // Only the recording overlay is kept warm. Secondary windows are created
-    // by open_app/open_bench and destroyed normally when the user closes them;
+    // by open_app/open_setup and destroyed normally when the user closes them;
     // the flyout is created per left-click and destroyed when it loses focus.
     Ok(())
 }
@@ -98,10 +97,6 @@ fn make_first_item_default<R: tauri::Runtime>(menu: &Menu<R>) {
 /// "timings", …) or "settings" for the first settings page.
 pub(crate) fn open_app(app: &tauri::AppHandle, view: &str) {
     queue_window(app, "app", view);
-}
-
-pub(crate) fn open_bench(app: &tauri::AppHandle) {
-    queue_window(app, "bench", "");
 }
 
 /// Opens the setup wizard: `first_run` on a new install (defaults on, as the
@@ -159,7 +154,6 @@ fn ensure_window(
     let (title, url, width, height) = match label {
         // app.ts maps an unknown page to Home.
         "app" => ("Parla", format!("app.html#{view}"), 900.0, 680.0),
-        "bench" => ("Parla Benchmark", "bench.html".into(), 960.0, 640.0),
         "setup" => ("Parla setup", format!("setup.html#{view}"), 560.0, 660.0),
         _ => return Err(tauri::Error::WindowNotFound),
     };
@@ -179,36 +173,6 @@ fn ensure_window(
                 // write takes the save lock: keep both off the event loop.
                 let handle = handle.clone();
                 std::thread::spawn(move || crate::setup::closed(&handle));
-            }
-        });
-    }
-    if label == "bench" {
-        if let Some(session) = app.try_state::<crate::bench::BenchSession>() {
-            session.open_window();
-        }
-        let target = window.clone();
-        window.on_window_event(move |event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let recording = target
-                    .app_handle()
-                    .try_state::<crate::bench::BenchSession>()
-                    .is_some_and(|session| {
-                        // Invalidates an in-flight start before it can publish
-                        // a capture whose controls have already been destroyed.
-                        session.close_window();
-                        session.is_recording()
-                    });
-                if recording {
-                    // Finish capture before destroying its controls. Otherwise
-                    // reopening resets the UI while the old recording retains
-                    // the dictation guard until the 30-second timer expires.
-                    api.prevent_close();
-                    let target = target.clone();
-                    std::thread::spawn(move || {
-                        crate::commands::bench::finish_recording(target.app_handle(), None);
-                        let _ = target.destroy();
-                    });
-                }
             }
         });
     }
@@ -750,7 +714,7 @@ mod tests {
                 setup(app)?;
                 crate::overlay::setup(app)?;
                 assert!(app.get_webview_window("overlay").is_some());
-                for label in ["app", "bench"] {
+                for label in ["app", "setup"] {
                     assert!(
                         app.get_webview_window(label).is_none(),
                         "{label} was eagerly created"
@@ -795,7 +759,7 @@ mod tests {
                         <= 1.0
                 );
                 drop(captioned);
-                for label in ["app", "bench", "app"] {
+                for label in ["app", "setup", "app"] {
                     let (done, completed) = std::sync::mpsc::channel();
                     let target = handle.clone();
                     handle

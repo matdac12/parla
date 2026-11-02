@@ -19,7 +19,7 @@ stays automatic unless you explicitly configured a provider language.
 
 The full recording is retained. If the connection fails, the queue overflows,
 or a usable final result does not arrive within the bounded wait, Parla sends
-the saved clip through the existing batch path. Local Parakeet, benchmarks and
+the saved clip through the existing batch path. Local Parakeet and
 retries continue using whole clips. Latency records include the model and
 `streaming`, `batch` or `batch_fallback` mode.
 
@@ -29,8 +29,7 @@ retries continue using whole clips. Latency records include the model and
 
 **Open Parla** in the tray opens the main window: a sidebar on the left with a
 **Ready · <engine>** status line (the active provider, or the local model's name),
-then **Home**, **History**, **Timings** and five settings pages. **Benchmark ↗**
-at the bottom opens the benchmark window.
+then **Home**, **History**, **Timings** and five settings pages.
 
 - **Home** shows your shortcut (push to talk, hands-free, cancel) as set in
   Settings, with a **Test mic** button that does what the tray item does. When the
@@ -60,8 +59,8 @@ at the bottom opens the benchmark window.
 
 The totals are kept in `stats.json` next to `history.jsonl`, so clearing the
 history does not reset them. A word is a whitespace-separated token of a
-transcript that was pasted successfully; failures, benchmark rows and command
-runs are not counted, so words, dictations and audio time are about dictation
+transcript that was pasted successfully; failures, command runs and benchmark
+rows from older versions are not counted, so words, dictations and audio time are about dictation
 only. On first run the counters start from whatever is already in
 `history.jsonl`, by the same rules.
 Counter updates appear immediately; a dedicated writer persists them in order
@@ -72,8 +71,8 @@ streaming) multiplied by built-in list prices in `src-tauri/src/pricing.rs`
 (checked 2026-10-15: xAI $0.10/h batch and $0.20/h streaming; OpenAI
 `gpt-transcribe` $0.0045/min, `gpt-live-transcribe` $0.017/min; Parakeet free).
 A provider counts as billed when it returned a transcript, even if pasting then
-failed. A live session that fell back to batch is counted twice. Benchmark runs
-add to cost but not to words, dictations or audio time. A command run adds the
+failed. A live session that fell back to batch is counted twice. Benchmark rows from
+older versions add to cost but not to words, dictations or audio time. A command run adds the
 transcription of its instruction (billed like a dictation) and its LLM tokens:
 `tokens_in` and `tokens_out` × the model's list price per million tokens
 (`gpt-6-luna` $0.10 in and $0.50 out, checked 2026-10-17). Tokens count
@@ -87,7 +86,7 @@ once.
 Settings are split into **Transcription** (provider, keys, models, local
 model), **Dictation & hotkey** (shortcut, the **Command mode** card, live
 transcription and captions), **Other audio** ([dimming](#dimming-other-audio)),
-**Vocabulary** and **Clipboard** (paste compatibility, restore delay). A **Startup
+**Vocabulary** and **Clipboard** (auto-send, Safety Net, restore delay). A **Startup
 and setup** card at the end of **Dictation & hotkey** holds
 [Start with Windows](#start-with-windows) and **Run setup again**. Switching
 provider or local model applies at once. Other edits show a **Save** bar at the
@@ -154,7 +153,7 @@ so it costs nothing while closed.
 - **Retry last failed dictation** — enabled only while a recovery clip exists.
 - **Quit Parla** — exits Parla.
 
-History, Timings and Benchmark are reached from the main window's sidebar.
+History and Timings are reached from the main window's sidebar.
 
 ### First-run setup
 
@@ -171,7 +170,7 @@ nothing.
    bar that turns green once it hears you. Parla records from the default
    device only, so **Windows sound settings** opens the page where it is chosen
    (the step re-checks when you come back). While the bar runs it holds the
-   microphone like a benchmark recording does, so a hotkey press waits; it
+   microphone, so a hotkey press waits; it
    stops when you leave the step, and by itself after a minute.
 3. **Speech engine:** **Cloud** (OpenAI or xAI Grok, with a key field; a key
    already set, or in `OPENAI_API_KEY` / `XAI_API_KEY`, counts) or **Local**
@@ -263,8 +262,6 @@ Parla saves any nonempty text clipboard; after the paste and a delay it
 restores that text (best effort). The transcript is raw: no
 filler removal or rewriting.
 Pasting uses a 15 ms clipboard settle delay and a 25 ms modifier hold.
-Enable **Paste compatibility mode** in Settings to use the original 100 ms
-delays for apps that need them. The separate clipboard restore delay is unchanged.
 
 **Auto-send** (Settings, on by default, `auto_send`): when a dictation's last
 word is "send" or "invia" (any case, trailing punctuation ignored, whole word
@@ -595,7 +592,6 @@ defaults. Example:
   "active_provider": "openai",
   "hotkey": "Ctrl+Alt+Space",
   "restore_delay_ms": 250,
-  "paste_compatibility_mode": false,
   "auto_send": true,
   "safety_net": true,
   "local_model": "parakeet-v3",
@@ -663,9 +659,13 @@ spoken numbers and currencies are normalized. The batch endpoint accepts up to
 500 MB.
 
 Both cloud providers share one connection-reusing rustls HTTP client with a 5 s
-connect timeout and a 30 s total request timeout, and neither retries
-automatically. There is no local latency comparison yet; set a different model
-to benchmark alternatives (for example `gpt-4o-mini-transcribe`).
+connect timeout and a 30 s total request timeout. A request whose connection
+fails is sent once more; nothing reached the server, so it cannot be billed
+twice. The API's address is looked up once, at startup or on a provider switch,
+and kept in memory, so a slow DNS server (some VPNs push one) never delays a
+dictation; it is looked up again in the background only after a connection to
+it fails (PARLA-108). To compare models, set a different one (for example
+`gpt-4o-mini-transcribe`) and compare the Timings page.
 
 ## Local model (Parakeet v3 or Parakeet Ultra)
 
@@ -832,8 +832,8 @@ Every completed dictation (success or failure) is appended as one JSON object pe
 line to **`%APPDATA%\com.matdac6.parla\history.jsonl`** on Windows
 (`~/.local/share/com.matdac6.parla/history.jsonl` on Linux). The file is
 append-only and written on a background thread after the paste, so it never
-blocks dictation. A `kind` field (`"dictation"`, `"benchmark"` or `"command"`)
-separates the kinds of row. Command rows (see
+blocks dictation. A `kind` field (`"dictation"` or `"command"`; `"benchmark"` on rows from
+older versions, which are hidden) separates the kinds of row. Command rows (see
 [Command mode](#command-mode-experimental)) are listed in the main window next
 to dictations; the tray flyout shows dictations only.
 
@@ -849,41 +849,6 @@ Both pages update live, and **Clear history…** on the History page truncates
 the file after a confirmation. Reads are bounded: the window requests the
 newest 200 rows at a time and the backend walks the file backwards, so a large
 history never has to fit in memory; corrupt lines are skipped.
-
-## Benchmark
-
-**Benchmark ↗** at the bottom of the main window's sidebar compares providers
-on your own voice and network.
-
-1. Click **Record clip**, speak, click **Stop recording** (it stops by itself
-   after 30 s). Hotkey dictation is blocked while the benchmark owns the
-   microphone.
-   Closing the benchmark window stops an active recording and keeps the clip
-   available when the window is reopened.
-2. Click **Run benchmark**. The clip goes through every registered provider in
-   turn; each row fills in as its provider finishes. **Run again** re-runs the
-   same clip, so runs compare identical audio. Providers that are not configured
-   appear as rows with the reason and are not called; one provider failing shows
-   its error and does not stop the others.
-
-What the numbers mean:
-
-- **Request** — time in the provider's transcribe call (encoding, upload, server
-  time, and download for cloud providers; inference for Parakeet).
-- **Total** — from handing the clip to that provider until its text is ready. A
-  benchmark has no key-up, so "clip ready" stands in for it; expect Request plus
-  a few milliseconds.
-
-Providers run sequentially. Cloud providers get no warm-up, so the first request
-includes TLS setup, like the first dictation after a pause. Local Parakeet is
-warmed with an untimed half-second of silence so its model load is not counted.
-The fastest successful row is highlighted.
-
-Storage: each provider result is a row in `history.jsonl` with
-`kind: "benchmark"` and a shared `bench_run_id`; the **Previous runs** list
-rebuilds runs from those rows. The clip is saved as `clips/bench-<id>.wav` in the
-app data directory. To compare providers, record the same ~5 s sentence a few
-times and compare Request across runs rather than trusting a single run.
 
 ## When something fails
 
@@ -972,7 +937,7 @@ total, of which `parla.exe` itself is only about 40 MB. Nearly all of the rest i
 the WebView2 browser processes behind the four hidden windows of the time (main,
 a separate history window since retired, benchmark, pill). With the local Parakeet model loaded, `parla.exe` grows by about
 700 MB (about 1.4 GB working set in total). These are single measurements, not
-benchmarks. Main and benchmark windows are now created on demand and
+benchmarks. The main window is now created on demand and
 destroyed on close; the pill stays warm. The tray flyout (PARLA-60, measured
 2026-10-17 on an i7-1370P at 150 % scaling, Parakeet loaded, 10 open/close
 cycles) appears 122–162 ms after the click (median ~130 ms), adds one WebView2
@@ -989,8 +954,7 @@ all of it in Windows' `audiodg`. Model unloading is not implemented.
 
 CI compiles and unit-tests on Linux and on the Windows runner. On a real Windows
 machine the maintainer has so far confirmed: the app starts in the tray; OpenAI,
-xAI and local Parakeet dictation paste into text fields; the benchmark view runs
-all three providers; hold-to-talk, hands-free, Esc cancel and the recording pill
+xAI and local Parakeet dictation paste into text fields; hold-to-talk, hands-free, Esc cancel and the recording pill
 behave as described. Still unchecked: Windows Terminal, elevated windows,
 lock/sleep recovery, notification delivery, clipboard restore under load, and
 the failure/retry path.
@@ -1050,8 +1014,8 @@ keeps automatic language detection; local Parakeet is unchanged.
 Cloud setup starts during the initial 300 ms hold grace. Audio stays buffered
 locally until the grace expires, and rejected holds or recording cancellation
 close setup without uploading audio. The complete original recording is kept
-for recovery; successful streaming skips full-clip batch conversion. Retry,
-local transcription and benchmarks still receive the complete 16 kHz clip.
+for recovery; successful streaming skips full-clip batch conversion. Retry and
+local transcription still receive the complete 16 kHz clip.
 
 History records may include `stream_setup_ms` and `first_caption_ms`, measured
 from streaming session start, unlike release-relative delivery stages. These

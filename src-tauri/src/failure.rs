@@ -19,9 +19,6 @@ pub struct FailedDictation {
     pub error: ProviderError,
 }
 pub type LastFailedClip = Mutex<Option<FailedDictation>>;
-/// Serializes retry requests, including lazy disk loading, without holding the clip mutex.
-#[derive(Default)]
-pub struct RetryLock(Mutex<()>);
 pub struct RetryMenu(pub tauri::menu::MenuItem<tauri::Wry>);
 
 /// Only trusted summaries are displayed: raw server, transport and config strings
@@ -280,19 +277,6 @@ fn load_clip(path: &Path) -> anyhow::Result<Option<FailedDictation>> {
 fn take_failed(failed: &LastFailedClip) -> Option<FailedDictation> {
     failed.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
-fn prefer_latest(
-    failed: &LastFailedClip,
-    candidate: Option<FailedDictation>,
-) -> Option<FailedDictation> {
-    take_failed(failed).or(candidate)
-}
-fn restore_failed(failed: &LastFailedClip, clip: FailedDictation) {
-    // An active dictation may have failed while retry was checking admission.
-    failed
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert(clip);
-}
 fn set_retry_enabled(app: &tauri::AppHandle, enabled: bool) {
     if let Some(menu) = app.try_state::<RetryMenu>() {
         if let Err(error) = menu.0.set_enabled(enabled) {
@@ -349,19 +333,25 @@ pub fn retry_with_pill(app: &tauri::AppHandle) -> Result<(), String> {
 /// Must run on a blocking worker. No clip/settings mutex is held across provider
 /// work or paste. The clipboard restore runs later, outside the admission guard.
 pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), String> {
-    let retry_lock = app.state::<RetryLock>();
-    let Ok(_retry) = retry_lock.0.try_lock() else {
+    // The gate first: a dictation only fails while it holds the gate, so no
+    // newer failure can land while the clip is taken (PARLA-109).
+    let state = app.state::<DictationState>();
+    let Some(_guard) = state.try_begin() else {
         notify_info(app, "Busy, try again");
         return Err("Busy, try again".into());
     };
     let failed = app.state::<LastFailedClip>();
     let saved = match take_failed(&failed) {
-        Some(saved) => Some(saved),
+        Some(saved) => saved,
         None => match clip_path(app)
             .map_err(anyhow::Error::from)
             .and_then(|path| load_clip(&path))
         {
-            Ok(saved) => saved,
+            Ok(Some(saved)) => saved,
+            Ok(None) => {
+                set_retry_enabled(app, false);
+                return Err("No failed dictation to retry".into());
+            }
             Err(_) => {
                 notify_failure(
                     app,
@@ -371,21 +361,6 @@ pub fn retry_last_failed(app: &tauri::AppHandle, paste: bool) -> Result<(), Stri
                 return Err("Could not read the saved failed clip".into());
             }
         },
-    };
-    let state = app.state::<DictationState>();
-    let Some(_guard) = state.try_begin() else {
-        if let Some(saved) = saved {
-            restore_failed(&failed, saved);
-            set_retry_enabled(app, true);
-        }
-        notify_info(app, "Busy, try again");
-        return Err("Busy, try again".into());
-    };
-    // The active dictation may have failed between taking the old clip and
-    // acquiring admission. Prefer its newer failure now that we own the gate.
-    let Some(saved) = prefer_latest(&failed, saved) else {
-        set_retry_enabled(app, false);
-        return Err("No failed dictation to retry".into());
     };
     set_retry_enabled(app, false);
     let settings = app
@@ -552,77 +527,6 @@ mod tests {
             assert!(message.chars().count() < 160);
         }
         assert!(user_message("OpenAI", &ProviderError::Auth("HTTP 403".into())).contains("403"));
-    }
-
-    #[test]
-    fn busy_retry_restores_clip_and_releases_mutex_before_admission() {
-        let failed = LastFailedClip::new(Some(FailedDictation {
-            clip: Clip::new(vec![42]),
-            error: ProviderError::Timeout,
-        }));
-        let state = crate::flow::DictationState::default();
-        let guard = state.try_begin().unwrap();
-        let clip = take_failed(&failed).unwrap();
-        assert!(failed.try_lock().is_ok());
-        assert!(state.try_begin().is_none());
-        restore_failed(&failed, clip);
-        assert_eq!(failed.lock().unwrap().as_ref().unwrap().clip.samples, [42]);
-        drop(guard);
-        assert!(state.try_begin().is_some());
-    }
-
-    #[test]
-    fn retry_admitted_after_active_failure_prefers_the_newest_clip() {
-        let failed = LastFailedClip::new(Some(FailedDictation {
-            clip: Clip::new(vec![1]),
-            error: ProviderError::Timeout,
-        }));
-        let state = DictationState::default();
-        let active = state.try_begin().unwrap();
-        let old = take_failed(&failed).unwrap();
-        restore_failed(
-            &failed,
-            FailedDictation {
-                clip: Clip::new(vec![2]),
-                error: ProviderError::Timeout,
-            },
-        );
-        drop(active);
-        let _retry = state.try_begin().unwrap();
-        let newest = prefer_latest(&failed, Some(old)).unwrap();
-        assert_eq!(newest.clip.samples, [2]);
-        assert!(take_failed(&failed).is_none());
-    }
-
-    #[test]
-    fn initially_empty_retry_also_observes_a_new_failure_after_admission() {
-        let failed = LastFailedClip::default();
-        let old = take_failed(&failed);
-        restore_failed(
-            &failed,
-            FailedDictation {
-                clip: Clip::new(vec![3]),
-                error: ProviderError::Timeout,
-            },
-        );
-        assert_eq!(prefer_latest(&failed, old).unwrap().clip.samples, [3]);
-        assert!(take_failed(&failed).is_none());
-    }
-
-    #[test]
-    fn busy_retry_does_not_overwrite_newer_failure() {
-        let failed = LastFailedClip::new(Some(FailedDictation {
-            clip: Clip::new(vec![2]),
-            error: ProviderError::Timeout,
-        }));
-        restore_failed(
-            &failed,
-            FailedDictation {
-                clip: Clip::new(vec![1]),
-                error: ProviderError::Timeout,
-            },
-        );
-        assert_eq!(take_failed(&failed).unwrap().clip.samples, [2]);
     }
 
     #[test]

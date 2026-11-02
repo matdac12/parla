@@ -11,9 +11,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        main: "src/index.html",
         app: "src/app.html",
-        bench: "src/bench.html",
         flyout: "src/flyout.html",
         overlay: "src/overlay.html",
         setup: "src/setup.html",

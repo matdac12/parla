@@ -4,8 +4,8 @@ use crate::history::{History, DEFAULT_LIMIT};
 use tauri::Manager;
 
 /// Dictations, and with `commands` command runs too (the main window's list;
-/// the tray flyout shows dictations only). Benchmark rows belong to the
-/// benchmark window (`bench_runs`).
+/// the tray flyout shows dictations only). Benchmark rows written before the
+/// benchmark window was removed (PARLA-109) stay hidden.
 const DICTATIONS: &[&str] = &["dictation"];
 const DICTATIONS_AND_COMMANDS: &[&str] = &["dictation", crate::timing::COMMAND_KIND];
 

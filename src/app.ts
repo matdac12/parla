@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./app.css";
-import { clock, combo, copyButton, el, fullDate, must, parseShortcut, providerName, reconcile, seconds, type DictationRecord } from "./records";
+import { clock, copyButton, el, fullDate, must, providerName, reconcile, renderShortcut, seconds, type DictationRecord } from "./records";
 // The settings pages live in this window; importing wires their form.
 import { onApplied } from "./settings";
 import { renderTimings } from "./timings";
@@ -118,25 +118,6 @@ function showStats(stats: Stats): void {
   projected.textContent = used < PROJECTION_DAYS
     ? `yearly estimate from ${new Date(stats.first_used_at + PROJECTION_DAYS * DAY_MS).toLocaleDateString()}`
     : `≈ ${formatCost((stats.cost_usd / used) * 365)}/yr vs $${WISPR_FLOW_PER_YEAR} Wispr Flow`;
-}
-
-function showShortcut(hotkey: string): void {
-  const { keys, modifiers, hold } = parseShortcut(hotkey);
-  const rows: [string, ...(string | Node[])[]][] = hold
-    ? [
-        ["Push to talk", "Hold ", combo(modifiers)],
-        ["Hands-free", "Tap ", combo(keys), [el("span", "muted", " · "), ...combo(modifiers), el("span", "muted", " stops")]],
-        ["Cancel", combo(["Esc"])],
-      ]
-    : [
-        ["Start / stop", "Tap ", combo(keys)],
-        ["Cancel", combo(["Esc"])],
-      ];
-  how.replaceChildren(...rows.flatMap(([label, ...parts]) => {
-    const dd = el("dd");
-    for (const part of parts) dd.append(...(typeof part === "string" ? [part] : part));
-    return [el("dt", undefined, label), dd];
-  }));
 }
 
 function wordCount(text: string): number {
@@ -467,7 +448,7 @@ onApplied((applied) => {
   readyText.textContent = `${applied.ready ? "Ready" : "Not ready"} · ${applied.engine}`;
   readyLine.classList.toggle("not-ready", !applied.ready);
   readyLine.title = applied.ready ? "" : (applied.reason ?? "");
-  if (applied.hotkey !== "") showShortcut(applied.hotkey);
+  if (applied.hotkey !== "") renderShortcut(how, applied.hotkey);
 });
 
 document.addEventListener("visibilitychange", () => render());

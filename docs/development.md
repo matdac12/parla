@@ -36,8 +36,7 @@ npm run tauri dev
 
 The dev app starts in the tray. Choose **Open Parla** or **Settings…** in the tray to open its
 window. Closing a secondary window destroys it; choose **Quit Parla** to exit.
-The main and benchmark windows are created only when opened: the main window
-from the tray, the benchmark window from the main window's sidebar. Only the
+The main window is created only when opened from the tray. Only the
 recording pill stays loaded at startup.
 All windows are created after their app state is registered.
 
@@ -92,7 +91,7 @@ Frontend regression checks use the real DOM/modules with Tauri's official IPC
 mocks (pages in `src/tests/`): run `npm run dev`, then open
 `http://localhost:1420/tests/frontend.html` and the same URL with `?settings`.
 The page reports results for row reuse, hidden rendering, 2,000-row updates,
-history-read races, cross-window history clearing, and compatibility settings.
+history-read races, cross-window history clearing, and clipboard settings.
 These test pages are not included in the production bundle.
 
 An opt-in native Windows/WebView2 lifecycle smoke test verifies lazy creation,

@@ -92,7 +92,6 @@ const els = {
   capture: byId<HTMLButtonElement>("capture"),
   captureHint: byId<HTMLParagraphElement>("capture-hint"),
   delay: byId<HTMLInputElement>("delay"),
-  pasteCompatibility: byId<HTMLInputElement>("paste-compatibility"),
   autoSend: byId<HTMLInputElement>("auto-send"),
   safetyNet: byId<HTMLInputElement>("safety-net"),
   streaming: byId<HTMLInputElement>("streaming-enabled"),
@@ -306,18 +305,28 @@ function buildField(providerId: string, spec: FieldSpec): HTMLElement {
   input.autocomplete = "off";
   input.spellcheck = false;
   if (spec.placeholder) input.placeholder = spec.placeholder;
+  // A field with a default stores nothing while it is empty or equal to the
+  // default, so the app's default applies and a later change to it reaches
+  // existing installs (PARLA-109).
+  const isDefault = (value: unknown): boolean =>
+    spec.default !== undefined &&
+    (value === undefined || (typeof value === "string" && (value.trim() === "" || value.trim() === spec.default)));
+  if (spec.default !== undefined) input.placeholder = `${spec.default} (default)`;
   const sync = (): void => {
     const current = config()[spec.key];
-    input.value = typeof current === "string" && current.trim() !== "" ? current : (spec.default ?? "");
+    input.value = typeof current === "string" && !isDefault(current) ? current : "";
   };
   sync();
   fieldSyncs.push(sync);
-  if (spec.default !== undefined && config()[spec.key] !== input.value) {
-    config()[spec.key] = input.value;
+  if (isDefault(config()[spec.key])) {
+    delete config()[spec.key];
   }
   input.addEventListener("input", () => {
-    const empty = input.value.trim() === "";
-    config()[spec.key] = empty ? (spec.default ?? (spec.nullable ? null : "")) : input.value;
+    if (isDefault(input.value)) {
+      delete config()[spec.key];
+    } else {
+      config()[spec.key] = input.value.trim() === "" ? (spec.nullable ? null : "") : input.value;
+    }
     updateDirty();
   });
 
@@ -883,7 +892,6 @@ async function onSettingsChanged(): Promise<void> {
 function fillForm(settings: Settings): void {
   els.hotkey.value = settings.hotkey;
   els.delay.value = String(settings.restore_delay_ms);
-  els.pasteCompatibility.checked = settings.paste_compatibility_mode;
   els.autoSend.checked = settings.auto_send;
   els.safetyNet.checked = settings.safety_net;
   els.streaming.checked = settings.streaming_enabled;
@@ -950,11 +958,6 @@ function wireForm(): void {
     updateDirty();
   });
   els.capture.addEventListener("click", startCapture);
-  els.pasteCompatibility.addEventListener("change", () => {
-    if (!state.settings) return;
-    state.settings.paste_compatibility_mode = els.pasteCompatibility.checked;
-    updateDirty();
-  });
   els.autoSend.addEventListener("change", () => {
     if (!state.settings) return;
     state.settings.auto_send = els.autoSend.checked;
